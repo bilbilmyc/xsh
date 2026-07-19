@@ -1,0 +1,29 @@
+[package]
+name = "desktop"
+version.workspace = true
+description = "XSH cross-platform SSH and SFTP client"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.5.6", features = [] }
+
+[dependencies]
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2.11.5", features = [] }
+tauri-plugin-dialog = "2.6.0"
+tokio.workspace = true
+uuid.workspace = true
+xsh-domain = { path = "../../../crates/xsh-domain" }
+xsh-security = { path = "../../../crates/xsh-security" }
+xsh-sftp = { path = "../../../crates/xsh-sftp" }
+xsh-ssh = { path = "../../../crates/xsh-ssh" }
+xsh-storage = { path = "../../../crates/xsh-storage" }
+zeroize.workspace = true

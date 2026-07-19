@@ -1,0 +1,100 @@
+name: Build desktop artifacts
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  macos:
+    name: Build macOS personal app
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.10.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build macOS app
+        run: pnpm --filter desktop exec tauri build --bundles app
+
+      - name: Create portable macOS archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_path="target/release/bundle/macos/XSH.app"
+          archive_path="target/release/bundle/macos/XSH-personal-macos.zip"
+          test -d "$app_path"
+          rm -f "$archive_path"
+          ditto -c -k --sequesterRsrc --keepParent "$app_path" "$archive_path"
+          codesign --verify --deep --strict "$app_path"
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xsh-macos-personal
+          path: target/release/bundle/macos/XSH-personal-macos.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  windows:
+    name: Build Windows installers
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.10.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Windows installers
+        run: pnpm --filter desktop exec tauri build --bundles nsis,msi
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: xsh-windows-installers
+          path: |
+            target/release/bundle/nsis/*.exe
+            target/release/bundle/msi/*.msi
+          if-no-files-found: error
+          retention-days: 14

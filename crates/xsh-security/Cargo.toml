@@ -1,0 +1,17 @@
+[package]
+name = "xsh-security"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+argon2.workspace = true
+aes-gcm.workspace = true
+chrono.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+zeroize.workspace = true

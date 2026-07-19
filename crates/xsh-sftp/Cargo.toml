@@ -1,0 +1,19 @@
+[package]
+name = "xsh-sftp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+russh.workspace = true
+russh-sftp.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ssh-key.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+xsh-domain = { path = "../xsh-domain" }
+xsh-ssh = { path = "../xsh-ssh" }
