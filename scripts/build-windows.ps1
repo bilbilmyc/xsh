@@ -1,4 +1,4 @@
-param(
+﻿param(
   [switch]$SkipInstall
 )
 
@@ -11,8 +11,9 @@ if ($env:OS -ne 'Windows_NT') {
   throw '此脚本只能在 Windows 上运行。'
 }
 
-if (-not (Get-Command pnpm -ErrorAction SilentlyContinue)) {
-  throw '未找到 pnpm。请先执行：corepack enable；corepack prepare pnpm@11.10.0 --activate'
+$PnpmCommand = (Get-Command pnpm.cmd -ErrorAction SilentlyContinue).Source
+if (-not $PnpmCommand) {
+  throw '未找到 pnpm.cmd。请先执行：corepack enable；corepack prepare pnpm@11.10.0 --activate'
 }
 
 if (-not (Get-Command rustc -ErrorAction SilentlyContinue) -or -not (Get-Command cargo -ErrorAction SilentlyContinue)) {
@@ -31,11 +32,17 @@ if ($NodeMajor -lt 22) {
 
 if (-not $SkipInstall) {
   Write-Host '安装/校验依赖...' -ForegroundColor Cyan
-  pnpm install --frozen-lockfile
+  & $PnpmCommand install --frozen-lockfile
+  if ($LASTEXITCODE -ne 0) {
+    throw "pnpm install 失败，退出码：$LASTEXITCODE"
+  }
 }
 
 Write-Host '构建 Windows 安装包...' -ForegroundColor Cyan
-pnpm --filter desktop exec tauri build --bundles nsis,msi
+& $PnpmCommand --filter desktop exec tauri build --bundles nsis,msi
+if ($LASTEXITCODE -ne 0) {
+  throw "Tauri Windows 构建失败，退出码：$LASTEXITCODE"
+}
 
 $NsisDir = Join-Path $RootDir 'target\release\bundle\nsis'
 $MsiDir = Join-Path $RootDir 'target\release\bundle\msi'
