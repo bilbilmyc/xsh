@@ -1,4 +1,4 @@
-export type AppTheme = "midnight" | "graphite" | "dusk";
+export type AppTheme = "light" | "midnight" | "graphite" | "dusk";
 export type AccentColor = "cyan" | "blue" | "green" | "orange" | "purple";
 export type RightClickAction = "paste" | "menu";
 export type TerminalShortcutMode = "platform-safe" | "remote-first";
@@ -11,6 +11,8 @@ export interface AppPreferences {
   terminalFontFamily: string;
   terminalFontSize: number;
   terminalLineHeight: number;
+  terminalFontWeight: number;
+  terminalFontWeightBold: number;
   terminalScrollbackLines: number;
   useSessionTerminalFont: boolean;
   useSessionTerminalScrollback: boolean;
@@ -21,20 +23,24 @@ export interface AppPreferences {
 }
 
 const STORAGE_KEY = "xsh.preferences.v1";
-const UI_FONT_BASELINE = 14;
+const UI_FONT_BASELINE = 15;
 const UI_FONT_MIN = 12;
 const UI_FONT_MAX = 16;
 const TERMINAL_FONT_MIN = 12;
 const TERMINAL_FONT_MAX = 22;
+const LEGACY_DEFAULT_TERMINAL_FONT_FAMILY = '"SFMono-Regular", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace';
+const LEGACY_DEFAULT_TERMINAL_LINE_HEIGHT = 1.22;
 
 export const defaultPreferences: AppPreferences = {
   theme: "midnight",
   accent: "cyan",
   uiFontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
-  uiFontSize: 14,
-  terminalFontFamily: '"SFMono-Regular", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace',
+  uiFontSize: 15,
+  terminalFontFamily: '"Monaco", "SFMono-Regular", Menlo, Consolas, monospace',
   terminalFontSize: 14,
-  terminalLineHeight: 1.22,
+  terminalLineHeight: 1,
+  terminalFontWeight: 400,
+  terminalFontWeightBold: 700,
   terminalScrollbackLines: 10_000,
   useSessionTerminalFont: false,
   useSessionTerminalScrollback: false,
@@ -49,7 +55,14 @@ export function loadPreferences(): AppPreferences {
     const stored = localStorage.getItem(STORAGE_KEY);
     if (!stored) return defaultPreferences;
     const parsed = JSON.parse(stored) as Partial<AppPreferences>;
-    return normalizePreferences({ ...defaultPreferences, ...parsed });
+    const merged = { ...defaultPreferences, ...parsed };
+    if (parsed.terminalFontFamily === LEGACY_DEFAULT_TERMINAL_FONT_FAMILY) {
+      merged.terminalFontFamily = defaultPreferences.terminalFontFamily;
+    }
+    if (parsed.terminalLineHeight === LEGACY_DEFAULT_TERMINAL_LINE_HEIGHT) {
+      merged.terminalLineHeight = defaultPreferences.terminalLineHeight;
+    }
+    return normalizePreferences(merged);
   } catch {
     return defaultPreferences;
   }
@@ -76,6 +89,8 @@ function normalizePreferences(preferences: AppPreferences): AppPreferences {
     uiFontSize: clamp(Number(preferences.uiFontSize), UI_FONT_MIN, UI_FONT_MAX, defaultPreferences.uiFontSize),
     terminalFontSize: clamp(Number(preferences.terminalFontSize), TERMINAL_FONT_MIN, TERMINAL_FONT_MAX, defaultPreferences.terminalFontSize),
     terminalLineHeight: clamp(Number(preferences.terminalLineHeight), 1, 1.6, defaultPreferences.terminalLineHeight),
+    terminalFontWeight: clamp(Number(preferences.terminalFontWeight), 100, 900, defaultPreferences.terminalFontWeight),
+    terminalFontWeightBold: clamp(Number(preferences.terminalFontWeightBold), 100, 900, defaultPreferences.terminalFontWeightBold),
     terminalScrollbackLines: clamp(Math.round(Number(preferences.terminalScrollbackLines)), 100, 1_000_000, defaultPreferences.terminalScrollbackLines),
     uiFontFamily: preferences.uiFontFamily?.trim() || defaultPreferences.uiFontFamily,
     terminalFontFamily: preferences.terminalFontFamily?.trim() || defaultPreferences.terminalFontFamily,

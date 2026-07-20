@@ -119,16 +119,56 @@ impl SessionRepository {
         self.get_group(id)?.ok_or(StorageError::GroupNotFound(id))
     }
 
-    pub fn delete_group(&self, id: GroupId) -> Result<()> {
-        let connection = self.connection()?;
-        let changed = connection.execute(
+    pub fn delete_group(&self, id: GroupId) -> Result<Vec<SavedSession>> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        let group_id = id.to_string();
+        let mut sessions = {
+            let mut statement = transaction.prepare(
+                "WITH RECURSIVE descendants(id) AS (
+                   SELECT ?1
+                   UNION ALL
+                   SELECT session_groups.id
+                   FROM session_groups
+                   JOIN descendants ON session_groups.parent_id = descendants.id
+                 )
+                 SELECT id, group_id, name, host, port, username, proxy_jump, proxy_jump_username,
+                 proxy_jump_authentication_json, authentication_json, terminal_json, initial_directory, startup_command,
+                 keepalive_seconds, auto_reconnect,
+                 environment, color, notes, favorite, created_at, updated_at
+                 FROM sessions
+                 WHERE group_id IN (SELECT id FROM descendants)
+                 ORDER BY favorite DESC, name COLLATE NOCASE ASC",
+            )?;
+            statement
+                .query_map(params![group_id], map_session_row)?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        };
+
+        for session in &mut sessions {
+            *session = self.attach_tags_with_connection(&transaction, session.clone())?;
+        }
+
+        transaction.execute(
+            "WITH RECURSIVE descendants(id) AS (
+               SELECT ?1
+               UNION ALL
+               SELECT session_groups.id
+               FROM session_groups
+               JOIN descendants ON session_groups.parent_id = descendants.id
+             )
+             DELETE FROM sessions WHERE group_id IN (SELECT id FROM descendants)",
+            params![group_id],
+        )?;
+        let changed = transaction.execute(
             "DELETE FROM session_groups WHERE id = ?1",
-            params![id.to_string()],
+            params![group_id],
         )?;
         if changed == 0 {
             return Err(StorageError::GroupNotFound(id));
         }
-        Ok(())
+        transaction.commit()?;
+        Ok(sessions)
     }
 
     pub fn get_group(&self, id: GroupId) -> Result<Option<SessionGroup>> {
@@ -667,7 +707,7 @@ mod tests {
     }
 
     #[test]
-    fn deleting_group_cascades_children_and_detaches_sessions() {
+    fn deleting_group_cascades_children_and_deletes_sessions() {
         let repository = SessionRepository::in_memory().unwrap();
         let parent = repository
             .create_group(SessionGroupDraft {
@@ -677,7 +717,7 @@ mod tests {
                 sort_order: 0,
             })
             .unwrap();
-        repository
+        let child = repository
             .create_group(SessionGroupDraft {
                 parent_id: Some(parent.id),
                 name: "Web".into(),
@@ -686,18 +726,16 @@ mod tests {
             })
             .unwrap();
         let session = repository.create_session(draft(Some(parent.id))).unwrap();
+        let child_session = repository.create_session(draft(Some(child.id))).unwrap();
 
-        repository.delete_group(parent.id).unwrap();
+        let deleted = repository.delete_group(parent.id).unwrap();
 
         assert!(repository.list_groups().unwrap().is_empty());
-        assert_eq!(
-            repository
-                .get_session(session.id)
-                .unwrap()
-                .unwrap()
-                .group_id,
-            None
-        );
+        assert_eq!(deleted.len(), 2);
+        assert!(deleted.iter().any(|deleted| deleted.id == session.id));
+        assert!(deleted.iter().any(|deleted| deleted.id == child_session.id));
+        assert!(repository.get_session(session.id).unwrap().is_none());
+        assert!(repository.get_session(child_session.id).unwrap().is_none());
     }
 
     #[test]

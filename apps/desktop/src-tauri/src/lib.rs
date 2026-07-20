@@ -1,6 +1,7 @@
 use chrono::Utc;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::env;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -44,6 +45,13 @@ struct LocalTreeEntry {
     local_path: String,
     relative_path: String,
     is_directory: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SshKeyDefaults {
+    ssh_directory: String,
+    default_key_path: Option<String>,
 }
 
 type CommandResult<T> = Result<T, String>;
@@ -171,8 +179,15 @@ fn update_group(
 }
 
 #[tauri::command]
-fn delete_group(state: State<'_, AppState>, id: Uuid) -> CommandResult<()> {
-    state.repository.delete_group(id).map_err(display_error)
+async fn delete_group(state: State<'_, AppState>, id: Uuid) -> CommandResult<Vec<SessionId>> {
+    let deleted_sessions = state.repository.delete_group(id).map_err(display_error)?;
+    let deleted_ids = deleted_sessions.iter().map(|session| session.id).collect();
+    for session in deleted_sessions {
+        for credential_ref in session_credential_references(&session) {
+            cleanup_credential_if_unused(&state, &credential_ref).await;
+        }
+    }
+    Ok(deleted_ids)
 }
 
 #[tauri::command]
@@ -196,6 +211,22 @@ fn list_sessions(state: State<'_, AppState>) -> CommandResult<Vec<SavedSession>>
 #[tauri::command]
 async fn list_ssh_agent_keys() -> CommandResult<Vec<SshAgentKey>> {
     list_agent_keys().await.map_err(display_error)
+}
+
+#[tauri::command]
+fn get_ssh_key_defaults() -> CommandResult<SshKeyDefaults> {
+    let home = user_home_directory().ok_or_else(|| "无法确定当前用户的主目录".to_owned())?;
+    let ssh_directory = home.join(".ssh");
+    let default_key_path = ["id_ed25519", "id_rsa", "id_ecdsa", "id_dsa"]
+        .iter()
+        .map(|name| ssh_directory.join(name))
+        .find(|path| path.is_file())
+        .map(|path| path.to_string_lossy().into_owned());
+
+    Ok(SshKeyDefaults {
+        ssh_directory: ssh_directory.to_string_lossy().into_owned(),
+        default_key_path,
+    })
 }
 
 #[tauri::command]
@@ -455,6 +486,18 @@ async fn stop_forward(
     state
         .ssh
         .stop_forward(connection_id, forward_id)
+        .await
+        .map_err(display_error)
+}
+
+#[tauri::command]
+async fn list_forwards(
+    state: State<'_, AppState>,
+    connection_id: ConnectionId,
+) -> CommandResult<Vec<ForwardInfo>> {
+    state
+        .ssh
+        .list_forwards(connection_id)
         .await
         .map_err(display_error)
 }
@@ -1181,9 +1224,9 @@ async fn validate_authentication_reference(
     match authentication {
         AuthenticationMethod::Password { credential_ref }
         | AuthenticationMethod::KeyboardInteractive { credential_ref } => {
-            let reference = credential_ref
-                .as_ref()
-                .ok_or_else(|| format!("请先输入 {label} 密码并保存"))?;
+            let Some(reference) = credential_ref.as_ref() else {
+                return Ok(());
+            };
             if previous
                 .and_then(credential_reference)
                 .is_some_and(|previous_reference| previous_reference == reference)
@@ -1207,6 +1250,15 @@ async fn validate_authentication_reference(
 
 fn display_error(error: impl std::fmt::Display) -> String {
     error.to_string()
+}
+
+fn user_home_directory() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        env::var_os("USERPROFILE").map(PathBuf::from)
+    }
+    #[cfg(not(windows))]
+    { env::var_os("HOME").map(PathBuf::from) }.or_else(|| env::var_os("HOME").map(PathBuf::from))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1241,6 +1293,7 @@ pub fn run() {
             delete_known_host,
             list_sessions,
             list_ssh_agent_keys,
+            get_ssh_key_defaults,
             list_ssh_config_entries,
             create_session,
             update_session,
@@ -1255,6 +1308,7 @@ pub fn run() {
             start_dynamic_forward,
             start_remote_forward,
             stop_forward,
+            list_forwards,
             terminal_resize,
             disconnect_terminal,
             connect_sftp,

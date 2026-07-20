@@ -12,6 +12,7 @@ import type {
   SessionDraft,
   SessionGroup,
   SessionGroupDraft,
+  SshKeyDefaults,
   TerminalEvent,
   TransferEvent,
   Uuid,
@@ -29,7 +30,7 @@ export const api = {
     invoke<SessionGroup>("create_group", { draft }),
   updateGroup: (id: Uuid, draft: SessionGroupDraft) =>
     invoke<SessionGroup>("update_group", { id, draft }),
-  deleteGroup: (id: Uuid) => invoke<void>("delete_group", { id }),
+  deleteGroup: (id: Uuid) => invoke<Uuid[]>("delete_group", { id }),
 
   listKnownHosts: () => invoke<KnownHost[]>("list_known_hosts"),
   deleteKnownHost: (host: string, port: number) =>
@@ -37,6 +38,7 @@ export const api = {
 
   listSessions: () => invoke<SavedSession[]>("list_sessions"),
   listSshAgentKeys: () => invoke<SshAgentKey[]>("list_ssh_agent_keys"),
+  getSshKeyDefaults: () => invoke<SshKeyDefaults>("get_ssh_key_defaults"),
   listSshConfigEntries: () => invoke<SshConfigEntry[]>("list_ssh_config_entries"),
   createSession: (draft: SessionDraft) =>
     invoke<SavedSession>("create_session", { draft }),
@@ -80,6 +82,8 @@ export const api = {
     invoke<ForwardInfo>("start_remote_forward", { connectionId, bindHost, bindPort, localHost, localPort }),
   stopForward: (connectionId: Uuid, forwardId: Uuid) =>
     invoke<void>("stop_forward", { connectionId, forwardId }),
+  listForwards: (connectionId: Uuid) =>
+    invoke<ForwardInfo[]>("list_forwards", { connectionId }),
 
   terminalResize: (connectionId: Uuid, columns: number, rows: number) =>
     invoke<void>("terminal_resize", { connectionId, columns, rows }),

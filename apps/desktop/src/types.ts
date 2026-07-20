@@ -46,6 +46,11 @@ export interface SshAgentKey {
   certificate: boolean;
 }
 
+export interface SshKeyDefaults {
+  sshDirectory: string;
+  defaultKeyPath: string | null;
+}
+
 export interface SavedSession {
   id: Uuid;
   groupId: Uuid | null;

@@ -1,5 +1,8 @@
 import { useEffect, useRef } from "react";
 
+const CONTEXT_MENU_WIDTH = 208;
+const CONTEXT_MENU_ITEM_HEIGHT = 36;
+
 export interface ContextMenuItem {
   label: string;
   onClick: () => void;
@@ -18,16 +21,20 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const close = () => onClose();
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") close();
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && menuRef.current?.contains(target)) return;
+      onClose();
     };
-    window.addEventListener("mousedown", close);
-    window.addEventListener("scroll", close, true);
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("scroll", onClose, true);
     window.addEventListener("keydown", onKeyDown);
     return () => {
-      window.removeEventListener("mousedown", close);
-      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("scroll", onClose, true);
       window.removeEventListener("keydown", onKeyDown);
     };
   }, [onClose]);
@@ -36,17 +43,22 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
     <div
       ref={menuRef}
       className="context-menu"
-      style={{ left: Math.min(x, window.innerWidth - 190), top: Math.min(y, window.innerHeight - items.length * 32 - 16) }}
-      onMouseDown={(event) => event.stopPropagation()}
+      style={{
+        left: Math.max(8, Math.min(x, window.innerWidth - CONTEXT_MENU_WIDTH - 8)),
+        top: Math.max(8, Math.min(y, window.innerHeight - items.length * CONTEXT_MENU_ITEM_HEIGHT - 16)),
+      }}
+      onPointerDown={(event) => event.stopPropagation()}
+      onClick={(event) => event.stopPropagation()}
       role="menu"
     >
       {items.map((item) => (
         <button
           key={item.label}
+          type="button"
           className={`context-menu-item ${item.danger ? "danger" : ""} ${item.separatorBefore ? "separator" : ""}`}
           onClick={() => {
-            item.onClick();
             onClose();
+            item.onClick();
           }}
           role="menuitem"
         >

@@ -175,10 +175,38 @@ target/release/bundle/macos/XSH.app
 
 ## Windows 构建
 
-Windows 构建不需要 Apple 证书。可以在 Windows 电脑上执行：
+Windows 构建不需要 Apple 证书。请在 Windows 开发机上先准备：
+
+- Node.js 22 或更高版本
+- pnpm 11.10.0（可通过 Corepack 启用）
+- Rust stable MSVC 工具链（`stable-x86_64-pc-windows-msvc`）
+- Visual Studio Build Tools 的 C++ 桌面开发组件
+- WebView2 Runtime
+
+首次使用 PowerShell：
 
 ```powershell
-pnpm run build:windows
+corepack enable
+corepack prepare pnpm@11.10.0 --activate
+rustup default stable-x86_64-pc-windows-msvc
+```
+
+把项目目录带到家里的电脑后，可以直接双击：
+
+```text
+scripts\build-windows.cmd
+```
+
+也可以在项目根目录用 PowerShell 执行：
+
+```powershell
+.\scripts\build-windows.ps1
+```
+
+脚本会自动安装锁定版本依赖，然后构建 NSIS 和 MSI 两种安装包。依赖已经安装过时，可以跳过安装步骤：
+
+```powershell
+.\scripts\build-windows.ps1 -SkipInstall
 ```
 
 产物位于：

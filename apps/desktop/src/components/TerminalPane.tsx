@@ -116,6 +116,8 @@ export function TerminalPane({
       fontSize: currentFontSizeRef.current,
       lineHeight: preferences.terminalLineHeight,
       letterSpacing: 0,
+      fontWeight: preferences.terminalFontWeight,
+      fontWeightBold: preferences.terminalFontWeightBold,
       scrollback: preferencesRef.current.useSessionTerminalScrollback
         ? session.terminal.scrollbackLines
         : preferencesRef.current.terminalScrollbackLines,
@@ -673,12 +675,14 @@ export function TerminalPane({
     setCurrentFontSize(nextFontSize);
     terminal.options.fontSize = nextFontSize;
     terminal.options.lineHeight = preferences.terminalLineHeight;
+    terminal.options.fontWeight = preferences.terminalFontWeight;
+    terminal.options.fontWeightBold = preferences.terminalFontWeightBold;
     terminal.options.scrollback = preferences.useSessionTerminalScrollback
       ? session.terminal.scrollbackLines
       : preferences.terminalScrollbackLines;
     terminal.options.theme = terminalTheme(session.terminal.theme, preferences.theme);
     window.requestAnimationFrame(() => fitAddonRef.current?.fit());
-  }, [preferences.terminalFontFamily, preferences.terminalFontSize, preferences.terminalLineHeight, preferences.terminalScrollbackLines, preferences.theme, preferences.useSessionTerminalFont, preferences.useSessionTerminalScrollback, session.terminal.fontFamily, session.terminal.fontSize, session.terminal.scrollbackLines, session.terminal.theme]);
+  }, [preferences.terminalFontFamily, preferences.terminalFontSize, preferences.terminalLineHeight, preferences.terminalFontWeight, preferences.terminalFontWeightBold, preferences.terminalScrollbackLines, preferences.theme, preferences.useSessionTerminalFont, preferences.useSessionTerminalScrollback, session.terminal.fontFamily, session.terminal.fontSize, session.terminal.scrollbackLines, session.terminal.theme]);
 
   useEffect(() => {
     if (!visible) {
@@ -956,6 +960,15 @@ function terminalTheme(profileTheme: string, appTheme: AppPreferences["theme"]) 
       yellow: "#f0d58a", blue: "#7db7ff", magenta: "#d0b2ff", cyan: "#70e0ee", white: "#e2efff",
       brightBlack: "#62758e", brightRed: "#ffb0a8", brightGreen: "#b6f5c3", brightYellow: "#ffe3a3",
       brightBlue: "#b0d4ff", brightMagenta: "#e4d2ff", brightCyan: "#b4f4ff", brightWhite: "#ffffff",
+    };
+  }
+  if (theme === "light") {
+    return {
+      background: "#ffffff", foreground: "#17212b", cursor: "#087ea4", cursorAccent: "#ffffff",
+      selectionBackground: "#b9e4f2", black: "#17212b", red: "#c62828", green: "#16794c",
+      yellow: "#8a5a00", blue: "#1769aa", magenta: "#7b3fb2", cyan: "#087ea4", white: "#eef2f5",
+      brightBlack: "#687784", brightRed: "#b71c1c", brightGreen: "#11663f", brightYellow: "#795000",
+      brightBlue: "#125a91", brightMagenta: "#642f92", brightCyan: "#05657f", brightWhite: "#17212b",
     };
   }
   const background = theme === "graphite" ? "#111315" : theme === "dusk" ? "#100f18" : "#0b0f14";

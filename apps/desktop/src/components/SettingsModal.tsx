@@ -166,9 +166,11 @@ export function SettingsModal({ preferences, onSave, onClose, onToast }: Setting
                 <div className="settings-form-grid settings-range-grid">
                   <RangeField label="终端字号" value={draft.terminalFontSize} min={12} max={22} step={1} suffix="px" onChange={(value) => patch({ terminalFontSize: value })} />
                   <RangeField label="行高" value={draft.terminalLineHeight} min={1} max={1.6} step={0.05} suffix="" onChange={(value) => patch({ terminalLineHeight: value })} />
+                  <RangeField label="普通字重" value={draft.terminalFontWeight} min={300} max={700} step={100} suffix="" onChange={(value) => patch({ terminalFontWeight: value })} />
+                  <RangeField label="粗体字重" value={draft.terminalFontWeightBold} min={400} max={900} step={100} suffix="" onChange={(value) => patch({ terminalFontWeightBold: value })} />
                 </div>
                 <label className="check-row terminal-profile-toggle"><input type="checkbox" checked={draft.useSessionTerminalFont} onChange={(event) => patch({ useSessionTerminalFont: event.target.checked })} />优先使用会话中单独保存的字体和字号</label>
-                <div className={`terminal-font-preview ${draft.theme}`} style={{ fontFamily: draft.terminalFontFamily, fontSize: draft.terminalFontSize, lineHeight: draft.terminalLineHeight }}>
+                <div className={`terminal-font-preview ${draft.theme}`} style={{ fontFamily: draft.terminalFontFamily, fontSize: draft.terminalFontSize, lineHeight: draft.terminalLineHeight, fontWeight: draft.terminalFontWeight }}>
                   <div><span className="prompt">user@server</span>:<span className="path">~/projects/xsh</span>$ cargo test</div>
                   <div className="success">test result: ok. 12 passed; 0 failed</div>
                   <div>中文路径与日志显示测试：连接成功</div>
@@ -310,6 +312,7 @@ const SHORTCUTS = [
 ] as const;
 
 const THEMES: { value: AppTheme; label: string; description: string }[] = [
+  { value: "light", label: "浅色", description: "白色工作区" },
   { value: "midnight", label: "深海", description: "蓝黑高对比" },
   { value: "graphite", label: "石墨", description: "中性灰黑" },
   { value: "dusk", label: "暮色", description: "暗紫背景" },
@@ -326,7 +329,7 @@ const UI_FONTS = [
   { label: "Segoe UI", value: '"Segoe UI", Arial, sans-serif' },
 ];
 const TERMINAL_FONTS = [
-  { label: "系统等宽（推荐）", value: defaultPreferences.terminalFontFamily },
+  { label: "Monaco（推荐）", value: defaultPreferences.terminalFontFamily },
   { label: "SF Mono", value: '"SFMono-Regular", Menlo, monospace' },
   { label: "Cascadia Code", value: '"Cascadia Code", Consolas, monospace' },
   { label: "JetBrains Mono", value: '"JetBrains Mono", Menlo, monospace' },

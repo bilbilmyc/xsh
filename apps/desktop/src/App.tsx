@@ -38,7 +38,6 @@ import { WorkspaceManagerModal } from "./components/WorkspaceManagerModal";
 import type { TerminalCommandRequest } from "./components/TerminalPane";
 import { loadCommandLibrary, saveCommandLibrary, type CommandSnippet } from "./command-library";
 import { loadCommandHistory, recordCommandHistory, saveCommandHistory, type CommandHistoryEntry } from "./command-history";
-import { loadRecentSessions, pruneRecentSessions, recordRecentSession, type RecentSession } from "./recent-sessions";
 import { loadQuickCommandBar, saveQuickCommandBar, type QuickCommandItem } from "./quick-command-bar";
 import { loadPreferences, savePreferences, type AppPreferences } from "./preferences";
 import {
@@ -153,7 +152,6 @@ function App() {
   const [commands, setCommands] = useState<CommandSnippet[]>(() => loadCommandLibrary());
   const [commandHistory, setCommandHistory] = useState<CommandHistoryEntry[]>(() => loadCommandHistory());
   const [historyVisible, setHistoryVisible] = useState(false);
-  const [recentSessions, setRecentSessions] = useState<RecentSession[]>(() => loadRecentSessions());
   const [quickCommands, setQuickCommands] = useState<Array<QuickCommandItem | null>>(() => loadQuickCommandBar());
   const [pendingTerminalCommands, setPendingTerminalCommands] = useState<Record<string, TerminalCommandRequest>>({});
   const [paneLayout, setPaneLayout] = useState<PaneLayout>(() => loadPaneLayout());
@@ -193,11 +191,6 @@ function App() {
       .catch((error) => setToast(`加载本地数据失败：${String(error)}`))
       .finally(() => setLoading(false));
   }, [refresh]);
-
-  useEffect(() => {
-    if (loading) return;
-    setRecentSessions(pruneRecentSessions(sessions.map((session) => session.id)));
-  }, [loading, sessions]);
 
   useEffect(() => {
     if (!sessionDataReady || workspaceRestoreStartedRef.current) return;
@@ -430,11 +423,8 @@ function App() {
     setToast(`已通过${source}向 ${targets.length > 1 ? `${targets.length} 个会话` : `“${targets[0].session.name}”`}发送：${label}`);
   };
 
-  const handleTerminalStateChange = (tabId: string, sessionId: string, state: string) => {
+  const handleTerminalStateChange = (tabId: string, state: string) => {
     setTabs((current) => current.map((tab) => tab.id === tabId ? { ...tab, state } : tab));
-    if (state === "connected") {
-      setRecentSessions(recordRecentSession(sessionId));
-    }
   };
 
   const queueCommandForActiveTerminal = (command: CommandSnippet) => {
@@ -763,11 +753,13 @@ function App() {
   };
 
   const deleteGroup = async (group: SessionGroup) => {
-    if (!window.confirm(`确定删除目录“${group.name}”？子目录会一并删除，其中的会话将移动到“未分类”。`)) return;
+    if (!window.confirm(`确定删除目录“${group.name}”？子目录及其中的会话也会一并删除，此操作不会删除服务器上的任何内容。`)) return;
     try {
-      await api.deleteGroup(group.id);
+      const deletedSessionIds = await api.deleteGroup(group.id);
+      const deletedIdSet = new Set(deletedSessionIds);
+      tabs.filter((tab) => deletedIdSet.has(tab.session.id)).forEach((tab) => closeTab(tab.id, true));
       await refresh();
-      setToast(`目录“${group.name}”已删除，会话数据仍保留。`);
+      setToast(`目录“${group.name}”及其中 ${deletedSessionIds.length} 个会话已删除。`);
     } catch (error) {
       setToast(`删除目录失败：${String(error)}`);
     }
@@ -1172,7 +1164,6 @@ function App() {
           sessions={sessions}
           activeSessionId={activeTab?.session.id}
           activityBySessionId={activityBySessionId}
-          recentSessions={recentSessions}
           onOpen={openSession}
           onOpenGroup={openGroupSessions}
           onDiagnose={(session) => void runDiagnostic(session)}
@@ -1294,7 +1285,7 @@ function App() {
                   visible={paneVisible}
                   focused={tab.id === activeTabId}
                   command={pendingTerminalCommands[tab.id] ?? null}
-                  onStateChange={(state) => handleTerminalStateChange(tab.id, tab.session.id, state)}
+                  onStateChange={(state) => handleTerminalStateChange(tab.id, state)}
                   onConnectionChange={(connectionId) => setConnectionIds((current) => ({ ...current, [tab.id]: connectionId }))}
                   onFocus={() => focusTab(tab.id)}
                   onCommandResult={handleCommandResult}

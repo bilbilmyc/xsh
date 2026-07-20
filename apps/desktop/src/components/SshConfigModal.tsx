@@ -15,6 +15,7 @@ export function SshConfigModal({ entries, loading, onClose, onRefresh, onImport 
   const [importing, setImporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const selectedEntries = useMemo(() => entries.filter((entry) => selected.has(entry.alias)), [entries, selected]);
+  const allSelected = entries.length > 0 && selectedEntries.length === entries.length;
 
   const toggle = (alias: string) => {
     setSelected((current) => {
@@ -22,6 +23,14 @@ export function SshConfigModal({ entries, loading, onClose, onRefresh, onImport 
       if (next.has(alias)) next.delete(alias); else next.add(alias);
       return next;
     });
+  };
+
+  const selectAll = () => {
+    setSelected(new Set(entries.map((entry) => entry.alias)));
+  };
+
+  const clearSelection = () => {
+    setSelected(new Set());
   };
 
   const importSelected = async () => {
@@ -81,6 +90,8 @@ export function SshConfigModal({ entries, loading, onClose, onRefresh, onImport 
         </div>
         <footer className="modal-footer">
           <span className="ssh-config-selection">已选择 {selectedEntries.length} 个</span>
+          <button className="secondary-button ssh-config-select-button" onClick={selectAll} disabled={loading || importing || allSelected}>全选</button>
+          <button className="secondary-button ssh-config-select-button" onClick={clearSelection} disabled={loading || importing || selectedEntries.length === 0}>取消全选</button>
           <button className="secondary-button" onClick={onClose} disabled={importing}>取消</button>
           <button className="primary-button" onClick={() => void importSelected()} disabled={loading || importing || selectedEntries.length === 0}>{importing ? "导入中…" : "导入选中配置"}</button>
         </footer>

@@ -371,6 +371,9 @@ enum SessionCommand {
         forward_id: Uuid,
         reply: oneshot::Sender<anyhow::Result<()>>,
     },
+    ListForwards {
+        reply: oneshot::Sender<anyhow::Result<Vec<ForwardInfo>>>,
+    },
     Disconnect,
 }
 
@@ -547,6 +550,19 @@ impl SshSessionManager {
             .await
             .map_err(|_| anyhow!("SSH 转发管理器已关闭"))??;
         Ok(())
+    }
+
+    pub async fn list_forwards(
+        &self,
+        connection_id: ConnectionId,
+    ) -> anyhow::Result<Vec<ForwardInfo>> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(connection_id, SessionCommand::ListForwards { reply })
+            .await
+            .map_err(|error| anyhow!(error))?;
+        receiver
+            .await
+            .map_err(|_| anyhow!("SSH 转发管理器已关闭"))?
     }
 
     pub async fn active_connection_count(&self) -> usize {
@@ -1087,6 +1103,7 @@ async fn run_terminal_connection(
                                 let task = spawn_forward_acceptor(listener, info.forward_id, accepted_tx.clone());
                                 local_forwards.insert(info.forward_id, ForwardRuntime::Local {
                                     task,
+                                    info: info.clone(),
                                     target_host: info.target_host.clone().unwrap_or_default(),
                                     target_port: info.target_port.unwrap_or_default(),
                                 });
@@ -1102,6 +1119,7 @@ async fn run_terminal_connection(
                                 let task = spawn_forward_acceptor(listener, info.forward_id, accepted_tx.clone());
                                 local_forwards.insert(info.forward_id, ForwardRuntime::Dynamic {
                                     task,
+                                    info: info.clone(),
                                 });
                                 let _ = reply.send(Ok(info));
                             }
@@ -1142,6 +1160,21 @@ async fn run_terminal_connection(
                             Err(anyhow!("转发不存在"))
                         };
                         let _ = reply.send(result);
+                    }
+                    Some(SessionCommand::ListForwards { reply }) => {
+                        let mut forwards = local_forwards
+                            .values()
+                            .map(|runtime| runtime.info().clone())
+                            .collect::<Vec<_>>();
+                        forwards.extend(remote_forwards.lock().await.iter().map(|(forward_id, target)| ForwardInfo {
+                            forward_id: *forward_id,
+                            kind: "remote".into(),
+                            bind_host: target.bind_host.clone(),
+                            bind_port: target.bind_port,
+                            target_host: Some(target.local_host.clone()),
+                            target_port: Some(target.local_port),
+                        }));
+                        let _ = reply.send(Ok(forwards));
                     }
                 }
             }
@@ -1196,15 +1229,23 @@ struct ForwardAccepted {
 enum ForwardRuntime {
     Local {
         task: JoinHandle<()>,
+        info: ForwardInfo,
         target_host: String,
         target_port: u16,
     },
     Dynamic {
         task: JoinHandle<()>,
+        info: ForwardInfo,
     },
 }
 
 impl ForwardRuntime {
+    fn info(&self) -> &ForwardInfo {
+        match self {
+            Self::Local { info, .. } | Self::Dynamic { info, .. } => info,
+        }
+    }
+
     fn abort(self) {
         match self {
             Self::Local { task, .. } | Self::Dynamic { task, .. } => task.abort(),

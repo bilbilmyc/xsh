@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent } from "react";
-import { Check, ChevronDown, Search, Send, TerminalSquare, Trash2, X } from "lucide-react";
+import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent } from "react";
+import { Check, ChevronDown, CircleHelp, Send, TerminalSquare, Trash2, X } from "lucide-react";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
 import {
   createQuickCommand,
@@ -49,23 +49,7 @@ export function QuickCommandBar({
   const [sentItemId, setSentItemId] = useState<string | null>(null);
   const [draggedSlot, setDraggedSlot] = useState<number | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; slot: number } | null>(null);
-  const [query, setQuery] = useState("");
-  const [groupFilter, setGroupFilter] = useState("全部分组");
   const clickTimerRef = useRef<number | null>(null);
-
-  const groups = useMemo(
-    () => ["全部分组", ...Array.from(new Set(items.filter(Boolean).map((item) => item!.group))).sort((a, b) => a.localeCompare(b, "zh-CN"))],
-    [items],
-  );
-  const normalizedQuery = query.trim().toLowerCase();
-  const visibleItems = useMemo(
-    () => items
-      .map((item, slot) => ({ item, slot }))
-      .filter(({ item }) => item)
-      .filter(({ item }) => groupFilter === "全部分组" || item!.group === groupFilter)
-      .filter(({ item }) => !normalizedQuery || `${item!.label} ${item!.command} ${item!.group}`.toLowerCase().includes(normalizedQuery)),
-    [groupFilter, items, normalizedQuery],
-  );
 
   useEffect(() => {
     const onEscape = (event: KeyboardEvent) => {
@@ -235,21 +219,24 @@ export function QuickCommandBar({
         onDoubleClick={handleBarDoubleClick}
         title="单击发送；双击或右键编辑；拖拽按钮可调整顺序"
       >
-        <div className="quick-command-title" aria-hidden="true">
+        <div className="quick-command-title">
           <TerminalSquare size={14} />
           <span>快捷命令</span>
-          <small>双击空白处添加</small>
+          <button
+            type="button"
+            className="quick-command-help"
+            aria-label="快捷命令操作说明"
+            title="单击命令发送；双击或右键编辑；拖拽按钮调整顺序；双击空白处添加命令"
+            onClick={(event) => event.stopPropagation()}
+            onDoubleClick={(event) => event.stopPropagation()}
+          >
+            <CircleHelp size={13} />
+          </button>
         </div>
         {expanded && (
           <>
-            <div className="quick-command-filters" onDoubleClick={(event) => event.stopPropagation()}>
-              <label className="quick-command-search"><Search size={12} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索" /></label>
-              <select value={groupFilter} onChange={(event) => setGroupFilter(event.target.value)} title="按分组筛选">
-                {groups.map((group) => <option key={group}>{group}</option>)}
-              </select>
-            </div>
             <div className="quick-command-slots">
-              {visibleItems.map(({ item, slot }) => item ? (
+              {items.map((item, slot) => item ? (
                 <button
                   key={item.id}
                   className={`quick-command-button ${!canSend ? "unavailable" : ""} ${sentItemId === item.id ? "sent" : ""} ${draggedSlot === slot ? "dragging" : ""}`}
@@ -281,8 +268,6 @@ export function QuickCommandBar({
                   {item.shortcut && <kbd>{item.shortcut.slice(-1)}</kbd>}
                 </button>
               ) : null)}
-              {items.every((item) => item === null) && <span className="quick-command-empty-hint">双击此处添加命令</span>}
-              {items.some(Boolean) && visibleItems.length === 0 && <span className="quick-command-empty-hint">没有匹配的快捷命令</span>}
             </div>
           </>
         )}

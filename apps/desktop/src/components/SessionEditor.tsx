@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ChevronDown, KeyRound, Server, Trash2, X } from "lucide-react";
+import { ChevronDown, FolderOpen, KeyRound, Server, Trash2, X } from "lucide-react";
 import { api } from "../api";
 import {
   defaultTerminalProfile,
   type AuthenticationMethod,
   type SavedSession,
   type SshAgentKey,
+  type SshKeyDefaults,
   type SessionDraft,
   type SessionGroup,
 } from "../types";
@@ -58,6 +59,7 @@ export function SessionEditor({
   );
   const [agentKeys, setAgentKeys] = useState<SshAgentKey[]>([]);
   const [agentLoading, setAgentLoading] = useState(false);
+  const [sshKeyDefaults, setSshKeyDefaults] = useState<SshKeyDefaults | null>(null);
   const [password, setPassword] = useState("");
   const [privateKeyPath, setPrivateKeyPath] = useState(
     session?.authentication.type === "privateKey"
@@ -146,15 +148,46 @@ export function SessionEditor({
     }
   }, [authType, proxyAuthType]);
 
+  useEffect(() => {
+    void api.getSshKeyDefaults().then(setSshKeyDefaults).catch(() => undefined);
+  }, []);
+
   const choosePrivateKey = async (forProxy = false) => {
-    const selected = await open({
-      title: forProxy ? "选择跳板机 OpenSSH 私钥" : "选择 OpenSSH 私钥",
-      multiple: false,
-      directory: false,
-    });
-    if (typeof selected !== "string") return;
-    if (forProxy) setProxyPrivateKeyPath(selected);
-    else setPrivateKeyPath(selected);
+    try {
+      const defaults = sshKeyDefaults ?? await api.getSshKeyDefaults();
+      if (!sshKeyDefaults) setSshKeyDefaults(defaults);
+      const selected = await open({
+        title: forProxy ? "选择跳板机 OpenSSH 私钥" : "选择 OpenSSH 私钥",
+        defaultPath: defaults.sshDirectory,
+        multiple: false,
+        directory: false,
+      });
+      if (typeof selected !== "string") return;
+      if (forProxy) setProxyPrivateKeyPath(selected);
+      else setPrivateKeyPath(selected);
+    } catch (caught) {
+      setError(`无法打开私钥选择器：${String(caught)}`);
+    }
+  };
+
+  const openSshDirectory = async () => {
+    try {
+      const defaults = sshKeyDefaults ?? await api.getSshKeyDefaults();
+      if (!sshKeyDefaults) setSshKeyDefaults(defaults);
+      await api.openLocalPath(defaults.sshDirectory);
+    } catch (caught) {
+      setError(`无法打开 ~/.ssh：${String(caught)}`);
+    }
+  };
+
+  const useDefaultPrivateKey = (forProxy = false) => {
+    const defaultKeyPath = sshKeyDefaults?.defaultKeyPath;
+    if (!defaultKeyPath) {
+      setError("未发现默认 SSH 私钥，请点击“选择私钥”手动选择");
+      return;
+    }
+    if (forProxy) setProxyPrivateKeyPath(defaultKeyPath);
+    else setPrivateKeyPath(defaultKeyPath);
   };
 
   const save = async () => {
@@ -383,7 +416,7 @@ export function SessionEditor({
                 <label className="check-row"><span><input type="checkbox" checked={proxyAuthEnabled} onChange={(e) => setProxyAuthEnabled(e.target.checked)} />使用独立认证（关闭时跟随目标会话认证）</span></label>
                 {proxyAuthEnabled && <>
                   <div className="segmented-control"><button className={proxyAuthType === "password" ? "active" : ""} onClick={() => setProxyAuthType("password")}>密码</button><button className={proxyAuthType === "privateKey" ? "active" : ""} onClick={() => setProxyAuthType("privateKey")}>SSH Key</button><button className={proxyAuthType === "agent" ? "active" : ""} onClick={() => setProxyAuthType("agent")}>SSH Agent</button></div>
-                  {proxyAuthType === "password" ? <label className="field"><span>跳板机密码 {proxyPasswordSaved && <em className="credential-saved-badge">•••••••• 已保存</em>}</span><input type="password" value={proxyPassword} onChange={(e) => setProxyPassword(e.target.value)} placeholder={proxyPasswordSaved ? "留空保持已保存的密码" : "请输入跳板机密码"} autoComplete="new-password" /></label> : proxyAuthType === "agent" ? <label className="field"><span>跳板机 Agent 身份（可选）</span><select value={proxyAgentFingerprint} onChange={(e) => setProxyAgentFingerprint(e.target.value)}><option value="">自动尝试 Agent 中的密钥</option>{agentKeys.map((key) => <option key={key.fingerprint} value={key.fingerprint}>{key.algorithm} · {key.fingerprint}{key.comment ? ` · ${key.comment}` : ""}</option>)}</select></label> : <div className="form-grid"><label className="field field-span-2"><span>跳板机私钥文件</span><div className="input-action-row"><input value={proxyPrivateKeyPath} onChange={(e) => setProxyPrivateKeyPath(e.target.value)} placeholder="~/.ssh/id_ed25519_jump" /><button className="secondary-button" onClick={() => choosePrivateKey(true)}>选择</button></div></label><label className="field field-span-2"><span>跳板机 Key Passphrase（没有则留空） {proxyPassphraseSaved && <em className="credential-saved-badge">•••••••• 已保存</em>}</span><input type="password" value={proxyPassphrase} onChange={(e) => setProxyPassphrase(e.target.value)} placeholder={proxyPassphraseSaved ? "留空保持已保存的 Passphrase" : "没有则留空"} autoComplete="new-password" /></label></div>}
+                  {proxyAuthType === "password" ? <label className="field"><span>跳板机密码 {proxyPasswordSaved && <em className="credential-saved-badge">•••••••• 已保存</em>}</span><input type="password" value={proxyPassword} onChange={(e) => setProxyPassword(e.target.value)} placeholder={proxyPasswordSaved ? "留空保持已保存的密码" : "请输入跳板机密码"} autoComplete="new-password" /></label> : proxyAuthType === "agent" ? <label className="field"><span>跳板机 Agent 身份（可选）</span><select value={proxyAgentFingerprint} onChange={(e) => setProxyAgentFingerprint(e.target.value)}><option value="">自动尝试 Agent 中的密钥</option>{agentKeys.map((key) => <option key={key.fingerprint} value={key.fingerprint}>{key.algorithm} · {key.fingerprint}{key.comment ? ` · ${key.comment}` : ""}</option>)}</select></label> : <div className="form-grid"><label className="field field-span-2"><span>跳板机私钥文件</span><div className="input-action-row"><input value={proxyPrivateKeyPath} onChange={(e) => setProxyPrivateKeyPath(e.target.value)} placeholder="~/.ssh/id_ed25519_jump" /><button type="button" className="secondary-button" onClick={() => void choosePrivateKey(true)}>选择私钥</button></div><div className="private-key-actions"><button type="button" className="link-button private-key-directory-button" onClick={() => void openSshDirectory()}><FolderOpen size={13} />打开 ~/.ssh</button>{sshKeyDefaults?.defaultKeyPath && <button type="button" className="link-button" onClick={() => useDefaultPrivateKey(true)}>使用默认密钥</button>}</div><small className="field-help">选择器会默认打开 ~/.ssh，不需要在 Finder 中显示隐藏目录。</small></label><label className="field field-span-2"><span>跳板机 Key Passphrase（没有则留空） {proxyPassphraseSaved && <em className="credential-saved-badge">•••••••• 已保存</em>}</span><input type="password" value={proxyPassphrase} onChange={(e) => setProxyPassphrase(e.target.value)} placeholder={proxyPassphraseSaved ? "留空保持已保存的 Passphrase" : "没有则留空"} autoComplete="new-password" /></label></div>}
                 </>}
               </div>
             </div>
@@ -392,7 +425,7 @@ export function SessionEditor({
           <div className="form-section">
             <div className="section-heading"><KeyRound size={15} />目标主机认证</div>
             <div className="segmented-control"><button className={authType === "password" ? "active" : ""} onClick={() => setAuthType("password")}>密码</button><button className={authType === "privateKey" ? "active" : ""} onClick={() => setAuthType("privateKey")}>SSH Key</button><button className={authType === "agent" ? "active" : ""} onClick={() => setAuthType("agent")}>SSH Agent</button></div>
-            {authType === "password" ? <label className="field"><span>密码 {passwordSaved && <em className="credential-saved-badge">•••••••• 已保存</em>}</span><input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={passwordSaved ? "留空保持已保存的密码" : "请输入 SSH 密码"} autoComplete="new-password" /></label> : authType === "agent" ? <label className="field"><span>Agent 身份（可选）</span><select value={agentFingerprint} onChange={(e) => setAgentFingerprint(e.target.value)}><option value="">自动尝试 Agent 中的密钥</option>{agentKeys.map((key) => <option key={key.fingerprint} value={key.fingerprint}>{key.algorithm} · {key.fingerprint}{key.comment ? ` · ${key.comment}` : ""}{key.certificate ? " · certificate" : ""}</option>)}</select><small className="field-help">{agentLoading ? "正在读取本机 SSH Agent…" : agentKeys.length ? `已发现 ${agentKeys.length} 个 Agent 身份` : "未发现身份；保存后连接时会再次检测"}<button type="button" className="link-button" onClick={() => void refreshAgentKeys()}>刷新</button></small></label> : <div className="form-grid"><label className="field field-span-2"><span>私钥文件</span><div className="input-action-row"><input value={privateKeyPath} onChange={(e) => setPrivateKeyPath(e.target.value)} placeholder="~/.ssh/id_ed25519" /><button className="secondary-button" onClick={() => choosePrivateKey()}>选择</button></div></label><label className="field field-span-2"><span>Key Passphrase（没有则留空） {passphraseSaved && <em className="credential-saved-badge">•••••••• 已保存</em>}</span><input type="password" value={passphrase} onChange={(e) => setPassphrase(e.target.value)} placeholder={passphraseSaved ? "留空保持已保存的 Passphrase" : "没有则留空"} autoComplete="new-password" /></label></div>}
+            {authType === "password" ? <label className="field"><span>密码 {passwordSaved && <em className="credential-saved-badge">•••••••• 已保存</em>}</span><input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={passwordSaved ? "留空保持已保存的密码" : "请输入 SSH 密码"} autoComplete="new-password" /></label> : authType === "agent" ? <label className="field"><span>Agent 身份（可选）</span><select value={agentFingerprint} onChange={(e) => setAgentFingerprint(e.target.value)}><option value="">自动尝试 Agent 中的密钥</option>{agentKeys.map((key) => <option key={key.fingerprint} value={key.fingerprint}>{key.algorithm} · {key.fingerprint}{key.comment ? ` · ${key.comment}` : ""}{key.certificate ? " · certificate" : ""}</option>)}</select><small className="field-help">{agentLoading ? "正在读取本机 SSH Agent…" : agentKeys.length ? `已发现 ${agentKeys.length} 个 Agent 身份` : "未发现身份；保存后连接时会再次检测"}<button type="button" className="link-button" onClick={() => void refreshAgentKeys()}>刷新</button></small></label> : <div className="form-grid"><label className="field field-span-2"><span>私钥文件</span><div className="input-action-row"><input value={privateKeyPath} onChange={(e) => setPrivateKeyPath(e.target.value)} placeholder="~/.ssh/id_ed25519" /><button type="button" className="secondary-button" onClick={() => void choosePrivateKey()}>选择私钥</button></div><div className="private-key-actions"><button type="button" className="link-button private-key-directory-button" onClick={() => void openSshDirectory()}><FolderOpen size={13} />打开 ~/.ssh</button>{sshKeyDefaults?.defaultKeyPath && <button type="button" className="link-button" onClick={() => useDefaultPrivateKey()}>使用默认密钥</button>}</div><small className="field-help">选择器会默认打开 ~/.ssh，不需要在 Finder 中显示隐藏目录。</small></label><label className="field field-span-2"><span>Key Passphrase（没有则留空） {passphraseSaved && <em className="credential-saved-badge">•••••••• 已保存</em>}</span><input type="password" value={passphrase} onChange={(e) => setPassphrase(e.target.value)} placeholder={passphraseSaved ? "留空保持已保存的 Passphrase" : "没有则留空"} autoComplete="new-password" /></label></div>}
           </div>
 
 
