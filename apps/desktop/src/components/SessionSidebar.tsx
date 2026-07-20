@@ -34,6 +34,7 @@ interface SessionSidebarProps {
   onOpenGroup: (group: SessionGroup) => void;
   onDiagnose: (session: SavedSession) => void;
   onEdit: (session: SavedSession) => void;
+  onCreateSession: () => void;
   onCreateGroup: (parentId: string | null) => void;
   onDuplicate: (session: SavedSession) => void;
   onToggleFavorite: (session: SavedSession) => void;
@@ -48,6 +49,7 @@ interface SessionSidebarProps {
 }
 
 type ContextTarget =
+  | { type: "sidebar"; x: number; y: number }
   | { type: "session"; session: SavedSession; x: number; y: number }
   | { type: "group"; group: SessionGroup; x: number; y: number };
 
@@ -65,6 +67,7 @@ export function SessionSidebar({
   onOpenGroup,
   onDiagnose,
   onEdit,
+  onCreateSession,
   onCreateGroup,
   onDuplicate,
   onToggleFavorite,
@@ -159,6 +162,12 @@ export function SessionSidebar({
       else next.add(groupId);
       return next;
     });
+  };
+
+  const showSidebarMenu = (event: React.MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setContextTarget({ type: "sidebar", x: event.clientX, y: event.clientY });
   };
 
   const showSessionMenu = (event: React.MouseEvent, session: SavedSession) => {
@@ -537,7 +546,12 @@ export function SessionSidebar({
   const ungrouped = visibleSessions.filter((session) => !session.groupId);
 
   let contextItems: ContextMenuItem[] = [];
-  if (contextTarget?.type === "session") {
+  if (contextTarget?.type === "sidebar") {
+    contextItems = [
+      { label: "新建会话主机", onClick: onCreateSession },
+      { label: "新建目录", onClick: () => onCreateGroup(null) },
+    ];
+  } else if (contextTarget?.type === "session") {
     const session = contextTarget.session;
     const contextSelection = selectedSessionIds.has(session.id) ? selectedSessions : [session];
     contextItems = contextSelection.length > 1
@@ -608,7 +622,7 @@ export function SessionSidebar({
           <button onClick={clearSelection} title="清除选择" aria-label="清除选择"><X size={13} /></button>
         </div>
       )}
-      <div className="session-tree" tabIndex={0} aria-label="会话列表">
+      <div className="session-tree" tabIndex={0} aria-label="会话列表" onContextMenu={showSidebarMenu}>
         {favorites.length > 0 && (
           <section className="sidebar-section">
             <div className="sidebar-section-title"><Star size={13} />收藏</div>

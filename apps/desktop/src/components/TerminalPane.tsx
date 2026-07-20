@@ -55,7 +55,7 @@ export function TerminalPane({
   const [authChallenge, setAuthChallenge] = useState<{ challengeId: string; prompts: Array<{ prompt: string; echo: boolean }> } | null>(null);
   const [authResponses, setAuthResponses] = useState<string[]>([]);
   const searchAddonRef = useRef<SearchAddon | null>(null);
-  const logRef = useRef<string>("");
+  const logRef = useRef<string[]>([]);
   const preferencesRef = useRef(preferences);
   preferencesRef.current = preferences;
   const sessionFontEnabled = preferences.useSessionTerminalFont;
@@ -87,6 +87,8 @@ export function TerminalPane({
     let noticeTimer: number | undefined;
     let wakeCheckTimer: number | undefined;
     let selectionCopyTimer: number | undefined;
+    let outputFlushFrame: number | undefined;
+    let pendingOutput: Uint8Array[] = [];
     let pendingInput: number[] = [];
     let connectGeneration = 0;
     let reconnectAttempt = 0;
@@ -98,13 +100,13 @@ export function TerminalPane({
     let lastWakeCheckAt = Date.now();
     setConnectionError(null);
     setConnectionNotice(null);
-    logRef.current = [
+    logRef.current = [[
       "XSH Session Log",
       `Session: ${session.name}`,
       `Host: ${session.username}@${session.host}:${session.port}`,
       `Started: ${new Date().toISOString()}`,
       "",
-    ].join("\n");
+    ].join("\n")];
 
     const outputDecoder = createTextDecoder(session.terminal.encoding);
     const terminal = new Terminal({
@@ -151,6 +153,37 @@ export function TerminalPane({
       fitTerminal();
     }, 80);
     if (visible) terminal.focus();
+
+    const flushOutput = () => {
+      outputFlushFrame = undefined;
+      if (disposed || pendingOutput.length === 0) return;
+      if (pendingOutput.length === 1) {
+        terminal.write(pendingOutput[0]);
+      } else {
+        const totalLength = pendingOutput.reduce((total, chunk) => total + chunk.length, 0);
+        const merged = new Uint8Array(totalLength);
+        let offset = 0;
+        for (const chunk of pendingOutput) {
+          merged.set(chunk, offset);
+          offset += chunk.length;
+        }
+        terminal.write(merged);
+      }
+      pendingOutput = [];
+    };
+    const flushPendingOutput = () => {
+      if (outputFlushFrame !== undefined) {
+        window.cancelAnimationFrame(outputFlushFrame);
+        outputFlushFrame = undefined;
+      }
+      flushOutput();
+    };
+    const queueOutput = (payload: number[]) => {
+      pendingOutput.push(Uint8Array.from(payload));
+      if (outputFlushFrame === undefined) {
+        outputFlushFrame = window.requestAnimationFrame(flushOutput);
+      }
+    };
 
     const flushInput = () => {
       inputTimer = undefined;
@@ -456,8 +489,8 @@ export function TerminalPane({
         switch (event.type) {
           case "output": {
             const output = outputDecoder.decode(new Uint8Array(event.payload), { stream: true });
-            logRef.current += output;
-            terminal.write(new Uint8Array(event.payload));
+            logRef.current.push(output);
+            queueOutput(event.payload);
             break;
           }
           case "authChallenge":
@@ -499,6 +532,7 @@ export function TerminalPane({
             reportState("failed");
             break;
           case "exitStatus":
+            flushPendingOutput();
             terminal.writeln(`\r\n\x1b[90m远程进程退出：${event.payload}\x1b[0m`);
             break;
           case "error":
@@ -620,6 +654,8 @@ export function TerminalPane({
       if (noticeTimer) window.clearTimeout(noticeTimer);
       if (wakeCheckTimer) window.clearInterval(wakeCheckTimer);
       if (selectionCopyTimer) window.clearTimeout(selectionCopyTimer);
+      if (outputFlushFrame !== undefined) window.cancelAnimationFrame(outputFlushFrame);
+      pendingOutput = [];
       const connectionId = connectionIdRef.current;
       if (connectionId) void api.disconnectTerminal(connectionId).catch(() => undefined);
       onConnectionChange?.(null);
@@ -710,7 +746,7 @@ export function TerminalPane({
     });
     if (!targetPath) return;
     try {
-      await api.writeTextFile(targetPath, logRef.current);
+      await api.writeTextFile(targetPath, logRef.current.join(""));
     } catch (error) {
       setConnectionError(`日志保存失败：${String(error)}`);
     }

@@ -1168,6 +1168,7 @@ function App() {
           onOpenGroup={openGroupSessions}
           onDiagnose={(session) => void runDiagnostic(session)}
           onEdit={(session) => setEditorSession(session)}
+          onCreateSession={() => setEditorSession(null)}
           onCreateGroup={createGroup}
           onDuplicate={duplicateSession}
           onToggleFavorite={toggleFavorite}
