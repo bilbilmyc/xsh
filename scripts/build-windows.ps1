@@ -7,6 +7,12 @@ $ErrorActionPreference = 'Stop'
 $RootDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $RootDir
 
+# aws-lc-sys 0.43.0 ships prebuilt x86_64 NASM objects. Use them by default
+# so a local Windows build does not depend on NASM being installed globally.
+if (-not $env:AWS_LC_SYS_PREBUILT_NASM) {
+  $env:AWS_LC_SYS_PREBUILT_NASM = '1'
+}
+
 if ($env:OS -ne 'Windows_NT') {
   throw '此脚本只能在 Windows 上运行。'
 }
