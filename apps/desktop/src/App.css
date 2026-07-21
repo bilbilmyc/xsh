@@ -4579,3 +4579,262 @@ body.resizing-terminal-split .split-divider.horizontal * { cursor: row-resize !i
 :root[data-theme="light"] .terminal-font-preview .path {
   color: #1769aa;
 }
+
+/* Light theme controls: keep secondary actions on the same soft surface as the
+   rest of the workspace.  The terminal itself stays untouched; this only
+   replaces dark-theme control surfaces that are intentionally hard-coded above. */
+:root[data-theme="light"] {
+  --control-bg: #ffffff;
+  --control-bg-soft: #f4f8fa;
+  --control-bg-hover: #eaf5f8;
+  --control-border: #cbd9e1;
+  --control-border-hover: #8bb9c8;
+  --control-text: #405968;
+  --control-text-strong: #17495a;
+  --danger-bg: #fff4f3;
+  --danger-bg-hover: #ffe8e6;
+  --danger-border: #efb9b5;
+  --danger-text: #b34f4a;
+}
+
+:root[data-theme="light"] .toolbar-button,
+:root[data-theme="light"] .icon-button,
+:root[data-theme="light"] .sftp-toggle,
+:root[data-theme="light"] .secondary-button,
+:root[data-theme="light"] .terminal-toolbar button,
+:root[data-theme="light"] .sftp-toolbar button,
+:root[data-theme="light"] .remote-entry > button,
+:root[data-theme="light"] .transfer-item > button,
+:root[data-theme="light"] .sftp-transfer-rail button,
+:root[data-theme="light"] .pane-controls button,
+:root[data-theme="light"] .transfer-list-actions button,
+:root[data-theme="light"] .transfer-actions button,
+:root[data-theme="light"] .session-batch-toolbar button,
+:root[data-theme="light"] .tab-new-button,
+:root[data-theme="light"] .connection-manager-row-actions button {
+  color: var(--control-text);
+  background: var(--control-bg);
+}
+
+:root[data-theme="light"] .toolbar-button,
+:root[data-theme="light"] .sftp-toggle,
+:root[data-theme="light"] .secondary-button,
+:root[data-theme="light"] .terminal-toolbar button,
+:root[data-theme="light"] .pane-controls button,
+:root[data-theme="light"] .transfer-list-actions button,
+:root[data-theme="light"] .session-batch-toolbar button {
+  border-color: var(--control-border);
+}
+
+:root[data-theme="light"] .icon-button,
+:root[data-theme="light"] .sftp-toolbar button,
+:root[data-theme="light"] .remote-entry > button,
+:root[data-theme="light"] .transfer-item > button,
+:root[data-theme="light"] .sftp-transfer-rail button,
+:root[data-theme="light"] .transfer-actions button,
+:root[data-theme="light"] .tab-new-button,
+:root[data-theme="light"] .connection-manager-row-actions button {
+  border-color: transparent;
+}
+
+:root[data-theme="light"] .toolbar-button:hover,
+:root[data-theme="light"] .icon-button:hover,
+:root[data-theme="light"] .sftp-toggle:hover,
+:root[data-theme="light"] .secondary-button:hover,
+:root[data-theme="light"] .terminal-toolbar button:hover,
+:root[data-theme="light"] .sftp-toolbar button:hover,
+:root[data-theme="light"] .remote-entry > button:hover,
+:root[data-theme="light"] .transfer-item > button:hover,
+:root[data-theme="light"] .sftp-transfer-rail button:hover:not(:disabled),
+:root[data-theme="light"] .pane-controls button:hover,
+:root[data-theme="light"] .transfer-list-actions button:hover,
+:root[data-theme="light"] .transfer-actions button:hover,
+:root[data-theme="light"] .session-batch-toolbar button:hover,
+:root[data-theme="light"] .tab-new-button:hover,
+:root[data-theme="light"] .connection-manager-row-actions button:hover:not(:disabled) {
+  border-color: var(--control-border-hover);
+  color: var(--control-text-strong);
+  background: var(--control-bg-hover);
+}
+
+:root[data-theme="light"] .primary-button {
+  border-color: #1889a5;
+  color: #ffffff;
+  background: linear-gradient(180deg, #20a5bf 0%, #1386a4 100%);
+  box-shadow: 0 3px 9px rgba(8, 126, 164, 0.16), 0 1px 0 rgba(255, 255, 255, 0.35) inset;
+}
+
+:root[data-theme="light"] .primary-button:hover {
+  border-color: #087ea4;
+  color: #ffffff;
+  background: linear-gradient(180deg, #28afc9 0%, #168eab 100%);
+}
+
+:root[data-theme="light"] .danger-button,
+:root[data-theme="light"] .forward-stop-button {
+  border-color: var(--danger-border);
+  color: var(--danger-text);
+  background: var(--danger-bg);
+}
+
+:root[data-theme="light"] .danger-button:hover,
+:root[data-theme="light"] .forward-stop-button:hover {
+  border-color: #df8d87;
+  color: #9c3f3a;
+  background: var(--danger-bg-hover);
+}
+
+:root[data-theme="light"] .segmented-control {
+  border-color: var(--control-border);
+  background: #eef4f6;
+}
+
+:root[data-theme="light"] .segmented-control button {
+  color: #607783;
+  background: transparent;
+}
+
+:root[data-theme="light"] .segmented-control button:hover {
+  color: var(--control-text-strong);
+  background: #e3f0f4;
+}
+
+:root[data-theme="light"] .segmented-control button.active {
+  color: #075d76;
+  background: #d7edf2;
+  box-shadow: 0 1px 3px rgba(47, 91, 105, 0.14);
+}
+
+:root[data-theme="light"] .pane-controls select,
+:root[data-theme="light"] .session-batch-toolbar select {
+  border-color: var(--control-border);
+  color: var(--control-text);
+  background-color: var(--control-bg);
+}
+
+:root[data-theme="light"] .session-batch-toolbar {
+  border-bottom-color: #dce6eb;
+  background: #f4f8fa;
+}
+
+:root[data-theme="light"] .session-batch-toolbar strong {
+  color: #2e6878;
+}
+
+:root[data-theme="light"] .session-batch-toolbar button.danger:hover {
+  border-color: var(--danger-border);
+  color: var(--danger-text);
+  background: var(--danger-bg-hover);
+}
+
+:root[data-theme="light"] .settings-nav button:hover {
+  color: var(--control-text-strong);
+  background: #edf4f7;
+}
+
+:root[data-theme="light"] .accent-picker button {
+  border-color: var(--control-border);
+  color: var(--control-text);
+  background: #ffffff;
+}
+
+:root[data-theme="light"] .accent-picker button.selected {
+  border-color: var(--accent);
+  color: var(--control-text-strong);
+  background: var(--accent-bg);
+}
+
+/* Finish the light surface pass for overlays and compact utility controls. */
+:root[data-theme="light"] .terminal-search,
+:root[data-theme="light"] .modal-footer,
+:root[data-theme="light"] .connection-manager-actions,
+:root[data-theme="light"] .settings-nav,
+:root[data-theme="light"] .theme-card,
+:root[data-theme="light"] .onboarding-modal,
+:root[data-theme="light"] .context-menu,
+:root[data-theme="light"] .backup-dialog,
+:root[data-theme="light"] .port-forward-modal,
+:root[data-theme="light"] .auth-challenge-card {
+  border-color: #d0dde4;
+  background: #f7fafb;
+  color: var(--text);
+}
+
+:root[data-theme="light"] .modal-footer {
+  border-top-color: #dce6eb;
+}
+
+:root[data-theme="light"] .terminal-search {
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 9px 28px rgba(36, 65, 78, 0.16);
+}
+
+:root[data-theme="light"] .terminal-search button,
+:root[data-theme="light"] .sftp-pane-label button,
+:root[data-theme="light"] .group-more,
+:root[data-theme="light"] .color-clear,
+:root[data-theme="light"] .context-menu-item,
+:root[data-theme="light"] .connection-error-actions button,
+:root[data-theme="light"] .remote-edit-actions button {
+  color: var(--control-text);
+  background: transparent;
+}
+
+:root[data-theme="light"] .terminal-search button:hover,
+:root[data-theme="light"] .sftp-pane-label button:hover,
+:root[data-theme="light"] .group-more:hover,
+:root[data-theme="light"] .color-clear:hover,
+:root[data-theme="light"] .context-menu-item:hover,
+:root[data-theme="light"] .connection-error-actions button:hover,
+:root[data-theme="light"] .remote-edit-actions button:hover:not(:disabled) {
+  border-color: var(--control-border-hover);
+  color: var(--control-text-strong);
+  background: var(--control-bg-hover);
+}
+
+:root[data-theme="light"] .context-menu-item.danger {
+  color: var(--danger-text);
+}
+
+:root[data-theme="light"] .context-menu-item.danger:hover {
+  color: #9c3f3a;
+  background: var(--danger-bg-hover);
+}
+
+:root[data-theme="light"] .color-clear {
+  border-color: var(--control-border);
+}
+
+:root[data-theme="light"] .terminal-search input,
+:root[data-theme="light"] .auth-challenge-card input,
+:root[data-theme="light"] .forward-form-grid input {
+  color: var(--text-strong);
+  background: #ffffff;
+}
+
+:root[data-theme="light"] .auth-challenge-card strong,
+:root[data-theme="light"] .port-forward-modal .modal-title-wrap h2 {
+  color: var(--text-strong);
+}
+
+:root[data-theme="light"] .auth-challenge-card > span,
+:root[data-theme="light"] .auth-challenge-card label,
+:root[data-theme="light"] .forward-item-copy span {
+  color: var(--muted);
+}
+
+:root[data-theme="light"] .connection-manager-actions .danger-button:not(:disabled) {
+  color: var(--danger-text);
+}
+
+:root[data-theme="light"] .session-row.selected {
+  color: #16566a;
+  border-color: rgba(8, 126, 164, 0.34);
+  background: #e2f2f6;
+  box-shadow: 0 0 0 1px rgba(8, 126, 164, 0.06) inset;
+}
+
+:root[data-theme="light"] .session-row.selected:hover {
+  color: #10495b;
+  background: #d9eef3;
+}
