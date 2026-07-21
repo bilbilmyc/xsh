@@ -1114,10 +1114,12 @@ function terminalTheme(profileTheme: string, appTheme: AppPreferences["theme"]) 
   }
   const background = theme === "graphite" ? "#111315" : theme === "dusk" ? "#100f18" : "#0b0f14";
   return {
-    background, foreground: "#e5ebf1", cursor: "#7dd3fc", cursorAccent: background,
-    selectionBackground: "#285b78", black: "#111820", red: "#ff7b72", green: "#7ee787",
-    yellow: "#e3b341", blue: "#58a6ff", magenta: "#bc8cff", cyan: "#56d4dd", white: "#d7dde5",
-    brightBlack: "#7d8590", brightRed: "#ffa198", brightGreen: "#aff5b4", brightYellow: "#f2cc60",
-    brightBlue: "#79c0ff", brightMagenta: "#d2a8ff", brightCyan: "#a5d6ff", brightWhite: "#ffffff",
+    // Keep the dark palette crisp and saturated so ANSI output stays readable
+    // on both macOS and Windows displays. The background remains unchanged.
+    background, foreground: "#f0f4f8", cursor: "#7dd3fc", cursorAccent: background,
+    selectionBackground: "#2f6685", black: "#171d24", red: "#ff5f56", green: "#39d353",
+    yellow: "#f2c94c", blue: "#3d9bff", magenta: "#c678dd", cyan: "#22c7d6", white: "#e6edf3",
+    brightBlack: "#8b949e", brightRed: "#ff7b72", brightGreen: "#56d364", brightYellow: "#f0d264",
+    brightBlue: "#79c0ff", brightMagenta: "#d2a8ff", brightCyan: "#56d4dd", brightWhite: "#ffffff",
   };
 }
