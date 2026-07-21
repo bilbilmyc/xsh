@@ -23,6 +23,7 @@ const disconnectedStates = new Set(["disconnected", "failed"]);
 function stateLabel(state: string): string {
   switch (state) {
     case "connected": return "已连接";
+    case "queued": return "等待连接资源";
     case "connecting": return "连接中";
     case "reconnecting": return "重连中";
     case "waiting-network": return "等待网络";

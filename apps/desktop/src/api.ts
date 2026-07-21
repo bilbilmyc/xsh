@@ -6,7 +6,6 @@ import type {
   SshAgentKey,
   SshDiagnosticReport,
   KnownHost,
-  LocalTreeEntry,
   RemoteEntry,
   SavedSession,
   SessionDraft,
@@ -102,7 +101,6 @@ export const api = {
     invoke<RemoteEntry>("sftp_stat", { connectionId, path }),
   prepareRemoteEditPath: (remoteName: string) =>
     invoke<string>("prepare_remote_edit_path", { remoteName }),
-  listLocalTree: (root: string) => invoke<LocalTreeEntry[]>("list_local_tree", { root }),
   createLocalDirectory: (path: string) => invoke<void>("create_local_directory", { path }),
   openLocalPath: (path: string) => invoke<void>("open_local_path", { path }),
   sftpCreateDirectory: (connectionId: Uuid, path: string) =>

@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import {
   Activity,
@@ -35,6 +35,7 @@ import { SessionEditor } from "./components/SessionEditor";
 import { SettingsModal } from "./components/SettingsModal";
 import { SessionSidebar, type SessionActivitySummary } from "./components/SessionSidebar";
 import { WorkspaceManagerModal } from "./components/WorkspaceManagerModal";
+import { OnboardingModal } from "./components/OnboardingModal";
 import type { TerminalCommandRequest } from "./components/TerminalPane";
 import { loadCommandLibrary, saveCommandLibrary, type CommandSnippet } from "./command-library";
 import { loadCommandHistory, recordCommandHistory, saveCommandHistory, type CommandHistoryEntry } from "./command-history";
@@ -57,6 +58,57 @@ const SftpPanel = lazy(() =>
   import("./components/SftpPanel").then((module) => ({ default: module.SftpPanel })),
 );
 
+interface TerminalPaneHostProps {
+  tab: TerminalTab;
+  preferences: AppPreferences;
+  visible: boolean;
+  focused: boolean;
+  connectionEnabled: boolean;
+  command: TerminalCommandRequest | null;
+  onStateChange: (tabId: string, state: string) => void;
+  onConnectionChange: (tabId: string, connectionId: string | null) => void;
+  onFocus: (tabId: string) => void;
+  onCommandResult: (result: { id: string; ok: boolean; error?: string }) => void;
+  onEditSession: (session: SavedSession) => void;
+  onDiagnose: (session: SavedSession) => void;
+}
+
+const TerminalPaneHost = memo(function TerminalPaneHost({
+  tab,
+  preferences,
+  visible,
+  focused,
+  connectionEnabled,
+  command,
+  onStateChange,
+  onConnectionChange,
+  onFocus,
+  onCommandResult,
+  onEditSession,
+  onDiagnose,
+}: TerminalPaneHostProps) {
+  const handleStateChange = useCallback((state: string) => onStateChange(tab.id, state), [onStateChange, tab.id]);
+  const handleConnectionChange = useCallback((connectionId: string | null) => onConnectionChange(tab.id, connectionId), [onConnectionChange, tab.id]);
+  const handleFocus = useCallback(() => onFocus(tab.id), [onFocus, tab.id]);
+
+  return (
+    <TerminalPane
+      session={tab.session}
+      preferences={preferences}
+      visible={visible}
+      focused={focused}
+      connectionEnabled={connectionEnabled}
+      command={command}
+      onStateChange={handleStateChange}
+      onConnectionChange={handleConnectionChange}
+      onFocus={handleFocus}
+      onCommandResult={onCommandResult}
+      onEditSession={onEditSession}
+      onDiagnose={onDiagnose}
+    />
+  );
+});
+
 type GroupEditorState =
   | { mode: "create"; parentId: string | null }
   | { mode: "rename"; group: SessionGroup };
@@ -67,8 +119,10 @@ const IS_MACOS = /Mac|iPhone|iPad|iPod/.test(navigator.platform);
 const PANE_LAYOUT_STORAGE_KEY = "xsh.pane-layout.v1";
 const SPLIT_RATIO_STORAGE_KEY = "xsh.split-ratio.v1";
 const SIDEBAR_VISIBLE_STORAGE_KEY = "xsh.sidebar-visible.v1";
+const ONBOARDING_DISMISSED_STORAGE_KEY = "xsh.onboarding-dismissed.v1";
 const MIN_SPLIT_RATIO = 15;
 const MAX_SPLIT_RATIO = 85;
+const MAX_CONCURRENT_CONNECTIONS = 6;
 
 function loadSplitRatio(): number {
   const value = Number(window.localStorage.getItem(SPLIT_RATIO_STORAGE_KEY));
@@ -77,6 +131,10 @@ function loadSplitRatio(): number {
 
 function loadSidebarVisible(): boolean {
   return window.localStorage.getItem(SIDEBAR_VISIBLE_STORAGE_KEY) !== "false";
+}
+
+function loadOnboardingDismissed(): boolean {
+  return window.localStorage.getItem(ONBOARDING_DISMISSED_STORAGE_KEY) === "true";
 }
 
 function loadPaneLayout(): PaneLayout {
@@ -116,6 +174,7 @@ function saveTabLabels(labels: Record<string, string>) {
 function connectionStateLabel(state: string): string {
   switch (state) {
     case "connected": return "已连接";
+    case "queued": return "等待连接资源";
     case "connecting": return "连接中";
     case "reconnecting": return "重连中";
     case "waiting-network": return "等待网络";
@@ -126,6 +185,10 @@ function connectionStateLabel(state: string): string {
     case "failed": return "连接失败";
     default: return state || "未知状态";
   }
+}
+
+function isConnectionInFlight(state: string): boolean {
+  return state === "connecting" || state === "reconnecting" || state === "authenticating" || state === "awaitingHostKey";
 }
 
 function normalizeTabColor(value: string | null | undefined): string | null {
@@ -158,6 +221,7 @@ function App() {
   const [splitRatio, setSplitRatio] = useState(() => loadSplitRatio());
   const [secondaryTabId, setSecondaryTabId] = useState<string | null>(null);
   const [sidebarVisible, setSidebarVisible] = useState(() => loadSidebarVisible());
+  const [onboardingVisible, setOnboardingVisible] = useState(false);
   const [broadcastEnabled, setBroadcastEnabled] = useState(false);
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState<string | null>(null);
@@ -173,8 +237,25 @@ function App() {
   const [workspaceManagerVisible, setWorkspaceManagerVisible] = useState(false);
   const [connectionManagerVisible, setConnectionManagerVisible] = useState(false);
   const [batchEditorSessions, setBatchEditorSessions] = useState<SavedSession[]>([]);
+  const [workspaceOpening, setWorkspaceOpening] = useState<{
+    name: string;
+    sessionIds: string[];
+    reused: number;
+    omitted: number;
+  } | null>(null);
   const workspaceRestoreStartedRef = useRef(false);
   const terminalStageRef = useRef<HTMLDivElement>(null);
+  const activeTabIdRef = useRef<string | null>(null);
+  const secondaryTabIdRef = useRef<string | null>(null);
+  const paneLayoutRef = useRef<PaneLayout>(paneLayout);
+  activeTabIdRef.current = activeTabId;
+  secondaryTabIdRef.current = secondaryTabId;
+  paneLayoutRef.current = paneLayout;
+
+  const initialConnectionState = (currentTabs: TerminalTab[]) =>
+    currentTabs.filter((tab) => isConnectionInFlight(tab.state)).length < MAX_CONCURRENT_CONNECTIONS
+      ? "connecting"
+      : "queued";
 
   const refresh = useCallback(async () => {
     const [nextGroups, nextSessions] = await Promise.all([
@@ -184,6 +265,7 @@ function App() {
     setGroups(nextGroups);
     setSessions(nextSessions);
     setSessionDataReady(true);
+    if (nextSessions.length === 0 && !loadOnboardingDismissed()) setOnboardingVisible(true);
   }, []);
 
   useEffect(() => {
@@ -201,8 +283,12 @@ function App() {
       const restoredTabs = snapshot.tabs.flatMap((tab) => {
         const session = sessionsById.get(tab.sessionId);
         return session
-          ? [{ id: tab.id, session, state: "connecting", connectionVersion: 0, locked: tab.locked, color: tab.color }]
+          ? [{ id: tab.id, session, state: "queued", connectionVersion: 0, locked: tab.locked, color: tab.color }]
           : [];
+      });
+      const restoredConnectionCount = Math.min(MAX_CONCURRENT_CONNECTIONS, restoredTabs.length);
+      restoredTabs.forEach((tab, index) => {
+        if (index < restoredConnectionCount) tab.state = "connecting";
       });
       const restoredIds = new Set(restoredTabs.map((tab) => tab.id));
       const restoredActiveId = snapshot.activeTabId && restoredIds.has(snapshot.activeTabId)
@@ -224,6 +310,24 @@ function App() {
     }
     setWorkspaceRestored(true);
   }, [sessionDataReady, sessions]);
+
+  useEffect(() => {
+    const inFlight = tabs.filter((tab) => isConnectionInFlight(tab.state)).length;
+    const slots = MAX_CONCURRENT_CONNECTIONS - inFlight;
+    if (slots <= 0 || !tabs.some((tab) => tab.state === "queued")) return;
+    setTabs((current) => {
+      let available = MAX_CONCURRENT_CONNECTIONS - current.filter((tab) => isConnectionInFlight(tab.state)).length;
+      if (available <= 0) return current;
+      let changed = false;
+      const next = current.map((tab) => {
+        if (available <= 0 || tab.state !== "queued") return tab;
+        available -= 1;
+        changed = true;
+        return { ...tab, state: "connecting" };
+      });
+      return changed ? next : current;
+    });
+  }, [tabs]);
 
   useEffect(() => {
     if (!workspaceRestored) return;
@@ -335,12 +439,13 @@ function App() {
     });
   };
 
-  const focusTab = (tabId: string) => {
-    if (paneLayout !== "single" && tabId === secondaryTabId && activeTabId) {
-      setSecondaryTabId(activeTabId);
+  const focusTab = useCallback((tabId: string) => {
+    const currentActiveTabId = activeTabIdRef.current;
+    if (paneLayoutRef.current !== "single" && tabId === secondaryTabIdRef.current && currentActiveTabId) {
+      setSecondaryTabId(currentActiveTabId);
     }
     setActiveTabId(tabId);
-  };
+  }, []);
 
   const focusOtherSplitPane = () => {
     if (paneLayout === "single" || !activeTabId || !secondaryTabId) return;
@@ -375,12 +480,15 @@ function App() {
     });
   };
 
-  const canExecuteCommand = activeTab?.state === "connected";
+  const connectedTabs = tabs.filter((tab) => tab.state === "connected");
+  const canExecuteCommand = broadcastEnabled ? connectedTabs.length > 0 : activeTab?.state === "connected";
   const commandExecutionUnavailableReason = !activeTab
     ? "请先打开一个 SSH 会话。"
-    : activeTab.state === "connected"
-      ? ""
-      : `“${activeTab.session.name}”尚未连接完成。`;
+    : broadcastEnabled
+      ? connectedTabs.length > 0 ? "" : "没有已连接、可广播的会话。"
+      : activeTab.state === "connected"
+        ? ""
+        : `“${activeTab.session.name}”尚未连接完成。`;
 
   const saveCommands = (next: CommandSnippet[]) => {
     setCommands(next);
@@ -423,12 +531,30 @@ function App() {
     setToast(`已通过${source}向 ${targets.length > 1 ? `${targets.length} 个会话` : `“${targets[0].session.name}”`}发送：${label}`);
   };
 
-  const handleTerminalStateChange = (tabId: string, state: string) => {
-    setTabs((current) => current.map((tab) => tab.id === tabId ? { ...tab, state } : tab));
-  };
+  const handleTerminalStateChange = useCallback((tabId: string, state: string) => {
+    setTabs((current) => {
+      const next = current.map((tab) => tab.id === tabId ? { ...tab, state } : tab);
+      if (isConnectionInFlight(state)) return next;
+      let available = MAX_CONCURRENT_CONNECTIONS - next.filter((tab) => isConnectionInFlight(tab.state)).length;
+      if (available <= 0) return next;
+      return next.map((tab) => {
+        if (available <= 0 || tab.state !== "queued") return tab;
+        available -= 1;
+        return { ...tab, state: "connecting" };
+      });
+    });
+  }, []);
+
+  const handleTerminalConnectionChange = useCallback((tabId: string, connectionId: string | null) => {
+    setConnectionIds((current) => ({ ...current, [tabId]: connectionId }));
+  }, []);
+
+  const handleTerminalFocus = useCallback((tabId: string) => {
+    focusTab(tabId);
+  }, [focusTab]);
 
   const queueCommandForActiveTerminal = (command: CommandSnippet) => {
-    if (!activeTab || activeTab.state !== "connected") {
+    if ((!activeTab || activeTab.state !== "connected") && !(broadcastEnabled && connectedTabs.length > 0)) {
       setToast(commandExecutionUnavailableReason);
       return;
     }
@@ -440,14 +566,14 @@ function App() {
     queueTextForActiveTerminal(item.label, text, "快捷命令");
   };
 
-  const handleCommandResult = (result: { id: string; ok: boolean; error?: string }) => {
+  const handleCommandResult = useCallback((result: { id: string; ok: boolean; error?: string }) => {
     setPendingTerminalCommands((current) => Object.fromEntries(
       Object.entries(current).filter(([, request]) => request.id !== result.id),
     ));
     if (!result.ok) setToast(`命令发送失败：${result.error ?? "未知错误"}`);
-  };
+  }, []);
 
-  const runDiagnostic = async (session: SavedSession) => {
+  const runDiagnostic = useCallback(async (session: SavedSession) => {
     setDiagnosticSession(session);
     setDiagnosticReport(null);
     setDiagnosticError(null);
@@ -459,7 +585,11 @@ function App() {
     } finally {
       setDiagnosticLoading(false);
     }
-  };
+  }, []);
+
+  const handleEditSession = useCallback((session: SavedSession) => {
+    setEditorSession(session);
+  }, []);
 
   const openSession = (session: SavedSession) => {
     const existing = tabs.find((tab) => tab.session.id === session.id);
@@ -472,7 +602,7 @@ function App() {
     const tab: TerminalTab = {
       id: crypto.randomUUID(),
       session,
-      state: "connecting",
+      state: initialConnectionState(tabs),
       connectionVersion: 0,
       locked: false,
       color: normalizeTabColor(session.color),
@@ -507,15 +637,28 @@ function App() {
     )) return;
 
     const sessionsToOpen = unopened.slice(0, openLimit);
-    const additions: TerminalTab[] = sessionsToOpen.map((session) => ({
-      id: crypto.randomUUID(),
-      session,
-      state: "connecting",
-      connectionVersion: 0,
-      locked: false,
-      color: normalizeTabColor(session.color),
-    }));
+    let reservedConnections = tabs.filter((tab) => isConnectionInFlight(tab.state)).length;
+    const additions: TerminalTab[] = sessionsToOpen.map((session) => {
+      const state = reservedConnections < MAX_CONCURRENT_CONNECTIONS ? "connecting" : "queued";
+      reservedConnections += state === "connecting" ? 1 : 0;
+      return {
+        id: crypto.randomUUID(),
+        session,
+        state,
+        connectionVersion: 0,
+        locked: false,
+        color: normalizeTabColor(session.color),
+      };
+    });
+    const reused = groupSessions.length - unopened.length;
+    const omitted = Math.max(0, unopened.length - sessionsToOpen.length);
     if (additions.length > 0) setTabs((current) => [...current, ...additions]);
+    setWorkspaceOpening(additions.length > 0 ? {
+      name: group.name,
+      sessionIds: additions.map((tab) => tab.session.id),
+      reused,
+      omitted,
+    } : null);
 
     const firstSession = groupSessions[0];
     const targetTabId = existingBySessionId.get(firstSession.id)?.id ??
@@ -523,15 +666,23 @@ function App() {
       additions[0]?.id;
     if (targetTabId) setActiveTabId(targetTabId);
 
-    const reused = groupSessions.length - unopened.length;
-    const omitted = Math.max(0, unopened.length - additions.length);
     const details = [
       additions.length > 0 ? `新建 ${additions.length} 个连接` : "没有新建连接",
       reused > 0 ? `复用 ${reused} 个已打开标签` : "",
       omitted > 0 ? `另有 ${omitted} 个会话未打开` : "",
     ].filter(Boolean).join("，");
-    setToast(`已打开目录“${group.name}”：${details}。`);
+    setToast(`正在打开目录“${group.name}”：${details}。`);
   };
+
+  useEffect(() => {
+    if (!workspaceOpening) return;
+    const openingTabs = tabs.filter((tab) => workspaceOpening.sessionIds.includes(tab.session.id));
+    if (openingTabs.length < workspaceOpening.sessionIds.length) return;
+    const finished = openingTabs.filter((tab) => !["queued", "connecting", "reconnecting", "waiting-network", "authenticating", "awaitingHostKey"].includes(tab.state));
+    if (finished.length < openingTabs.length) return;
+    const timer = window.setTimeout(() => setWorkspaceOpening(null), 1800);
+    return () => window.clearTimeout(timer);
+  }, [tabs, workspaceOpening]);
 
   const closeTab = (tabId: string, force = false) => {
     setTabs((current) => {
@@ -697,12 +848,13 @@ function App() {
       return [{
         id,
         session,
-        state: "connecting",
+        state: "queued",
         connectionVersion: 0,
         locked: tab.locked,
         color: tab.color,
       } satisfies TerminalTab];
     });
+    restoredTabs.slice(0, MAX_CONCURRENT_CONNECTIONS).forEach((tab) => { tab.state = "connecting"; });
     const restoredActiveId = workspace.snapshot.activeTabId
       ? idMap.get(workspace.snapshot.activeTabId) ?? restoredTabs[0]?.id ?? null
       : restoredTabs[0]?.id ?? null;
@@ -925,6 +1077,22 @@ function App() {
     setToast(failed > 0
       ? `已删除 ${deletedIds.size} 个会话，${failed} 个删除失败。`
       : `已删除 ${deletedIds.size} 个会话及其 XSH 本地凭据。`);
+  };
+
+  const dismissOnboarding = () => {
+    window.localStorage.setItem(ONBOARDING_DISMISSED_STORAGE_KEY, "true");
+    setOnboardingVisible(false);
+  };
+
+  const openOnboardingSessionEditor = () => {
+    dismissOnboarding();
+    setEditorSession(null);
+  };
+
+  const openOnboardingSshConfig = () => {
+    dismissOnboarding();
+    setSshConfigVisible(true);
+    void refreshSshConfig();
   };
 
   const refreshSshConfig = async () => {
@@ -1279,17 +1447,20 @@ function App() {
                   ? tab.id === activeTabId
                   : tab.id === activeTabId || tab.id === secondaryTabId;
                 return (
-                <TerminalPane
+                <TerminalPaneHost
                   key={`${tab.id}:${tab.connectionVersion}`}
-                  session={tab.session}
+                  tab={tab}
                   preferences={preferences}
                   visible={paneVisible}
                   focused={tab.id === activeTabId}
+                  connectionEnabled={tab.state !== "queued"}
                   command={pendingTerminalCommands[tab.id] ?? null}
-                  onStateChange={(state) => handleTerminalStateChange(tab.id, state)}
-                  onConnectionChange={(connectionId) => setConnectionIds((current) => ({ ...current, [tab.id]: connectionId }))}
-                  onFocus={() => focusTab(tab.id)}
+                  onStateChange={handleTerminalStateChange}
+                  onConnectionChange={handleTerminalConnectionChange}
+                  onFocus={handleTerminalFocus}
                   onCommandResult={handleCommandResult}
+                  onEditSession={handleEditSession}
+                  onDiagnose={runDiagnostic}
                 />
                 );
               })}
@@ -1381,7 +1552,14 @@ function App() {
 
       <footer className="status-bar">
         <span>{loading ? "加载会话…" : `${sessions.length} 个会话 · ${tabs.length} 个已打开标签`}</span>
-        <span>{activeTab ? `${getTabLabel(activeTab)} · ${connectionStateLabel(activeTab.state)}` : "未选择会话"} · 本地优先 · SSH2</span>
+        <span className="status-bar-current">
+          {workspaceOpening && (() => {
+            const openingTabs = tabs.filter((tab) => workspaceOpening.sessionIds.includes(tab.session.id));
+            const finished = openingTabs.filter((tab) => !["queued", "connecting", "reconnecting", "waiting-network", "authenticating", "awaitingHostKey"].includes(tab.state)).length;
+            return `正在打开“${workspaceOpening.name}” · ${finished}/${workspaceOpening.sessionIds.length}${workspaceOpening.omitted > 0 ? ` · 跳过 ${workspaceOpening.omitted}` : ""}`;
+          })()}
+          {!workspaceOpening && (activeTab ? `${getTabLabel(activeTab)} · ${connectionStateLabel(activeTab.state)}` : "未选择会话")} · 本地优先 · SSH2
+        </span>
       </footer>
 
       {connectionManagerVisible && (
@@ -1415,6 +1593,9 @@ function App() {
         <CommandCenterModal
           commands={commands}
           activeSessionName={activeTab?.session.name ?? null}
+          activeSessionAddress={activeTab ? `${activeTab.session.username}@${activeTab.session.host}:${activeTab.session.port}` : null}
+          broadcastEnabled={broadcastEnabled}
+          broadcastTargetCount={connectedTabs.length}
           canExecute={canExecuteCommand}
           executionUnavailableReason={commandExecutionUnavailableReason}
           onChange={saveCommands}
@@ -1466,6 +1647,14 @@ function App() {
             setDiagnosticReport(null);
             setDiagnosticError(null);
           }}
+        />
+      )}
+
+      {onboardingVisible && (
+        <OnboardingModal
+          onCreateSession={openOnboardingSessionEditor}
+          onOpenSshConfig={openOnboardingSshConfig}
+          onDismiss={dismissOnboarding}
         />
       )}
 

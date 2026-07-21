@@ -1,7 +1,7 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
-const CONTEXT_MENU_WIDTH = 208;
-const CONTEXT_MENU_ITEM_HEIGHT = 36;
+const CONTEXT_MENU_GUTTER = 8;
 
 export interface ContextMenuItem {
   label: string;
@@ -19,6 +19,22 @@ interface ContextMenuProps {
 
 export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null);
+  const [position, setPosition] = useState<{ left: number; top: number } | null>(null);
+
+  useLayoutEffect(() => {
+    const menu = menuRef.current;
+    if (!menu) return;
+
+    const rect = menu.getBoundingClientRect();
+    const maxLeft = Math.max(CONTEXT_MENU_GUTTER, window.innerWidth - rect.width - CONTEXT_MENU_GUTTER);
+    const maxTop = Math.max(CONTEXT_MENU_GUTTER, window.innerHeight - rect.height - CONTEXT_MENU_GUTTER);
+    const left = Math.max(CONTEXT_MENU_GUTTER, Math.min(x, maxLeft));
+    const preferredTop = y + rect.height + CONTEXT_MENU_GUTTER <= window.innerHeight
+      ? y
+      : y - rect.height;
+    const top = Math.max(CONTEXT_MENU_GUTTER, Math.min(preferredTop, maxTop));
+    setPosition({ left, top });
+  }, [x, y, items.length]);
 
   useEffect(() => {
     const onPointerDown = (event: PointerEvent) => {
@@ -39,13 +55,14 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
     };
   }, [onClose]);
 
-  return (
+  return createPortal(
     <div
       ref={menuRef}
       className="context-menu"
       style={{
-        left: Math.max(8, Math.min(x, window.innerWidth - CONTEXT_MENU_WIDTH - 8)),
-        top: Math.max(8, Math.min(y, window.innerHeight - items.length * CONTEXT_MENU_ITEM_HEIGHT - 16)),
+        left: position?.left ?? x,
+        top: position?.top ?? y,
+        visibility: position ? "visible" : "hidden",
       }}
       onPointerDown={(event) => event.stopPropagation()}
       onClick={(event) => event.stopPropagation()}
@@ -65,6 +82,7 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
           {item.label}
         </button>
       ))}
-    </div>
+    </div>,
+    document.body,
   );
 }

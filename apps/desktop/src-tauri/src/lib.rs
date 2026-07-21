@@ -39,13 +39,6 @@ struct ImportSummary {
     sessions_created: usize,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LocalTreeEntry {
-    local_path: String,
-    relative_path: String,
-    is_directory: bool,
-}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -670,53 +663,6 @@ fn prepare_remote_edit_path(app: AppHandle, remote_name: String) -> CommandResul
 }
 
 #[tauri::command]
-fn list_local_tree(root: PathBuf) -> CommandResult<Vec<LocalTreeEntry>> {
-    if !root.is_dir() {
-        return Err("选择的本地路径不是目录".to_owned());
-    }
-    let mut entries = Vec::new();
-    collect_local_tree(&root, &root, &mut entries)?;
-    entries.sort_by(|left, right| {
-        right
-            .is_directory
-            .cmp(&left.is_directory)
-            .then_with(|| left.relative_path.cmp(&right.relative_path))
-    });
-    Ok(entries)
-}
-
-fn collect_local_tree(
-    root: &std::path::Path,
-    directory: &std::path::Path,
-    entries: &mut Vec<LocalTreeEntry>,
-) -> CommandResult<()> {
-    let children = std::fs::read_dir(directory)
-        .map_err(|error| format!("无法读取本地目录 {}：{error}", directory.display()))?;
-    for child in children {
-        let child = child.map_err(display_error)?;
-        let file_type = child.file_type().map_err(display_error)?;
-        if file_type.is_symlink() {
-            continue;
-        }
-        let path = child.path();
-        let relative_path = path
-            .strip_prefix(root)
-            .map_err(display_error)?
-            .to_string_lossy()
-            .replace('\\', "/");
-        entries.push(LocalTreeEntry {
-            local_path: path.to_string_lossy().into_owned(),
-            relative_path,
-            is_directory: file_type.is_dir(),
-        });
-        if file_type.is_dir() {
-            collect_local_tree(root, &path, entries)?;
-        }
-    }
-    Ok(())
-}
-
-#[tauri::command]
 fn create_local_directory(path: PathBuf) -> CommandResult<()> {
     std::fs::create_dir_all(path).map_err(display_error)
 }
@@ -1073,7 +1019,7 @@ async fn resolve_authentication_method(
                 None => None,
             };
             Ok(RuntimeAuthentication::PrivateKey {
-                private_key_path: private_key_path.clone(),
+                private_key_path: expand_user_path(private_key_path),
                 passphrase,
             })
         }
@@ -1261,6 +1207,22 @@ fn user_home_directory() -> Option<PathBuf> {
     { env::var_os("HOME").map(PathBuf::from) }.or_else(|| env::var_os("HOME").map(PathBuf::from))
 }
 
+fn expand_user_path(path: &std::path::Path) -> PathBuf {
+    let value = path.to_string_lossy();
+    if value == "~" {
+        return user_home_directory().unwrap_or_else(|| path.to_owned());
+    }
+    let rest = value
+        .strip_prefix("~/")
+        .or_else(|| value.strip_prefix("~\\"));
+    if let Some(rest) = rest
+        && let Some(home) = user_home_directory()
+    {
+        return home.join(rest);
+    }
+    path.to_owned()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1317,7 +1279,6 @@ pub fn run() {
             sftp_list_directory,
             sftp_stat,
             prepare_remote_edit_path,
-            list_local_tree,
             create_local_directory,
             open_local_path,
             sftp_create_directory,

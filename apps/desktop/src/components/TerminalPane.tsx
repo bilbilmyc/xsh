@@ -22,11 +22,14 @@ interface TerminalPaneProps {
   preferences: AppPreferences;
   visible: boolean;
   focused: boolean;
+  connectionEnabled: boolean;
   command: TerminalCommandRequest | null;
   onStateChange: (state: string) => void;
   onConnectionChange?: (connectionId: string | null) => void;
   onFocus?: () => void;
   onCommandResult: (result: { id: string; ok: boolean; error?: string }) => void;
+  onEditSession?: (session: SavedSession) => void;
+  onDiagnose?: (session: SavedSession) => void;
 }
 
 export function TerminalPane({
@@ -34,16 +37,21 @@ export function TerminalPane({
   preferences,
   visible,
   focused,
+  connectionEnabled,
   command,
   onStateChange,
   onConnectionChange,
   onFocus,
   onCommandResult,
+  onEditSession,
+  onDiagnose,
 }: TerminalPaneProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const connectionIdRef = useRef<string | null>(null);
+  const connectionEnabledRef = useRef(connectionEnabled);
+  connectionEnabledRef.current = connectionEnabled;
   const reconnectRef = useRef<(() => void) | null>(null);
   const lastCommandIdRef = useRef<string | null>(null);
   const [connectionEpoch, setConnectionEpoch] = useState(0);
@@ -89,6 +97,16 @@ export function TerminalPane({
     let selectionCopyTimer: number | undefined;
     let outputFlushFrame: number | undefined;
     let pendingOutput: Uint8Array[] = [];
+    let pendingOutputHead = 0;
+    let pendingOutputBytes = 0;
+    const outputFrameBudgetBytes = 512 * 1024;
+    const outputStatsEnabled = import.meta.env.DEV;
+    let outputBytesSinceSample = 0;
+    let outputChunksSinceSample = 0;
+    let flushCountSinceSample = 0;
+    let flushBytesSinceSample = 0;
+    let flushDurationSinceSample = 0;
+    let lastOutputSampleAt = performance.now();
     let pendingInput: number[] = [];
     let connectGeneration = 0;
     let reconnectAttempt = 0;
@@ -154,34 +172,104 @@ export function TerminalPane({
     }, 80);
     if (visible) terminal.focus();
 
-    const flushOutput = () => {
-      outputFlushFrame = undefined;
-      if (disposed || pendingOutput.length === 0) return;
-      if (pendingOutput.length === 1) {
-        terminal.write(pendingOutput[0]);
-      } else {
-        const totalLength = pendingOutput.reduce((total, chunk) => total + chunk.length, 0);
-        const merged = new Uint8Array(totalLength);
-        let offset = 0;
-        for (const chunk of pendingOutput) {
-          merged.set(chunk, offset);
-          offset += chunk.length;
-        }
-        terminal.write(merged);
+    const reportOutputStats = (force = false) => {
+      if (!outputStatsEnabled) return;
+      const now = performance.now();
+      const elapsed = now - lastOutputSampleAt;
+      if (!force && elapsed < 1_000) return;
+      if (outputBytesSinceSample > 0 || flushCountSinceSample > 0) {
+        const outputRate = elapsed > 0 ? Math.round((outputBytesSinceSample * 1_000) / elapsed) : 0;
+        const averageFlushDuration = flushCountSinceSample > 0
+          ? (flushDurationSinceSample / flushCountSinceSample).toFixed(1)
+          : "0.0";
+        console.debug(
+          `[XSH] terminal output: ${outputRate} B/s, ${outputChunksSinceSample} chunks, ` +
+          `${flushCountSinceSample} frame flushes, ${flushBytesSinceSample} B flushed, ` +
+          `${averageFlushDuration} ms/flush`,
+        );
       }
-      pendingOutput = [];
+      outputBytesSinceSample = 0;
+      outputChunksSinceSample = 0;
+      flushCountSinceSample = 0;
+      flushBytesSinceSample = 0;
+      flushDurationSinceSample = 0;
+      lastOutputSampleAt = now;
+    };
+    const compactPendingOutput = () => {
+      if (pendingOutputHead === 0) return;
+      if (pendingOutputHead >= pendingOutput.length) {
+        pendingOutput = [];
+        pendingOutputHead = 0;
+        return;
+      }
+      if (pendingOutputHead < 64 && pendingOutputHead * 2 < pendingOutput.length) return;
+      pendingOutput = pendingOutput.slice(pendingOutputHead);
+      pendingOutputHead = 0;
+    };
+    const flushOutput = (drainAll = false) => {
+      outputFlushFrame = undefined;
+      if (disposed) return;
+      const startedAt = performance.now();
+      const budget = drainAll ? Number.MAX_SAFE_INTEGER : outputFrameBudgetBytes;
+      let bytesToWrite = Math.min(pendingOutputBytes, budget);
+      if (bytesToWrite <= 0) {
+        reportOutputStats();
+        return;
+      }
+
+      const firstChunk = pendingOutput[pendingOutputHead];
+      if (firstChunk && firstChunk.length <= bytesToWrite && pendingOutputHead === pendingOutput.length - 1) {
+        terminal.write(firstChunk);
+        pendingOutputHead += 1;
+        pendingOutputBytes -= firstChunk.length;
+        bytesToWrite = firstChunk.length;
+      } else {
+        const merged = new Uint8Array(bytesToWrite);
+        let offset = 0;
+        while (offset < bytesToWrite) {
+          const chunk = pendingOutput[pendingOutputHead];
+          if (!chunk) break;
+          const chunkBytes = Math.min(chunk.length, bytesToWrite - offset);
+          merged.set(chunk.subarray(0, chunkBytes), offset);
+          offset += chunkBytes;
+          pendingOutputBytes -= chunkBytes;
+          if (chunkBytes === chunk.length) {
+            pendingOutputHead += 1;
+          } else {
+            pendingOutput[pendingOutputHead] = chunk.subarray(chunkBytes);
+          }
+        }
+        bytesToWrite = offset;
+        if (bytesToWrite > 0) terminal.write(merged.subarray(0, bytesToWrite));
+      }
+
+      compactPendingOutput();
+      flushCountSinceSample += 1;
+      flushBytesSinceSample += bytesToWrite;
+      flushDurationSinceSample += performance.now() - startedAt;
+      reportOutputStats();
+      if (!disposed && pendingOutputBytes > 0 && !drainAll) {
+        outputFlushFrame = window.requestAnimationFrame(() => flushOutput(false));
+      }
     };
     const flushPendingOutput = () => {
       if (outputFlushFrame !== undefined) {
         window.cancelAnimationFrame(outputFlushFrame);
         outputFlushFrame = undefined;
       }
-      flushOutput();
+      while (!disposed && pendingOutputBytes > 0) flushOutput(true);
+      reportOutputStats(true);
     };
     const queueOutput = (payload: number[]) => {
-      pendingOutput.push(Uint8Array.from(payload));
+      const chunk = Uint8Array.from(payload);
+      if (chunk.length === 0) return;
+      pendingOutput.push(chunk);
+      pendingOutputBytes += chunk.length;
+      outputBytesSinceSample += chunk.length;
+      outputChunksSinceSample += 1;
+      reportOutputStats();
       if (outputFlushFrame === undefined) {
-        outputFlushFrame = window.requestAnimationFrame(flushOutput);
+        outputFlushFrame = window.requestAnimationFrame(() => flushOutput(false));
       }
     };
 
@@ -442,6 +530,11 @@ export function TerminalPane({
     };
 
     const scheduleReconnect = (): boolean => {
+      if (!connectionEnabledRef.current) {
+        setConnectionNotice("等待连接资源…");
+        reportState("queued");
+        return true;
+      }
       if (
         disposed ||
         !session.autoReconnect ||
@@ -465,6 +558,11 @@ export function TerminalPane({
     };
 
     const connect = async (trustUnknownHost: boolean) => {
+      if (!connectionEnabledRef.current) {
+        setConnectionNotice("等待连接资源…");
+        reportState("queued");
+        return;
+      }
       if (!networkOnline) {
         waitForNetwork();
         return;
@@ -641,7 +739,11 @@ export function TerminalPane({
       connectPendingForNetwork = true;
       void connect(false);
     };
-    void connect(false);
+    if (connectionEnabledRef.current) void connect(false);
+    else {
+      setConnectionNotice("等待连接资源…");
+      reportState("queued");
+    }
 
     return () => {
       disposed = true;
@@ -656,6 +758,8 @@ export function TerminalPane({
       if (selectionCopyTimer) window.clearTimeout(selectionCopyTimer);
       if (outputFlushFrame !== undefined) window.cancelAnimationFrame(outputFlushFrame);
       pendingOutput = [];
+      pendingOutputHead = 0;
+      pendingOutputBytes = 0;
       const connectionId = connectionIdRef.current;
       if (connectionId) void api.disconnectTerminal(connectionId).catch(() => undefined);
       onConnectionChange?.(null);
@@ -679,6 +783,11 @@ export function TerminalPane({
       searchAddonRef.current = null;
     };
   }, [session.id, session.updatedAt]);
+
+  useEffect(() => {
+    if (!connectionEnabled || connectionIdRef.current) return;
+    reconnectRef.current?.();
+  }, [connectionEnabled]);
 
   useEffect(() => {
     if (!command || command.id === lastCommandIdRef.current) return;
@@ -796,19 +905,15 @@ export function TerminalPane({
       </div>
       {connectionError && (
         <div className="terminal-connection-error" role="alert">
-          <span title={connectionError}>{connectionError}</span>
-          <button
-            type="button"
-            className="connection-error-retry"
-            onClick={() => reconnectRef.current?.()}
-            aria-label="重试 SSH 连接"
-            title="重试连接"
-          >
-            <RefreshCw size={13} />
-          </button>
-          <button type="button" onClick={() => setConnectionError(null)} aria-label="关闭连接错误">
-            <X size={13} />
-          </button>
+          <div className="connection-error-copy">
+            <strong title={connectionError}>{connectionError}</strong>
+          </div>
+          <div className="connection-error-actions">
+            <button type="button" className="connection-error-retry" onClick={() => reconnectRef.current?.()} title="重试连接"><RefreshCw size={13} />重试</button>
+            {onDiagnose && <button type="button" onClick={() => onDiagnose(session)}>打开诊断</button>}
+            {onEditSession && <button type="button" onClick={() => onEditSession(session)}>编辑会话</button>}
+            <button type="button" onClick={() => setConnectionError(null)} aria-label="关闭连接错误"><X size={13} /></button>
+          </div>
         </div>
       )}
       {!connectionError && connectionNotice && (

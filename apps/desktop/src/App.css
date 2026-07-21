@@ -244,6 +244,12 @@ select {
   background: #0e151d;
 }
 
+.sidebar-controls {
+  min-width: 0;
+  display: grid;
+  grid-template-rows: repeat(3, max-content);
+}
+
 .session-sidebar.resizing,
 .session-sidebar.resizing * {
   cursor: col-resize !important;
@@ -299,6 +305,35 @@ select {
   z-index: 1;
   left: 21px;
   pointer-events: none;
+}
+
+.sidebar-view-tools {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 5px;
+  padding: 6px 10px 7px;
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--faint);
+}
+
+.sidebar-view-tools select {
+  min-width: 0;
+  width: 100%;
+  height: 28px;
+  padding: 0 5px;
+  border: 1px solid var(--line-soft);
+  border-radius: 4px;
+  color: #a7b7c5;
+  background: var(--panel);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.sidebar-view-tools select:focus-visible {
+  border-color: var(--accent);
+  outline: 1px solid rgba(57, 184, 214, 0.24);
 }
 
 .session-tree {
@@ -691,6 +726,10 @@ select {
   background: #657587;
 }
 
+.connection-dot.queued {
+  background: #718096;
+}
+
 .connection-dot.connecting,
 .connection-dot.reconnecting {
   background: var(--yellow);
@@ -739,9 +778,10 @@ select {
   gap: 5px;
   margin: 0 6px;
   padding: 0 9px;
-  color: #8192a3;
+  color: #b3c1cd;
   background: #151e28;
-  font-size: 10.5px;
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .sftp-toggle:hover,
@@ -812,8 +852,9 @@ select {
   border-radius: 5px;
   cursor: pointer;
   pointer-events: auto;
-  color: #6f8294;
+  color: #8195a7;
   background: rgba(17, 27, 37, 0.84);
+  font-weight: 550;
 }
 
 .terminal-toolbar button:hover {
@@ -1075,8 +1116,8 @@ kbd {
   justify-content: space-between;
   padding: 0 8px 0 11px;
   border-bottom: 1px solid var(--line-soft);
-  color: #a8b6c4;
-  font-size: 11px;
+  color: #b9c6d1;
+  font-size: 12.5px;
   font-weight: 650;
   letter-spacing: 0.04em;
 }
@@ -1123,7 +1164,7 @@ kbd {
   flex: 1;
   height: 27px;
   padding: 0 7px;
-  font: 10px "SFMono-Regular", Consolas, monospace;
+  font: 12px "SFMono-Regular", Consolas, monospace;
 }
 
 .sftp-selection-summary {
@@ -1132,11 +1173,150 @@ kbd {
   align-items: center;
   padding: 0 10px;
   border-bottom: 1px solid var(--line-soft);
-  color: #5f7384;
-  font-size: 9px;
+  color: #7890a1;
+  font-size: 10.5px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.sftp-browser-head {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 1px;
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--line-soft);
+}
+
+.sftp-browser-head > section {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  background: var(--panel);
+}
+
+.sftp-browser-head .sftp-pane-icon {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  flex: none;
+  margin-left: auto;
+  padding: 0;
+  border: 1px solid var(--line-soft);
+  border-radius: 4px;
+  color: var(--muted);
+  background: transparent;
+}
+
+.sftp-browser-head .sftp-pane-icon:hover {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+  background: var(--accent-bg);
+}
+
+.sftp-browser-head strong {
+  flex: none;
+  color: var(--text);
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.sftp-browser-head small {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font: 9px "SFMono-Regular", Consolas, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sftp-browser {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 30px minmax(0, 1fr);
+  gap: 1px;
+  overflow: hidden;
+  background: var(--line-soft);
+}
+
+.sftp-browser-pane {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-deep);
+}
+
+.sftp-browser-pane .remote-list {
+  flex: 1;
+}
+
+.sftp-pane-label {
+  min-height: 25px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 5px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.sftp-pane-label button {
+  width: 21px;
+  height: 21px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--muted);
+  background: transparent;
+}
+
+.sftp-pane-label button:hover {
+  border-color: var(--line);
+  color: var(--accent-strong);
+  background: var(--panel-hover);
+}
+
+.sftp-transfer-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: var(--panel);
+}
+
+.sftp-transfer-rail button {
+  width: 25px;
+  height: 25px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--line-soft);
+  border-radius: 4px;
+  color: var(--muted);
+  background: transparent;
+}
+
+.sftp-transfer-rail button:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+  background: var(--accent-bg);
+}
+
+.sftp-transfer-rail button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
 }
 
 .remote-list {
@@ -1156,9 +1336,9 @@ kbd {
   padding: 0 8px;
   border: 1px solid transparent;
   border-radius: 5px;
-  color: #8fa0b1;
+  color: #a8b7c4;
   background: transparent;
-  font-size: 10.5px;
+  font-size: 12px;
   text-align: left;
 }
 
@@ -1184,8 +1364,8 @@ kbd {
 }
 
 .remote-entry-size {
-  color: #536577;
-  font: 9px "SFMono-Regular", Consolas, monospace;
+  color: #718596;
+  font: 10.5px "SFMono-Regular", Consolas, monospace;
 }
 
 .panel-error {
@@ -1193,9 +1373,9 @@ kbd {
   padding: 9px 10px;
   border: 1px solid rgba(255, 107, 107, 0.23);
   border-radius: 6px;
-  color: #ec9a9a;
+  color: #f0a6a6;
   background: rgba(105, 28, 35, 0.18);
-  font-size: 10px;
+  font-size: 11.5px;
   line-height: 1.45;
 }
 
@@ -1209,8 +1389,8 @@ kbd {
 
 .transfer-title {
   margin-bottom: 5px;
-  color: #586a7c;
-  font-size: 9px;
+  color: #7890a1;
+  font-size: 10.5px;
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -1300,13 +1480,13 @@ kbd {
 }
 
 .transfer-copy span {
-  color: #aab7c4;
-  font-size: 9.5px;
+  color: #c0ccd6;
+  font-size: 11px;
 }
 
 .transfer-copy small {
-  color: #607183;
-  font-size: 8.5px;
+  color: #8295a5;
+  font-size: 10px;
 }
 
 .progress-track {
@@ -1605,6 +1785,10 @@ kbd {
 }
 
 @media (max-width: 1050px) {
+  .sftp-browser { grid-template-columns: minmax(0, 1fr) 26px minmax(0, 1fr); }
+  .sftp-browser-head > section { padding-inline: 5px; }
+  .sftp-browser-head strong { font-size: 8px; }
+  .sftp-browser-head small { font-size: 8px; }
   .session-sidebar { width: 210px; }
   .sftp-panel { width: 285px; }
   .toolbar-button { padding: 0 7px; }
@@ -1636,7 +1820,7 @@ kbd {
 }
 
 .sftp-panel {
-  grid-template-rows: 38px auto 38px minmax(0, 1fr) auto;
+  grid-template-rows: 38px auto auto minmax(0, 1fr) auto;
 }
 
 .sftp-header > div {
@@ -1666,7 +1850,7 @@ kbd {
 .remote-path input {
   height: 27px;
   padding: 0 8px;
-  font: 10px "SFMono-Regular", Consolas, monospace;
+  font: 12px "SFMono-Regular", Consolas, monospace;
 }
 
 .sftp-toolbar button:disabled,
@@ -1963,6 +2147,12 @@ kbd {
   --ui-font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   --ui-font-size: 15px;
   --ui-font-adjust: 0px;
+  /* Typography guardrails: readable first, emphasis through weight before size. */
+  --weight-body: 400;
+  --weight-secondary: 500;
+  --weight-control: 600;
+  --weight-emphasis: 650;
+  --weight-heading: 700;
   --font-xs: calc(var(--ui-font-size) - 3px);
   --font-sm: calc(var(--ui-font-size) - 2px);
   --font-md: calc(var(--ui-font-size) - 1px);
@@ -1972,7 +2162,7 @@ kbd {
   font-family: var(--ui-font-family);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: auto;
+  -webkit-font-smoothing: antialiased;
 }
 
 body {
@@ -2131,19 +2321,19 @@ body {
 }
 
 .toolbar-button,
-.sftp-toggle { font-size: var(--font-sm); font-weight: 560; }
-.sidebar-section-title { font-size: var(--font-xs); color: #8394a5; }
-.group-toggle { font-size: var(--font-md); font-weight: 520; }
-.session-row-copy strong { font-size: var(--font-md); font-weight: 620; }
-.session-row-copy small { font-size: var(--font-xs); color: #8798a8; }
+.sftp-toggle { font-size: var(--font-sm); font-weight: 500; }
+.sidebar-section-title { font-size: var(--font-xs); color: #8e9eac; font-weight: 650; }
+.group-toggle { font-size: var(--font-md); font-weight: 600; }
+.session-row-copy strong { font-size: var(--font-md); font-weight: 650; }
+.session-row-copy small { font-size: var(--font-xs); color: #9aaab7; font-weight: 500; }
 .sidebar-hint,
-.status-bar { font-size: 12px; color: #8196a6; }
+.status-bar { font-size: 12px; color: #92a6b5; font-weight: 550; }
 .welcome-panel h1 { font-size: var(--font-display); font-weight: 680; }
 .welcome-panel p { font-size: var(--font-md); color: #8595a5; }
 .welcome-shortcuts { font-size: var(--font-xs); }
-.terminal-tab { font-size: var(--font-sm); font-weight: 540; }
+.terminal-tab { font-size: var(--font-sm); font-weight: 500; }
 .primary-button,
-.secondary-button { font-size: var(--font-md); font-weight: 600; }
+.secondary-button { font-size: var(--font-md); font-weight: 500; }
 .field { font-size: var(--font-sm); color: #93a3b3; }
 .field input,
 .field select { font-size: var(--font-md); }
@@ -2153,8 +2343,8 @@ body {
 .panel-error,
 .settings-empty { font-size: var(--font-sm); }
 .terminal-connection-error {
-  font-size: 11px;
-  line-height: 1.3;
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .group-editor-modal {
@@ -2698,8 +2888,8 @@ body {
 
 .pending-upload {
   padding: 4px 8px;
-  color: #8ea7b8;
-  font-size: 10px;
+  color: #a9bbc8;
+  font-size: 11px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2717,9 +2907,10 @@ body {
   height: 25px;
   border: 1px solid transparent;
   border-radius: 4px;
-  color: #718294;
+  color: #aab9c7;
   background: transparent;
-  font-size: 10px;
+  font-size: 11.5px;
+  font-weight: 600;
 }
 
 .pane-controls button {
@@ -3457,7 +3648,8 @@ body.resizing-terminal-split .split-divider.horizontal * { cursor: row-resize !i
   width: auto;
   min-width: 30px;
   padding: 0 5px;
-  font-size: 10px;
+  font-size: 12px;
+  font-weight: 650;
   font-variant-numeric: tabular-nums;
 }
 
@@ -3915,3 +4107,332 @@ body.resizing-terminal-split .split-divider.horizontal * { cursor: row-resize !i
   background: rgba(255, 255, 255, 0.045);
 }
 .connection-manager-row-actions button:disabled { cursor: not-allowed; opacity: 0.3; }
+
+/* First-run onboarding: keep the same compact, local-first visual language as the rest of XSH. */
+.onboarding-backdrop { z-index: 125; }
+.onboarding-modal {
+  width: min(620px, calc(100vw - 40px));
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
+  border: 1px solid #2b4655;
+  border-radius: 9px;
+  background: var(--panel);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.58), 0 1px 0 rgba(255, 255, 255, 0.035) inset;
+}
+.onboarding-header { height: auto; min-height: 74px; padding: 14px 16px; }
+.onboarding-header .modal-title-wrap { align-items: flex-start; }
+.onboarding-header .modal-title-wrap h2 { color: var(--text-strong); font-size: 17px; }
+.onboarding-header .modal-title-wrap p { max-width: 430px; margin-top: 4px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.onboarding-icon { width: 34px; height: 34px; flex: none; }
+.onboarding-body { padding: 18px 19px 17px; }
+.onboarding-steps { display: grid; gap: 3px; }
+.onboarding-step { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 10px; padding: 10px 9px; border: 1px solid transparent; border-radius: 7px; }
+.onboarding-step:hover { border-color: var(--line); background: var(--panel-hover); }
+.onboarding-step-icon { width: 28px; height: 28px; display: grid; place-items: center; border: 1px solid rgba(57, 184, 214, 0.22); border-radius: 6px; color: var(--accent-strong); background: var(--accent-bg); }
+.onboarding-step div { display: grid; gap: 3px; align-content: center; }
+.onboarding-step strong { color: var(--text); font-size: 12px; font-weight: 650; }
+.onboarding-step span { color: var(--muted); font-size: 11px; line-height: 1.45; }
+.onboarding-step code { padding: 1px 4px; border-radius: 3px; color: #add7e0; background: rgba(57, 184, 214, 0.1); font: 10px var(--mono-font); }
+.onboarding-safety { display: flex; align-items: flex-start; gap: 8px; margin-top: 15px; padding: 10px 11px; border: 1px solid rgba(57, 184, 214, 0.16); border-radius: 6px; color: #86b4bf; background: rgba(57, 184, 214, 0.065); font-size: 10.5px; line-height: 1.5; }
+.onboarding-safety svg { flex: none; margin-top: 1px; color: var(--accent-strong); }
+.onboarding-footer { justify-content: space-between; min-height: 62px; padding: 11px 16px; }
+.onboarding-later { padding: 4px 0; }
+.onboarding-actions { display: flex; align-items: center; gap: 8px; }
+.onboarding-actions button { display: inline-flex; align-items: center; gap: 6px; }
+.session-basic-section,
+.session-advanced-section { margin-block: 0 16px; }
+.session-editor .section-description { margin: -5px 0 12px; color: var(--muted); font-size: 11px; line-height: 1.45; }
+.session-editor .session-basic-section .section-heading { margin-bottom: 7px; }
+.session-editor .session-advanced-section .section-heading { margin-bottom: 7px; }
+.session-editor .session-basic-section,
+.session-editor .session-advanced-section { background: rgba(14, 21, 30, 0.72); }
+
+:root[data-theme="light"] .onboarding-modal { background: #fff; border-color: #cfdbe3; }
+:root[data-theme="light"] .onboarding-header,
+:root[data-theme="light"] .onboarding-footer { background: #f7fafb; }
+:root[data-theme="light"] .onboarding-step:hover { background: #f1f6f8; }
+:root[data-theme="light"] .onboarding-step strong,
+:root[data-theme="light"] .onboarding-header .modal-title-wrap h2 { color: #243746; }
+:root[data-theme="light"] .onboarding-step span,
+:root[data-theme="light"] .onboarding-header .modal-title-wrap p,
+:root[data-theme="light"] .onboarding-safety { color: #5c7180; }
+:root[data-theme="light"] .onboarding-safety { background: #edf8fa; border-color: #c7e9ee; }
+:root[data-theme="light"] .session-editor .session-basic-section,
+:root[data-theme="light"] .session-editor .session-advanced-section { background: #f7fafb; }
+
+@media (max-width: 620px) {
+  .onboarding-modal { width: calc(100vw - 24px); }
+  .onboarding-footer { align-items: stretch; flex-direction: column-reverse; }
+  .onboarding-actions { justify-content: flex-end; }
+}
+
+/* Context menus must escape the scrollable workspace and flip above the pointer near the bottom edge. */
+.context-menu {
+  position: fixed;
+  z-index: 9999;
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+}
+
+/* Connection errors contain variable-length diagnostics and text buttons. Keep each region independent. */
+.terminal-connection-error {
+  align-items: flex-start;
+  min-width: 0;
+  padding: 7px 7px 7px 10px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.connection-error-copy {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: grid;
+  gap: 2px;
+  align-content: start;
+}
+
+.connection-error-copy strong,
+.connection-error-copy small {
+  min-width: 0;
+  display: block;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.connection-error-copy strong {
+  color: #ffd0d0;
+  font-weight: 600;
+}
+
+.connection-error-copy small {
+  color: #efaaaa;
+  font-size: 11px;
+}
+
+.connection-error-actions {
+  min-width: 0;
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.terminal-connection-error .connection-error-actions button {
+  width: auto;
+  min-width: 22px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 0 7px;
+  white-space: nowrap;
+}
+
+.terminal-connection-error .connection-error-actions button:last-child {
+  width: 22px;
+  padding: 0;
+}
+
+/* SFTP single-pane workflow: the local filesystem is selected through the
+   native file dialog instead of being rendered as a second browser. */
+.sftp-browser-head-single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.sftp-browser-single {
+  grid-template-columns: minmax(0, 1fr);
+  background: var(--line-soft);
+}
+
+.sftp-browser-single .sftp-browser-pane {
+  background: var(--bg-deep);
+}
+
+.sftp-upload-hint {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 2px 2px 8px;
+  padding: 10px 11px;
+  border: 1px dashed rgba(57, 184, 214, 0.28);
+  border-radius: 6px;
+  color: #a9bbc7;
+  background: rgba(24, 67, 86, 0.1);
+}
+
+.sftp-upload-hint > svg {
+  flex: none;
+  color: var(--accent-strong);
+}
+
+.sftp-upload-hint div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.sftp-upload-hint strong {
+  color: #c8e2e7;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.sftp-upload-hint span {
+  overflow: hidden;
+  color: #8fa6b5;
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.remote-list.dragging-files {
+  outline: 1px dashed rgba(83, 197, 223, 0.95);
+  outline-offset: -4px;
+  background: rgba(24, 67, 86, 0.22);
+}
+
+.remote-list.dragging-files .sftp-upload-hint {
+  border-color: rgba(83, 197, 223, 0.76);
+  background: rgba(24, 67, 86, 0.28);
+}
+
+.transfer-list {
+  max-height: 210px;
+}
+
+.transfer-copy span {
+  color: #c0ccd6;
+  font-weight: 550;
+}
+
+.transfer-copy small {
+  color: #8295a5;
+}
+
+.transfer-copy .transfer-error {
+  grid-column: 1 / -1;
+  color: #ee9a9a;
+}
+
+.transfer-status.completed { color: #71d38a; }
+.transfer-status.failed { color: #f28b8b; }
+.transfer-status.cancelled { color: #a2afba; }
+.transfer-status.running { color: #72c8df; }
+.transfer-status.queued { color: #c1a96b; }
+
+.progress-track > div.failed { background: #d26b72; }
+.progress-track > div.cancelled { background: #71808d; }
+.progress-track > div.completed { background: #49bd78; }
+
+/* Readability pass: keep the pane actions and SFTP copy legible at a glance.
+   Typography rule: body 400, secondary text 500, controls 600, emphasis 650;
+   avoid ultra-light text and reserve 700 for true headings only. */
+.pane-controls button {
+  color: #c4d0da;
+  font-size: 12px;
+  font-weight: var(--weight-emphasis);
+}
+
+.sftp-toggle {
+  color: #c4d0da;
+  font-size: 13px;
+  font-weight: var(--weight-emphasis);
+}
+
+.sftp-panel {
+  font-size: 13px;
+}
+
+.sftp-header {
+  font-size: 13.5px;
+}
+
+.sftp-header span {
+  color: #718596;
+  font-size: 10.5px;
+  font-weight: var(--weight-secondary);
+}
+
+.sftp-toolbar {
+  color: #8195a5;
+  font-size: 11px;
+}
+
+.sftp-selection-summary {
+  color: #879baa;
+  font-size: 11px;
+}
+
+.sftp-browser-head strong {
+  font-size: 10.5px;
+}
+
+.sftp-browser-head small {
+  color: #8498a8;
+  font-size: 10.5px;
+}
+
+.sftp-pane-label {
+  color: #8295a5;
+  font-size: 11px;
+}
+
+.remote-entry {
+  color: #b5c2cd;
+  font-size: 13px;
+}
+
+.remote-entry:hover {
+  color: #d0dae2;
+}
+
+.remote-entry-size {
+  color: #8296a6;
+  font-size: 11.5px;
+}
+
+.panel-error {
+  color: #f4b3b3;
+  font-size: 12.5px;
+}
+
+.transfer-list {
+  max-height: 220px;
+}
+
+.transfer-title {
+  color: #879baa;
+  font-size: 11.5px;
+}
+
+.remote-edit-copy strong {
+  font-size: 11.5px;
+}
+
+.remote-edit-copy small {
+  color: #8aa0af;
+  font-size: 10.5px;
+}
+
+.remote-edit-actions button {
+  color: #a5b8c5;
+  font-size: 10.5px;
+}
+
+.transfer-copy span {
+  color: #ccd7df;
+  font-size: 12px;
+}
+
+.transfer-copy small {
+  color: #8da0af;
+  font-size: 11px;
+}
+
+.transfer-status {
+  font-size: 11px;
+}

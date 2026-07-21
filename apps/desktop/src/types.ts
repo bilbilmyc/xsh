@@ -160,11 +160,6 @@ export interface RemoteEntry {
   group: string | null;
 }
 
-export interface LocalTreeEntry {
-  localPath: string;
-  relativePath: string;
-  isDirectory: boolean;
-}
 
 export type TransferStatus =
   | "queued"

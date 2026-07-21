@@ -25,6 +25,9 @@ import { containsSensitiveCommand, SENSITIVE_COMMAND_ERROR } from "../sensitive-
 interface CommandCenterModalProps {
   commands: CommandSnippet[];
   activeSessionName: string | null;
+  activeSessionAddress: string | null;
+  broadcastEnabled: boolean;
+  broadcastTargetCount: number;
   canExecute: boolean;
   executionUnavailableReason: string;
   onChange: (commands: CommandSnippet[]) => void;
@@ -41,6 +44,9 @@ type EditorState =
 export function CommandCenterModal({
   commands,
   activeSessionName,
+  activeSessionAddress,
+  broadcastEnabled,
+  broadcastTargetCount,
   canExecute,
   executionUnavailableReason,
   onChange,
@@ -158,8 +164,15 @@ export function CommandCenterModal({
       onToast(executionUnavailableReason);
       return;
     }
-    const requiresConfirmation = command.requiresConfirmation || /\r?\n/.test(command.command.trim());
-    if (requiresConfirmation && !window.confirm(`即将向“${activeSessionName}”发送以下命令：\n\n${command.command}\n\n是否继续？`)) return;
+    const risk = detectCommandRisk(command.command);
+    const requiresConfirmation = command.requiresConfirmation || /\r?\n/.test(command.command.trim()) || Boolean(risk);
+    if (requiresConfirmation) {
+      const target = broadcastEnabled
+        ? `广播到 ${broadcastTargetCount} 个已连接会话${activeSessionName ? `（当前：${activeSessionName}）` : ""}`
+        : `${activeSessionName ?? "当前会话"}${activeSessionAddress ? `\n${activeSessionAddress}` : ""}`;
+      const riskNote = risk ? `\n\n风险提示：${risk}` : "";
+      if (!window.confirm(`执行目标：${target}\n\n命令：\n${command.command}${riskNote}\n\n是否继续？`)) return;
+    }
     onExecute(command);
   };
 
@@ -307,4 +320,18 @@ function CommandEditor({ state, error, onBack, onUpdate, onSave }: CommandEditor
       <div className="command-editor-footer"><span><ShieldAlert size={14} />多行命令在发送前也会二次确认。</span><button className="primary-button" onClick={onSave}><Check size={15} />保存命令</button></div>
     </div>
   );
+}
+
+function detectCommandRisk(command: string): string | null {
+  const normalized = command.toLowerCase();
+  const patterns: Array<[RegExp, string]> = [
+    [/\brm\b|\brmdir\b|\bdel\b/, "删除命令可能不可恢复"],
+    [/\b(shutdown|reboot|halt|poweroff)\b/, "会导致目标主机重启或关机"],
+    [/\bsystemctl\s+(stop|disable|mask)\b/, "可能停止或禁用系统服务"],
+    [/\bkill(all)?\b/, "可能终止正在运行的进程"],
+    [/\bdd\s+if=/, "可能直接改写磁盘数据"],
+    [/\bmkfs(?:\.|\s)/, "可能格式化文件系统"],
+    [/\bdrop\s+(database|table|schema)\b/, "可能删除数据库对象"],
+  ];
+  return patterns.find(([pattern]) => pattern.test(normalized))?.[1] ?? null;
 }

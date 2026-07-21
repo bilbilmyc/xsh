@@ -9,6 +9,7 @@ use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::UNIX_EPOCH;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::{Mutex, mpsc, watch};
 use uuid::Uuid;
@@ -65,6 +66,16 @@ pub enum SftpManagerError {
 }
 
 const DOWNLOAD_RESUME_METADATA_VERSION: u8 = 1;
+const UPLOAD_RESUME_METADATA_VERSION: u8 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct UploadResumeMetadata {
+    version: u8,
+    local_path: String,
+    remote_path: String,
+    total_bytes: u64,
+    modified_at_unix_nanos: Option<u128>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct DownloadResumeMetadata {
@@ -543,10 +554,12 @@ impl SftpManager {
         overwrite: bool,
     ) -> Result<TransferSubscription, SftpManagerError> {
         let session = self.session(connection_id).await?;
-        let total_bytes = tokio::fs::metadata(&local_path)
+        let local_metadata = tokio::fs::metadata(&local_path)
             .await
-            .with_context(|| format!("failed to read {}", local_path.display()))?
-            .len();
+            .with_context(|| format!("failed to read {}", local_path.display()))?;
+        let total_bytes = local_metadata.len();
+        let upload_metadata =
+            make_upload_resume_metadata(&local_path, &remote_path, &local_metadata);
         let transfer_id = Uuid::new_v4();
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (cancel_tx, cancel_rx) = watch::channel(false);
@@ -567,6 +580,7 @@ impl SftpManager {
                 &local_path,
                 &remote_path,
                 overwrite,
+                &upload_metadata,
                 cancel_rx,
                 |transferred| {
                     progress_transferred.store(transferred, Ordering::Relaxed);
@@ -709,30 +723,53 @@ async fn upload_file(
     local_path: &Path,
     remote_path: &str,
     overwrite: bool,
+    expected_metadata: &UploadResumeMetadata,
     cancel: watch::Receiver<bool>,
     mut progress: impl FnMut(u64),
 ) -> anyhow::Result<TransferStatus> {
     if session.try_exists(remote_path.to_owned()).await? && !overwrite {
         bail!("remote destination already exists");
     }
-    let temporary_path = format!("{remote_path}.xsh-part");
-    if session.try_exists(temporary_path.clone()).await? {
-        session.remove_file(temporary_path.clone()).await?;
+
+    let local_metadata = tokio::fs::metadata(local_path).await?;
+    let actual_metadata = make_upload_resume_metadata(local_path, remote_path, &local_metadata);
+    if &actual_metadata != expected_metadata {
+        bail!("local source changed before upload started");
     }
 
+    let temporary_path = upload_temporary_path(remote_path);
+    let metadata_path = upload_metadata_path(remote_path);
+    let transferred =
+        resumable_upload_bytes(session, &temporary_path, &metadata_path, expected_metadata).await?;
+
+    let mut transferred = match transferred {
+        Some(partial_bytes) => partial_bytes,
+        None => {
+            remove_remote_file_if_exists(session, &temporary_path).await?;
+            remove_remote_file_if_exists(session, &metadata_path).await?;
+            write_upload_resume_metadata(session, &metadata_path, expected_metadata).await?;
+            0
+        }
+    };
+    progress(transferred);
+
     let mut local = tokio::fs::File::open(local_path).await?;
+    if transferred > 0 {
+        local.seek(SeekFrom::Start(transferred)).await?;
+    }
+
     let mut remote = session
-        .open_with_flags(
-            temporary_path.clone(),
-            OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
-        )
+        .open_with_flags(temporary_path.clone(), OpenFlags::CREATE | OpenFlags::WRITE)
         .await?;
+    if transferred > 0 {
+        remote.seek(SeekFrom::Start(transferred)).await?;
+    }
+
     let mut buffer = vec![0_u8; 64 * 1024];
-    let mut transferred = 0_u64;
     loop {
         if *cancel.borrow() {
+            remote.flush().await.ok();
             remote.shutdown().await.ok();
-            session.remove_file(temporary_path).await.ok();
             return Ok(TransferStatus::Cancelled);
         }
         let read = local.read(&mut buffer).await?;
@@ -743,15 +780,162 @@ async fn upload_file(
         transferred += read as u64;
         progress(transferred);
     }
+
     remote.flush().await?;
     remote.shutdown().await?;
-    if overwrite && session.try_exists(remote_path.to_owned()).await? {
-        session.remove_file(remote_path.to_owned()).await?;
+    if *cancel.borrow() {
+        return Ok(TransferStatus::Cancelled);
     }
-    session
-        .rename(temporary_path, remote_path.to_owned())
-        .await?;
+    if transferred != expected_metadata.total_bytes {
+        bail!(
+            "local file changed during upload: expected {} bytes, read {transferred} bytes",
+            expected_metadata.total_bytes
+        );
+    }
+
+    let final_local_metadata = tokio::fs::metadata(local_path).await?;
+    let final_expected_metadata =
+        make_upload_resume_metadata(local_path, remote_path, &final_local_metadata);
+    if &final_expected_metadata != expected_metadata {
+        bail!("local source changed during upload");
+    }
+
+    finalize_upload(
+        session,
+        &temporary_path,
+        &metadata_path,
+        remote_path,
+        overwrite,
+    )
+    .await?;
     Ok(TransferStatus::Completed)
+}
+
+fn upload_temporary_path(remote_path: &str) -> String {
+    format!("{remote_path}.xsh-part")
+}
+
+fn upload_metadata_path(remote_path: &str) -> String {
+    format!("{remote_path}.xsh-part.meta")
+}
+
+fn make_upload_resume_metadata(
+    local_path: &Path,
+    remote_path: &str,
+    local_metadata: &std::fs::Metadata,
+) -> UploadResumeMetadata {
+    UploadResumeMetadata {
+        version: UPLOAD_RESUME_METADATA_VERSION,
+        local_path: local_path.to_string_lossy().into_owned(),
+        remote_path: remote_path.to_owned(),
+        total_bytes: local_metadata.len(),
+        modified_at_unix_nanos: local_metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_nanos()),
+    }
+}
+
+fn can_resume_upload(
+    saved: &UploadResumeMetadata,
+    expected: &UploadResumeMetadata,
+    partial_bytes: u64,
+) -> bool {
+    saved == expected && partial_bytes <= expected.total_bytes
+}
+
+async fn resumable_upload_bytes(
+    session: &SftpSession,
+    temporary_path: &str,
+    metadata_path: &str,
+    expected: &UploadResumeMetadata,
+) -> anyhow::Result<Option<u64>> {
+    if !session.try_exists(temporary_path.to_owned()).await?
+        || !session.try_exists(metadata_path.to_owned()).await?
+    {
+        return Ok(None);
+    }
+
+    let temporary_metadata = session.metadata(temporary_path.to_owned()).await?;
+    if temporary_metadata.file_type() != FileType::File {
+        bail!("SFTP upload checkpoint is not a regular file: {temporary_path}");
+    }
+    let partial_bytes = temporary_metadata.len();
+    let raw_metadata = match session.read(metadata_path.to_owned()).await {
+        Ok(raw_metadata) => raw_metadata,
+        Err(_) => return Ok(None),
+    };
+    let saved = match serde_json::from_slice::<UploadResumeMetadata>(&raw_metadata) {
+        Ok(saved) => saved,
+        Err(_) => return Ok(None),
+    };
+
+    Ok(can_resume_upload(&saved, expected, partial_bytes).then_some(partial_bytes))
+}
+
+async fn write_upload_resume_metadata(
+    session: &SftpSession,
+    metadata_path: &str,
+    metadata: &UploadResumeMetadata,
+) -> anyhow::Result<()> {
+    let temporary_metadata_path = format!("{metadata_path}.tmp");
+    remove_remote_file_if_exists(session, &temporary_metadata_path).await?;
+    let encoded =
+        serde_json::to_vec(metadata).context("failed to encode upload resume metadata")?;
+    let mut remote = session
+        .open_with_flags(
+            temporary_metadata_path.clone(),
+            OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
+        )
+        .await?;
+    remote.write_all(&encoded).await?;
+    remote.flush().await?;
+    remote.shutdown().await?;
+    remove_remote_file_if_exists(session, metadata_path).await?;
+    session
+        .rename(temporary_metadata_path, metadata_path.to_owned())
+        .await?;
+    Ok(())
+}
+
+async fn finalize_upload(
+    session: &SftpSession,
+    temporary_path: &str,
+    metadata_path: &str,
+    remote_path: &str,
+    overwrite: bool,
+) -> anyhow::Result<()> {
+    match session
+        .rename(temporary_path.to_owned(), remote_path.to_owned())
+        .await
+    {
+        Ok(()) => {}
+        Err(rename_error) if overwrite && session.try_exists(remote_path.to_owned()).await? => {
+            // Prefer the direct rename above: on servers that support replacing a
+            // destination it is atomic. The remove-and-retry path keeps compatibility
+            // with servers that reject rename-over-existing-file.
+            session.remove_file(remote_path.to_owned()).await?;
+            session
+                .rename(temporary_path.to_owned(), remote_path.to_owned())
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to replace remote destination after rename failed: {rename_error}"
+                    )
+                })?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    remove_remote_file_if_exists(session, metadata_path).await?;
+    Ok(())
+}
+
+async fn remove_remote_file_if_exists(session: &SftpSession, path: &str) -> anyhow::Result<()> {
+    if session.try_exists(path.to_owned()).await? {
+        session.remove_file(path.to_owned()).await?;
+    }
+    Ok(())
 }
 
 async fn download_file(
@@ -985,6 +1169,59 @@ mod tests {
             total_bytes,
             modified_at_unix: Some(1_700_000_000),
         }
+    }
+
+    #[test]
+    fn upload_resume_metadata_round_trips_and_validates_checkpoint() {
+        let source = std::env::temp_dir().join(format!("xsh-sftp-upload-test-{}", Uuid::new_v4()));
+        std::fs::write(&source, b"partial upload contents").expect("create upload fixture");
+        let file_metadata = std::fs::metadata(&source).expect("stat upload fixture");
+        let expected = make_upload_resume_metadata(&source, "/tmp/archive.tar", &file_metadata);
+        let encoded = serde_json::to_vec(&expected).expect("encode upload metadata");
+        let decoded: UploadResumeMetadata =
+            serde_json::from_slice(&encoded).expect("decode upload metadata");
+
+        assert_eq!(decoded, expected);
+        assert!(can_resume_upload(&decoded, &expected, 0));
+        assert!(can_resume_upload(&decoded, &expected, expected.total_bytes));
+        assert!(!can_resume_upload(
+            &decoded,
+            &expected,
+            expected.total_bytes + 1
+        ));
+
+        let _ = std::fs::remove_file(source);
+    }
+
+    #[test]
+    fn changed_upload_source_or_destination_cannot_resume() {
+        let source = std::env::temp_dir().join(format!("xsh-sftp-upload-test-{}", Uuid::new_v4()));
+        std::fs::write(&source, b"upload contents").expect("create upload fixture");
+        let file_metadata = std::fs::metadata(&source).expect("stat upload fixture");
+        let expected = make_upload_resume_metadata(&source, "/tmp/archive.tar", &file_metadata);
+
+        let mut changed_source = expected.clone();
+        changed_source.local_path.push_str(".renamed");
+        assert!(!can_resume_upload(&changed_source, &expected, 4));
+
+        let mut changed_destination = expected.clone();
+        changed_destination.remote_path = "/tmp/other.tar".into();
+        assert!(!can_resume_upload(&changed_destination, &expected, 4));
+
+        let mut changed_size = expected.clone();
+        changed_size.total_bytes += 1;
+        assert!(!can_resume_upload(&changed_size, &expected, 4));
+
+        let _ = std::fs::remove_file(source);
+    }
+
+    #[test]
+    fn upload_checkpoint_paths_are_stable_and_separate() {
+        let temporary = upload_temporary_path("/var/tmp/archive.tar");
+        let metadata = upload_metadata_path("/var/tmp/archive.tar");
+        assert_eq!(temporary, "/var/tmp/archive.tar.xsh-part");
+        assert_eq!(metadata, "/var/tmp/archive.tar.xsh-part.meta");
+        assert_ne!(temporary, metadata);
     }
 
     #[test]

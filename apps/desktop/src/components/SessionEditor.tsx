@@ -392,12 +392,16 @@ export function SessionEditor({
         </header>
 
         <div className="editor-body">
-          <div className="form-grid">
-            <label className="field field-span-2"><span>会话名称</span><input value={name} onChange={(e) => setName(e.target.value)} placeholder="生产环境 API" autoFocus /></label>
-            <label className="field field-span-2"><span>所属目录</span><select value={groupId} onChange={(e) => setGroupId(e.target.value)}><option value="">未分类</option>{groups.map((group) => <option value={group.id} key={group.id}>{group.name}</option>)}</select></label>
-            <label className="field field-span-2"><span>主机</span><input value={host} onChange={(e) => setHost(e.target.value)} placeholder="server.example.com" /></label>
-            <label className="field"><span>端口</span><input type="text" inputMode="numeric" pattern="[0-9]*" value={port} onChange={(e) => setPort(e.target.value.replace(/[^0-9]/g, ""))} placeholder="22" aria-label="SSH 端口" /></label>
-            <label className="field"><span>用户名</span><input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="deploy" /></label>
+          <div className="form-section session-basic-section">
+            <div className="section-heading"><Server size={15} />连接信息</div>
+            <p className="section-description">先填写服务器地址和登录用户，其他选项可以稍后再配置。</p>
+            <div className="form-grid">
+              <label className="field field-span-2"><span>会话名称</span><input value={name} onChange={(e) => setName(e.target.value)} placeholder="生产环境 API" autoFocus /></label>
+              <label className="field field-span-2"><span>所属目录</span><select value={groupId} onChange={(e) => setGroupId(e.target.value)}><option value="">未分类</option>{groups.map((group) => <option value={group.id} key={group.id}>{group.name}</option>)}</select></label>
+              <label className="field field-span-2"><span>主机</span><input value={host} onChange={(e) => setHost(e.target.value)} placeholder="server.example.com" /></label>
+              <label className="field"><span>端口</span><input type="text" inputMode="numeric" pattern="[0-9]*" value={port} onChange={(e) => setPort(e.target.value.replace(/[^0-9]/g, ""))} placeholder="22" aria-label="SSH 端口" /></label>
+              <label className="field"><span>用户名</span><input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="deploy" /></label>
+            </div>
           </div>
 
           <details className="proxy-jump-details">
@@ -429,8 +433,11 @@ export function SessionEditor({
           </div>
 
 
-          <div className="form-grid">
-            <label className="field"><span>环境</span><select value={environment} onChange={(e) => setEnvironment(e.target.value)}><option value="production">生产</option><option value="staging">预发布</option><option value="testing">测试</option><option value="development">开发</option></select></label>
+          <div className="form-section session-advanced-section">
+            <div className="section-heading"><span>终端与高级</span></div>
+            <p className="section-description">连接后行为、终端外观和标签等低频设置按需配置。</p>
+            <div className="form-grid">
+              <label className="field"><span>环境</span><select value={environment} onChange={(e) => setEnvironment(e.target.value)}><option value="production">生产</option><option value="staging">预发布</option><option value="testing">测试</option><option value="development">开发</option></select></label>
             <label className="field"><span>默认远程目录</span><input value={initialDirectory} onChange={(e) => setInitialDirectory(e.target.value)} placeholder="/var/www/app" /></label>
             <label className="field field-span-2"><span>连接后执行命令（可选）</span><textarea className="session-startup-command" value={startupCommand} onChange={(e) => setStartupCommand(e.target.value)} placeholder="例如：clear\nuname -a" rows={3} spellCheck={false} /><small className="field-help">连接成功、进入默认目录后自动发送；支持多行。不要填写密码、Token、私钥或其他敏感信息。</small></label>
             <details className="session-terminal-options field-span-2">
@@ -445,7 +452,8 @@ export function SessionEditor({
                 <datalist id="xsh-scrollback-presets"><option value="10000" /><option value="50000" /><option value="100000" /><option value="250000" /><option value="500000" /><option value="1000000" /></datalist>
               </div>
             </details>
-            <label className="field field-span-2"><span>标签（逗号分隔）</span><input value={tags} onChange={(e) => setTags(e.target.value)} placeholder="linux, api, production" /></label>
+              <label className="field field-span-2"><span>标签（逗号分隔）</span><input value={tags} onChange={(e) => setTags(e.target.value)} placeholder="linux, api, production" /></label>
+            </div>
           </div>
           <div className="check-row"><label><input type="checkbox" checked={favorite} onChange={(e) => setFavorite(e.target.checked)} />加入收藏</label><label><input type="checkbox" checked={autoReconnect} onChange={(e) => setAutoReconnect(e.target.checked)} />断线自动重连</label></div>
           {error && <div className="form-error">{error}</div>}

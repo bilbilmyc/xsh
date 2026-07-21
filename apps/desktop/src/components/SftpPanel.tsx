@@ -9,7 +9,6 @@ import {
   File,
   Folder,
   FolderPlus,
-  FolderUp,
   Pencil,
   RefreshCw,
   Trash2,
@@ -82,7 +81,7 @@ export function SftpPanel({ session, onClose, onToast }: SftpPanelProps) {
       const nextEntries = await api.sftpListDirectory(id, canonical);
       setPath(canonical);
       setPathInput(canonical);
-      setEntries(nextEntries);
+      setEntries(nextEntries.filter((entry) => !isUploadCheckpoint(entry.name)));
       setSelectedPaths(new Set());
       setAnchorPath(null);
     } catch (caught) {
@@ -332,45 +331,6 @@ export function SftpPanel({ session, onClose, onToast }: SftpPanelProps) {
     else if (typeof selectedPath === "string") await uploadFiles([selectedPath]);
   };
 
-  const uploadDirectory = async () => {
-    if (!connectionId) return;
-    const selectedPath = await open({ multiple: false, directory: true, title: "选择要上传的目录" });
-    if (typeof selectedPath !== "string") return;
-    const rootName = selectedPath.replace(/[\\/]$/, "").split(/[\\/]/).pop();
-    if (!rootName || !isValidRemoteName(rootName)) return;
-    const remoteRoot = joinRemotePath(path, rootName);
-    try {
-      const existing = entries.find((entry) => entry.name === rootName);
-      if (existing && existing.fileType !== "directory") {
-        throw new Error(`远程已存在同名文件：${rootName}`);
-      }
-      if (existing && !window.confirm(`远程目录“${rootName}”已存在，是否合并并覆盖同名文件？`)) return;
-      if (!existing) await api.sftpCreateDirectory(connectionId, remoteRoot);
-      const tree = await api.listLocalTree(selectedPath);
-      for (const directory of tree.filter((entry) => entry.isDirectory)) {
-        const remoteDirectory = joinRemotePath(remoteRoot, directory.relativePath);
-        let remote: RemoteEntry | null = null;
-        try {
-          remote = await api.sftpStat(connectionId, remoteDirectory);
-        } catch {
-          // The path does not exist yet. Creation below also preserves the
-          // original server error when the parent is not writable.
-        }
-        if (remote && remote.fileType !== "directory") {
-          throw new Error(`远程路径不是目录：${remoteDirectory}`);
-        }
-        if (!remote) await api.sftpCreateDirectory(connectionId, remoteDirectory);
-      }
-      await runUploadQueue(tree.filter((entry) => !entry.isDirectory).map((entry) => ({
-        localPath: entry.localPath,
-        remotePath: joinRemotePath(remoteRoot, entry.relativePath),
-      })));
-      onToast?.(`目录“${rootName}”已加入上传队列。`);
-    } catch (caught) {
-      setError(`目录上传失败：${String(caught)}`);
-    }
-  };
-
   const downloadTo = async (remotePath: string, localPath: string) => {
     if (!connectionId) return;
     await waitForTransfer((channel) =>
@@ -401,10 +361,17 @@ export function SftpPanel({ session, onClose, onToast }: SftpPanelProps) {
     let localDirectory: string | null = null;
     let singleLocalPath: string | null = null;
     if (files.length === 1 && directories.length === 0) {
-      singleLocalPath = await save({ title: openAfterDownload ? "下载并打开远程文件" : "保存远程文件", defaultPath: files[0].name });
+      singleLocalPath = await save({
+        title: openAfterDownload ? "下载并打开远程文件" : "保存远程文件",
+        defaultPath: files[0].name,
+      });
       if (!singleLocalPath) return;
     } else {
-      localDirectory = await open({ title: `选择保存 ${selectedEntries.length} 项的目录`, directory: true, multiple: false });
+      localDirectory = await open({
+        title: `选择保存 ${selectedEntries.length} 项的目录`,
+        directory: true,
+        multiple: false,
+      });
       if (typeof localDirectory !== "string") return;
     }
     try {
@@ -621,37 +588,63 @@ export function SftpPanel({ session, onClose, onToast }: SftpPanelProps) {
       </header>
       <div className="sftp-toolbar">
         <button onClick={() => connectionId && load(connectionId, parentPath())} title="上级目录">..</button>
-        <button onClick={upload} title="上传"><ArrowUpFromLine size={15} /></button>
-        <button onClick={() => void uploadDirectory()} title="上传目录"><FolderUp size={15} /></button>
-        <button onClick={() => void download(false)} disabled={selectedEntries.length === 0} title="下载选中文件或目录"><ArrowDownToLine size={15} /></button>
-        <button onClick={() => void download(true)} disabled={selectedEntries.length !== 1 || !selected || selected.fileType === "directory"} title="下载并打开"><ExternalLink size={15} /></button>
-        <button onClick={() => void editRemote()} disabled={selectedEntries.length !== 1 || !selected || selected.fileType === "directory"} title="编辑远程文件"><Pencil size={14} /></button>
+        <button onClick={() => void upload()} disabled={!connectionId} title="选择文件并上传到当前远程目录">
+          <ArrowUpFromLine size={15} />
+        </button>
+        <button onClick={() => void download(false)} disabled={selectedEntries.length === 0} title="下载选中文件或目录">
+          <ArrowDownToLine size={15} />
+        </button>
+        <button onClick={() => void download(true)} disabled={selectedEntries.length !== 1 || !selected || selected.fileType === "directory"} title="下载并打开">
+          <ExternalLink size={15} />
+        </button>
+        <button onClick={() => void editRemote()} disabled={selectedEntries.length !== 1 || !selected || selected.fileType === "directory"} title="编辑远程文件">
+          <Pencil size={14} />
+        </button>
         <button onClick={createDirectory} title="新建目录"><FolderPlus size={15} /></button>
         <button onClick={rename} disabled={selectedEntries.length !== 1} title="重命名"><Pencil size={14} /></button>
         <button onClick={remove} disabled={selectedEntries.length === 0} title="删除选中项"><Trash2 size={15} /></button>
-        <button onClick={() => connectionId && load(connectionId, path)} title="刷新"><RefreshCw size={15} /></button>
+        <button onClick={() => connectionId && load(connectionId, path)} title="刷新远程目录"><RefreshCw size={15} /></button>
       </div>
-      <form className="remote-path" onSubmit={(event) => { event.preventDefault(); if (connectionId) void load(connectionId, pathInput); }}>
-        <input value={pathInput} onChange={(event) => setPathInput(event.target.value)} />
-      </form>
-      <div className="sftp-selection-summary">
-        {selectedEntries.length > 0 ? `已选 ${selectedEntries.length} 项 · Command/Ctrl 多选 · Shift 范围选择` : "单击选择 · Command/Ctrl 多选 · Shift 范围选择"}
+      <div className="sftp-browser-head sftp-browser-head-single">
+        <section>
+          <Folder size={13} />
+          <strong>远程目录</strong>
+          <form className="remote-path" onSubmit={(event) => { event.preventDefault(); if (connectionId) void load(connectionId, pathInput); }}>
+            <input value={pathInput} onChange={(event) => setPathInput(event.target.value)} aria-label="远程路径" />
+          </form>
+        </section>
       </div>
-      <div className={`remote-list ${draggingFiles ? "dragging-files" : ""}`} ref={remoteListRef}>
-        {loading && <div className="panel-message">读取远程目录…</div>}
-        {error && <div className="panel-error">{error}</div>}
-        {!loading && !error && entries.map((entry) => (
-          <button
-            key={entry.path}
-            className={`remote-entry ${selectedPaths.has(entry.path) ? "selected" : ""}`}
-            onClick={(event) => selectEntry(entry, event)}
-            onDoubleClick={() => entry.fileType === "directory" && connectionId ? void load(connectionId, entry.path) : void editRemote(entry)}
-          >
-            {entry.fileType === "directory" ? <Folder size={15} /> : <File size={15} />}
-            <span className="remote-entry-name">{entry.name}</span>
-            <span className="remote-entry-size">{entry.fileType === "directory" ? "—" : formatBytes(entry.size)}</span>
-          </button>
-        ))}
+      <div className="sftp-browser sftp-browser-single">
+        <section className="sftp-browser-pane">
+          <div className="sftp-pane-label">
+            <span>{path}</span>
+            <span>{selectedEntries.length > 0 ? `已选 ${selectedEntries.length}` : ""}</span>
+          </div>
+          <div className={`remote-list ${draggingFiles ? "dragging-files" : ""}`} ref={remoteListRef}>
+            <div className="sftp-upload-hint" aria-live="polite">
+              <ArrowUpFromLine size={16} />
+              <div>
+                <strong>{draggingFiles ? "松开鼠标即可上传" : "上传文件到当前目录"}</strong>
+                <span>点击上方上传按钮选择文件，或直接拖入此区域</span>
+              </div>
+            </div>
+            {loading && <div className="panel-message">读取远程目录…</div>}
+            {error && <div className="panel-error">{error}</div>}
+            {!loading && !error && entries.length === 0 && <div className="panel-message">当前目录为空。</div>}
+            {!loading && !error && entries.map((entry) => (
+              <button
+                key={entry.path}
+                className={`remote-entry ${selectedPaths.has(entry.path) ? "selected" : ""}`}
+                onClick={(event) => selectEntry(entry, event)}
+                onDoubleClick={() => entry.fileType === "directory" && connectionId ? void load(connectionId, entry.path) : void editRemote(entry)}
+              >
+                {entry.fileType === "directory" ? <Folder size={15} /> : <File size={15} />}
+                <span className="remote-entry-name">{entry.name}</span>
+                <span className="remote-entry-size">{entry.fileType === "directory" ? "—" : formatBytes(entry.size)}</span>
+              </button>
+            ))}
+          </div>
+        </section>
       </div>
       {(transferItems.length > 0 || pendingUploads.length > 0 || remoteEdit) && (
         <div className="transfer-list">
@@ -687,8 +680,9 @@ export function SftpPanel({ session, onClose, onToast }: SftpPanelProps) {
                     <div className="transfer-copy">
                       <span>{transfer.direction === "upload" ? "上传" : "下载"} · {transfer.remotePath.split("/").pop()}</span>
                       <small className={`transfer-status ${transfer.status}`} title={transfer.error ?? undefined}>
-                        {formatTransferStatus(transfer.status)} · {percent}% · {formatBytes(transfer.transferredBytes)}
+                        {formatTransferStatus(transfer.status)} · {percent}% · {formatBytes(transfer.transferredBytes)}{transfer.totalBytes ? ` / ${formatBytes(transfer.totalBytes)}` : ""}
                       </small>
+                      {transfer.error && <small className="transfer-error" title={transfer.error}>{transfer.error}</small>}
                     </div>
                     <div className="progress-track"><div className={transfer.status} style={{ width: `${percent}%` }} /></div>
                     <div className="transfer-actions">
@@ -713,13 +707,12 @@ export function SftpPanel({ session, onClose, onToast }: SftpPanelProps) {
   );
 }
 
-function isValidRemoteName(value: string) {
-  return Boolean(value) && value !== "." && value !== ".." && !/[\\/]/.test(value);
+function isUploadCheckpoint(name: string) {
+  return name.endsWith(".xsh-part") || name.endsWith(".xsh-part.meta") || name.endsWith(".xsh-part.meta.tmp");
 }
 
-function joinRemotePath(parent: string, child: string) {
-  const normalizedChild = child.replace(/\\/g, "/").replace(/^\/+/, "");
-  return parent === "/" ? `/${normalizedChild}` : `${parent.replace(/\/$/, "")}/${normalizedChild}`;
+function isValidRemoteName(value: string) {
+  return Boolean(value) && value !== "." && value !== ".." && !/[\\/]/.test(value);
 }
 
 function joinLocalPath(parent: string, child: string) {

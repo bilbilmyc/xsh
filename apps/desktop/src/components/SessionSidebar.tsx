@@ -8,6 +8,7 @@ import {
   Pencil,
   Search,
   Server,
+  SlidersHorizontal,
   Star,
   Trash2,
   X,
@@ -57,6 +58,9 @@ const SESSION_DRAG_TYPE = "application/x-xsh-session";
 const SIDEBAR_WIDTH_STORAGE_KEY = "xsh.session-sidebar.width";
 const MIN_SIDEBAR_WIDTH = 190;
 const MAX_SIDEBAR_WIDTH = 360;
+const RECENT_SESSIONS_STORAGE_KEY = "xsh.session-sidebar.recent.v1";
+type SessionFilter = "all" | "favorite" | "open" | "failed";
+type SessionSort = "recent" | "name" | "status";
 
 export function SessionSidebar({
   groups,
@@ -81,6 +85,9 @@ export function SessionSidebar({
   onDeleteGroup,
 }: SessionSidebarProps) {
   const [query, setQuery] = useState("");
+  const [sessionFilter, setSessionFilter] = useState<SessionFilter>("all");
+  const [sessionSort, setSessionSort] = useState<SessionSort>("recent");
+  const [recentSessions, setRecentSessions] = useState<Record<string, number>>(loadRecentSessions);
   const [contextTarget, setContextTarget] = useState<ContextTarget | null>(null);
   const [draggedSessionId, setDraggedSessionId] = useState<string | null>(null);
   const [draggedSessionIds, setDraggedSessionIds] = useState<Set<string>>(new Set());
@@ -144,16 +151,42 @@ export function SessionSidebar({
   }, []);
 
   const normalizedQuery = query.trim().toLowerCase();
-  const visibleSessions = useMemo(
-    () =>
-      sessions.filter((session) => {
-        if (!normalizedQuery) return true;
-        return [session.name, session.host, session.username, ...session.tags].some((value) =>
-          value.toLowerCase().includes(normalizedQuery),
-        );
-      }),
-    [normalizedQuery, sessions],
-  );
+  const visibleSessions = useMemo(() => {
+    const filtered = sessions.filter((session) => {
+      if (normalizedQuery && ![session.name, session.host, session.username, ...session.tags].some((value) =>
+        value.toLowerCase().includes(normalizedQuery),
+      )) return false;
+      const activity = activityBySessionId[session.id];
+      if (sessionFilter === "favorite" && !session.favorite) return false;
+      if (sessionFilter === "open" && !(activity?.openTabs > 0)) return false;
+      if (sessionFilter === "failed" && !(activity?.failed > 0 || activity?.disconnected > 0)) return false;
+      return true;
+    });
+    return filtered.sort((left, right) => {
+      if (sessionSort === "name") return left.name.localeCompare(right.name, "zh-CN");
+      if (sessionSort === "status") {
+        const stateRank = (session: SavedSession) => {
+          const activity = activityBySessionId[session.id];
+          if (activity?.failed) return 0;
+          if (activity?.connecting || activity?.reconnecting) return 1;
+          if (activity?.connected) return 2;
+          if (activity?.openTabs) return 3;
+          return 4;
+        };
+        return stateRank(left) - stateRank(right) || left.name.localeCompare(right.name, "zh-CN");
+      }
+      return (recentSessions[right.id] ?? 0) - (recentSessions[left.id] ?? 0)
+        || Number(right.favorite) - Number(left.favorite)
+        || left.name.localeCompare(right.name, "zh-CN");
+    });
+  }, [activityBySessionId, normalizedQuery, recentSessions, sessionFilter, sessionSort, sessions]);
+
+  const markSessionOpened = (session: SavedSession) => {
+    const next = { ...recentSessions, [session.id]: Date.now() };
+    setRecentSessions(next);
+    window.localStorage.setItem(RECENT_SESSIONS_STORAGE_KEY, JSON.stringify(next));
+    onOpen(session);
+  };
 
   const toggleGroup = (groupId: string) => {
     setExpanded((current) => {
@@ -448,7 +481,7 @@ export function SessionSidebar({
       setSelectionAnchorId(session.id);
       return;
     }
-    onOpen(session);
+    markSessionOpened(session);
   };
 
   const sessionRow = (session: SavedSession) => {
@@ -460,7 +493,7 @@ export function SessionSidebar({
       key={session.id}
       className={`session-row ${activeSessionId === session.id ? "active" : ""} ${selectedSessionIds.has(session.id) ? "selected" : ""} ${draggedSessionIds.has(session.id) ? "dragging" : ""}`}
       onPointerDown={(event) => beginPointerDrag(event, session)}
-      onDoubleClick={() => onOpen(session)}
+      onDoubleClick={() => markSessionOpened(session)}
       onClick={(event) => handleSessionClick(event, session)}
       onContextMenu={(event) => showSessionMenu(event, session)}
       aria-pressed={selectedSessionIds.has(session.id)}
@@ -588,40 +621,56 @@ export function SessionSidebar({
       style={{ width: `${sidebarWidth}px` }}
       onKeyDown={handleSidebarKeyDown}
     >
-      <div className="sidebar-search">
-        <Search size={14} />
-        <input
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="搜索会话、主机或标签"
-          aria-label="搜索会话、主机或标签"
-        />
-      </div>
-      {selectedSessions.length > 0 && (
-        <div className="session-batch-toolbar" aria-label="会话批量操作">
-          <strong role="status">{selectedSessions.length} 已选</strong>
-          <select
-            value={batchGroupId}
-            title="批量移动到目录"
-            aria-label="批量移动到目录"
-            onChange={(event) => {
-              const value = event.target.value;
-              setBatchGroupId("");
-              if (!value) return;
-              void onMoveSessions(selectedSessions, value === "__ungrouped__" ? null : value);
-            }}
-          >
-            <option value="">移动到…</option>
-            <option value="__ungrouped__">未分类</option>
-            {groups.map((group) => <option key={group.id} value={group.id}>{groupPathLabel(group, groups)}</option>)}
-          </select>
-          <button onClick={() => onBatchEdit(selectedSessions)} title="批量编辑" aria-label="批量编辑"><Pencil size={13} /></button>
-          <button onClick={() => void onSetFavorite(selectedSessions, true)} title="批量收藏" aria-label="批量收藏"><Star size={13} /></button>
-          <button onClick={() => void onSetFavorite(selectedSessions, false)} title="批量取消收藏" aria-label="批量取消收藏"><Star size={13} fill="currentColor" /></button>
-          <button className="danger" onClick={() => void onDeleteSessions(selectedSessions)} title="批量删除" aria-label="批量删除"><Trash2 size={13} /></button>
-          <button onClick={clearSelection} title="清除选择" aria-label="清除选择"><X size={13} /></button>
+      <div className="sidebar-controls">
+        <div className="sidebar-search">
+          <Search size={14} />
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="搜索会话、主机或标签"
+            aria-label="搜索会话、主机或标签"
+          />
         </div>
-      )}
+        <div className="sidebar-view-tools" aria-label="会话筛选和排序">
+          <SlidersHorizontal size={13} />
+          <select value={sessionFilter} onChange={(event) => setSessionFilter(event.target.value as SessionFilter)} aria-label="筛选会话">
+            <option value="all">全部会话</option>
+            <option value="favorite">仅收藏</option>
+            <option value="open">已打开</option>
+            <option value="failed">需关注</option>
+          </select>
+          <select value={sessionSort} onChange={(event) => setSessionSort(event.target.value as SessionSort)} aria-label="排序会话">
+            <option value="recent">最近使用</option>
+            <option value="status">连接状态</option>
+            <option value="name">名称</option>
+          </select>
+        </div>
+        {selectedSessions.length > 0 && (
+          <div className="session-batch-toolbar" aria-label="会话批量操作">
+            <strong role="status">{selectedSessions.length} 已选</strong>
+            <select
+              value={batchGroupId}
+              title="批量移动到目录"
+              aria-label="批量移动到目录"
+              onChange={(event) => {
+                const value = event.target.value;
+                setBatchGroupId("");
+                if (!value) return;
+                void onMoveSessions(selectedSessions, value === "__ungrouped__" ? null : value);
+              }}
+            >
+              <option value="">移动到…</option>
+              <option value="__ungrouped__">未分类</option>
+              {groups.map((group) => <option key={group.id} value={group.id}>{groupPathLabel(group, groups)}</option>)}
+            </select>
+            <button onClick={() => onBatchEdit(selectedSessions)} title="批量编辑" aria-label="批量编辑"><Pencil size={13} /></button>
+            <button onClick={() => void onSetFavorite(selectedSessions, true)} title="批量收藏" aria-label="批量收藏"><Star size={13} /></button>
+            <button onClick={() => void onSetFavorite(selectedSessions, false)} title="批量取消收藏" aria-label="批量取消收藏"><Star size={13} fill="currentColor" /></button>
+            <button className="danger" onClick={() => void onDeleteSessions(selectedSessions)} title="批量删除" aria-label="批量删除"><Trash2 size={13} /></button>
+            <button onClick={clearSelection} title="清除选择" aria-label="清除选择"><X size={13} /></button>
+          </div>
+        )}
+      </div>
       <div className="session-tree" tabIndex={0} aria-label="会话列表" onContextMenu={showSidebarMenu}>
         {favorites.length > 0 && (
           <section className="sidebar-section">
@@ -671,7 +720,7 @@ export function SessionSidebar({
         </section>
       </div>
       <div className={`sidebar-hint ${dragFeedback ? "drag-feedback" : ""}`} role="status">
-        {dragFeedback ?? "单击连接 · Command/Ctrl 多选 · Shift 连选 · Command/Ctrl+A 全选 · Esc 清除"}
+        {dragFeedback ?? `${visibleSessions.length}/${sessions.length} 个会话 · Command/Ctrl 多选 · Shift 连选 · Esc 清除`}
       </div>
       {contextTarget && (
         <ContextMenu
@@ -760,4 +809,16 @@ function countGroupSessions(groupId: string, groups: SessionGroup[], sessions: S
     });
   }
   return sessions.filter((session) => session.groupId && included.has(session.groupId)).length;
+}
+
+function loadRecentSessions(): Record<string, number> {
+  try {
+    const raw = window.localStorage.getItem(RECENT_SESSIONS_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return Object.fromEntries(Object.entries(parsed).filter((entry): entry is [string, number] => typeof entry[1] === "number"));
+  } catch {
+    return {};
+  }
 }
