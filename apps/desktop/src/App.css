@@ -4838,3 +4838,202 @@ body.resizing-terminal-split .split-divider.horizontal * { cursor: row-resize !i
   color: #10495b;
   background: #d9eef3;
 }
+
+/* Settings modal light theme: the settings surface has its own hierarchy and
+   must not inherit the dark modal/sidebar/footer surfaces from the base theme. */
+:root[data-theme="light"] .settings-modal,
+:root[data-theme="light"] .settings-modal-wide {
+  border-color: #cbd9e1;
+  background: #ffffff;
+  box-shadow: 0 22px 64px rgba(36, 65, 78, 0.18), 0 1px 0 rgba(255, 255, 255, 0.9) inset;
+}
+
+:root[data-theme="light"] .settings-modal .modal-header {
+  border-bottom-color: #dce6eb;
+  background: linear-gradient(180deg, #ffffff 0%, #f6fafb 100%);
+}
+
+:root[data-theme="light"] .settings-modal .modal-title-wrap strong,
+:root[data-theme="light"] .settings-modal .modal-title-wrap h2 {
+  color: #203847;
+}
+
+:root[data-theme="light"] .settings-modal .modal-title-wrap small,
+:root[data-theme="light"] .settings-modal .modal-title-wrap p {
+  color: #718692;
+}
+
+:root[data-theme="light"] .settings-modal .modal-icon {
+  border-color: #bfe1e9;
+  color: #087ea4;
+  background: #eaf7fa;
+}
+
+:root[data-theme="light"] .settings-layout {
+  background: #ffffff;
+}
+
+:root[data-theme="light"] .settings-nav {
+  border-right-color: #dce6eb;
+  background: #f3f7f9;
+}
+
+:root[data-theme="light"] .settings-nav button {
+  color: #617986;
+}
+
+:root[data-theme="light"] .settings-nav button:hover {
+  color: #17495a;
+  background: #e8f3f6;
+}
+
+:root[data-theme="light"] .settings-nav button.active {
+  color: #075d76;
+  background: #dceff3;
+  box-shadow: 0 0 0 1px rgba(8, 126, 164, 0.08) inset;
+}
+
+:root[data-theme="light"] .settings-body,
+:root[data-theme="light"] .settings-page {
+  background: #ffffff;
+}
+
+:root[data-theme="light"] .settings-heading strong,
+:root[data-theme="light"] .settings-section-title {
+  color: #203847;
+}
+
+:root[data-theme="light"] .settings-heading span,
+:root[data-theme="light"] .settings-tip,
+:root[data-theme="light"] .settings-section-title small {
+  color: #718692;
+}
+
+:root[data-theme="light"] .theme-card {
+  border-color: #cfdde4;
+  color: #617986;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(36, 65, 78, 0.03);
+}
+
+:root[data-theme="light"] .theme-card:hover {
+  border-color: #8bb9c8;
+  background: #fbfdfe;
+  box-shadow: 0 3px 10px rgba(36, 65, 78, 0.08);
+}
+
+:root[data-theme="light"] .theme-card.selected {
+  border-color: #087ea4;
+  background: #f4fbfc;
+  box-shadow: 0 0 0 1px #087ea4 inset, 0 3px 10px rgba(8, 126, 164, 0.08);
+}
+
+:root[data-theme="light"] .theme-card strong {
+  color: #203847;
+}
+
+:root[data-theme="light"] .theme-card small {
+  color: #78909c;
+}
+
+:root[data-theme="light"] .accent-picker button {
+  min-height: 34px;
+  color: #526f7c;
+  background: #ffffff;
+}
+
+:root[data-theme="light"] .accent-picker button:hover {
+  border-color: #8bb9c8;
+  color: #17495a;
+  background: #edf7f9;
+}
+
+:root[data-theme="light"] .accent-picker button.selected {
+  color: #075d76;
+  background: #e7f5f8;
+}
+
+:root[data-theme="light"] .settings-modal .field,
+:root[data-theme="light"] .settings-modal .section-heading,
+:root[data-theme="light"] .settings-modal .check-row {
+  color: #526b78;
+}
+
+:root[data-theme="light"] .settings-modal .field input,
+:root[data-theme="light"] .settings-modal .field select,
+:root[data-theme="light"] .settings-modal input,
+:root[data-theme="light"] .settings-modal select,
+:root[data-theme="light"] .settings-modal textarea {
+  border-color: #c8d6de;
+  color: #203847;
+  background: #ffffff;
+}
+
+:root[data-theme="light"] .settings-modal .field input:hover,
+:root[data-theme="light"] .settings-modal .field select:hover,
+:root[data-theme="light"] .settings-modal input:hover,
+:root[data-theme="light"] .settings-modal select:hover,
+:root[data-theme="light"] .settings-modal textarea:hover {
+  border-color: #8bb9c8;
+}
+
+:root[data-theme="light"] .settings-modal .form-section {
+  border-color: #dbe6eb;
+  background: #f7fafb;
+}
+
+:root[data-theme="light"] .settings-modal .font-preview {
+  border-color: #d1dfe5;
+  color: #263f4d;
+  background: #f7fafb;
+}
+
+:root[data-theme="light"] .settings-modal .terminal-font-preview {
+  border-color: #cbd9e1;
+  color: #263746;
+  background: #fbfcfe;
+}
+
+:root[data-theme="light"] .settings-modal .security-note {
+  border-color: #c8e2e8;
+  color: #4d7480;
+  background: #eef9fb;
+}
+
+:root[data-theme="light"] .settings-modal .known-host-card {
+  border-color: #d5e1e6;
+  background: #f8fafb;
+}
+
+:root[data-theme="light"] .settings-modal .known-host-heading strong {
+  color: #294553;
+}
+
+:root[data-theme="light"] .settings-modal .known-host-heading strong span,
+:root[data-theme="light"] .settings-modal .known-host-heading small,
+:root[data-theme="light"] .settings-modal .known-host-meta {
+  color: #718692;
+}
+
+:root[data-theme="light"] .settings-modal .known-host-fingerprint code {
+  color: #17627a;
+  background: #eef5f7;
+}
+
+:root[data-theme="light"] .settings-modal .modal-footer,
+:root[data-theme="light"] .settings-modal .settings-footer {
+  border-top-color: #d5e1e6;
+  background: #f7fafb;
+}
+
+:root[data-theme="light"] .settings-modal .settings-footer .secondary-button {
+  border-color: #c6d5dc;
+  color: #526b78;
+  background: #ffffff;
+}
+
+:root[data-theme="light"] .settings-modal .settings-footer .secondary-button:hover {
+  border-color: #8bb9c8;
+  color: #17495a;
+  background: #eaf5f8;
+}
