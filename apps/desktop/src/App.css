@@ -5037,3 +5037,170 @@ body.resizing-terminal-split .split-divider.horizontal * { cursor: row-resize !i
   color: #17495a;
   background: #eaf5f8;
 }
+
+/* Settings typography: keep the preferences panel readable and consistent with
+   the main workspace without changing session, terminal, or SFTP rendering. */
+.settings-modal {
+  font-size: var(--ui-font-size);
+}
+
+.settings-modal .settings-nav button {
+  min-height: 40px;
+  font-size: var(--font-md);
+  font-weight: var(--weight-control);
+  line-height: 1.35;
+}
+
+.settings-modal .settings-page {
+  font-size: var(--ui-font-size);
+}
+
+.settings-modal .settings-heading {
+  margin-bottom: 14px;
+}
+
+.settings-modal .settings-heading:not(:first-child) {
+  margin-top: 28px;
+}
+
+.settings-modal .settings-heading strong {
+  font-size: var(--font-xl);
+  font-weight: var(--weight-heading);
+  line-height: 1.3;
+}
+
+.settings-modal .settings-heading span {
+  max-width: 58%;
+  font-size: var(--font-sm);
+  font-weight: var(--weight-secondary);
+  line-height: 1.45;
+}
+
+.settings-modal .field {
+  gap: 7px;
+  font-size: var(--font-sm);
+  font-weight: var(--weight-control);
+  line-height: 1.4;
+}
+
+.settings-modal .field input,
+.settings-modal .field select {
+  min-height: 36px;
+  height: 36px;
+  font-size: var(--font-md);
+  font-weight: var(--weight-secondary);
+}
+
+.settings-modal .field-help {
+  display: block;
+  margin-top: 1px;
+  color: var(--muted);
+  font-size: var(--font-xs);
+  font-weight: var(--weight-secondary);
+  line-height: 1.55;
+}
+
+.settings-modal .theme-card {
+  padding: 10px;
+}
+
+.settings-modal .theme-card strong {
+  margin-top: 8px;
+  font-size: var(--font-md);
+  font-weight: var(--weight-emphasis);
+  line-height: 1.35;
+}
+
+.settings-modal .theme-card small {
+  margin-top: 4px;
+  font-size: var(--font-xs);
+  font-weight: var(--weight-secondary);
+  line-height: 1.45;
+}
+
+.settings-modal .accent-picker button {
+  min-height: 36px;
+  height: 36px;
+  font-size: var(--font-sm);
+  font-weight: var(--weight-control);
+}
+
+.settings-modal .range-field > span {
+  font-size: var(--font-sm);
+  font-weight: var(--weight-control);
+  line-height: 1.4;
+}
+
+.settings-modal .range-field output {
+  font-size: var(--font-sm);
+  font-weight: var(--weight-emphasis);
+}
+
+.settings-modal .check-row {
+  gap: 9px;
+  margin-top: 16px;
+  font-size: var(--font-sm);
+  font-weight: var(--weight-secondary);
+  line-height: 1.5;
+}
+
+.settings-modal .check-row input {
+  flex: none;
+  width: 15px;
+  height: 15px;
+}
+
+.settings-modal .section-heading,
+.settings-modal .settings-section-title {
+  font-size: var(--font-md);
+  font-weight: var(--weight-emphasis);
+  line-height: 1.4;
+}
+
+.settings-modal .settings-section-title small {
+  font-size: var(--font-xs);
+  font-weight: var(--weight-secondary);
+}
+
+.settings-modal .security-note,
+.settings-modal .settings-tip,
+.settings-modal .settings-empty,
+.settings-modal .settings-message {
+  font-size: var(--font-sm);
+  font-weight: var(--weight-secondary);
+  line-height: 1.6;
+}
+
+.settings-modal .font-preview {
+  font-size: var(--font-md);
+  font-weight: var(--weight-secondary);
+  line-height: 1.55;
+}
+
+.settings-modal .known-host-heading strong {
+  font-size: var(--font-md);
+  font-weight: var(--weight-emphasis);
+}
+
+.settings-modal .known-host-heading small,
+.settings-modal .known-host-meta,
+.settings-modal .known-host-fingerprint code {
+  font-size: var(--font-xs);
+  font-weight: var(--weight-secondary);
+}
+
+.settings-modal .shortcut-row strong {
+  font-size: var(--font-sm);
+  font-weight: var(--weight-emphasis);
+}
+
+.settings-modal .shortcut-row small {
+  font-size: var(--font-xs);
+  font-weight: var(--weight-secondary);
+  line-height: 1.5;
+}
+
+.settings-modal .settings-footer button {
+  font-size: var(--font-sm);
+  font-weight: var(--weight-control);
+}
