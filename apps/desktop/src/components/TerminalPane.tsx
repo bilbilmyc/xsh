@@ -1105,11 +1105,13 @@ function terminalTheme(profileTheme: string, appTheme: AppPreferences["theme"]) 
   }
   if (theme === "light") {
     return {
-      background: "#ffffff", foreground: "#17212b", cursor: "#087ea4", cursorAccent: "#ffffff",
-      selectionBackground: "#b9e4f2", black: "#17212b", red: "#c62828", green: "#16794c",
-      yellow: "#8a5a00", blue: "#1769aa", magenta: "#7b3fb2", cyan: "#087ea4", white: "#eef2f5",
-      brightBlack: "#687784", brightRed: "#b71c1c", brightGreen: "#11663f", brightYellow: "#795000",
-      brightBlue: "#125a91", brightMagenta: "#642f92", brightCyan: "#05657f", brightWhite: "#17212b",
+      // A warm, ink-forward light palette keeps terminal output distinct from
+      // the white workspace without looking like a dark theme pasted on top.
+      background: "#fbfcfe", foreground: "#263746", cursor: "#087ea4", cursorAccent: "#fbfcfe",
+      selectionBackground: "#b8e1ee", black: "#263746", red: "#c43d3d", green: "#167a55",
+      yellow: "#946600", blue: "#1769aa", magenta: "#7b3fb2", cyan: "#087ea4", white: "#edf2f5",
+      brightBlack: "#71808b", brightRed: "#a92f36", brightGreen: "#0f6848", brightYellow: "#7d5400",
+      brightBlue: "#125a91", brightMagenta: "#642f92", brightCyan: "#05657f", brightWhite: "#15232e",
     };
   }
   const background = theme === "graphite" ? "#111315" : theme === "dusk" ? "#100f18" : "#0b0f14";

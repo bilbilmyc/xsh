@@ -2317,7 +2317,7 @@ body {
 :root[data-theme="light"] .xterm-host .xterm .xterm-screen,
 :root[data-theme="light"] .xterm-host .xterm .xterm-rows,
 :root[data-theme="light"] .xterm-host .xterm .xterm-helpers {
-  --xsh-terminal-background: #ffffff;
+  --xsh-terminal-background: #fbfcfe;
 }
 
 .toolbar-button,
@@ -4435,4 +4435,147 @@ body.resizing-terminal-split .split-divider.horizontal * { cursor: row-resize !i
 
 .transfer-status {
   font-size: 11px;
+}
+
+/* Light theme finishing pass: keep the workspace bright, but give each layer
+   enough contrast and hierarchy instead of relying on nearly-white surfaces. */
+:root[data-theme="light"] .app-header {
+  background: linear-gradient(180deg, #ffffff 0%, #f4f8fa 100%);
+  box-shadow: 0 1px 0 rgba(27, 58, 72, 0.04) inset;
+}
+
+:root[data-theme="light"] .brand-mark {
+  border-color: rgba(8, 126, 164, 0.3);
+  color: #effcff;
+  background: linear-gradient(145deg, #0e9fc1, #087ea4);
+  box-shadow: 0 5px 16px rgba(8, 126, 164, 0.16), 0 1px 0 rgba(255, 255, 255, 0.65) inset;
+}
+
+:root[data-theme="light"] .toolbar-button,
+:root[data-theme="light"] .icon-button,
+:root[data-theme="light"] .sftp-toggle {
+  border-color: #c9d7df;
+  color: #405968;
+  background: #ffffff;
+}
+
+:root[data-theme="light"] .toolbar-button:hover,
+:root[data-theme="light"] .icon-button:hover,
+:root[data-theme="light"] .secondary-button:hover {
+  border-color: #8bb9c8;
+  color: #17495a;
+  background: #edf7fa;
+}
+
+:root[data-theme="light"] .session-sidebar {
+  background: #f5f8fa;
+}
+
+:root[data-theme="light"] .sidebar-view-tools select {
+  border-color: #d1dee5;
+  color: #405968;
+  background: #ffffff;
+}
+
+:root[data-theme="light"] .sidebar-section-title,
+:root[data-theme="light"] .session-row-copy small,
+:root[data-theme="light"] .sidebar-hint,
+:root[data-theme="light"] .status-bar {
+  color: #617886;
+}
+
+:root[data-theme="light"] .session-row-copy strong {
+  color: #253b49;
+}
+
+:root[data-theme="light"] .terminal-tab {
+  color: #5c7280;
+  background: #f7f9fb;
+}
+
+:root[data-theme="light"] .terminal-tab:hover {
+  color: #294957;
+  background: #edf5f7;
+}
+
+:root[data-theme="light"] .terminal-tab.active {
+  color: #173746;
+  background: #fbfcfe;
+}
+
+:root[data-theme="light"] .terminal-stage,
+:root[data-theme="light"] .terminal-pane,
+:root[data-theme="light"] .xterm-host {
+  background: #fbfcfe;
+}
+
+:root[data-theme="light"] .terminal-toolbar button {
+  border-color: #d3e0e6;
+  color: #55707d;
+  background: rgba(255, 255, 255, 0.92);
+}
+
+:root[data-theme="light"] .terminal-toolbar button:hover {
+  border-color: #8bb9c8;
+  color: #05657f;
+  background: #eaf6f9;
+}
+
+:root[data-theme="light"] .status-bar {
+  border-top-color: #d6e1e6;
+  background: #f4f8fa;
+}
+
+:root[data-theme="light"] .welcome-panel {
+  background:
+    radial-gradient(circle at 50% 41%, rgba(8, 126, 164, 0.08), transparent 30%),
+    linear-gradient(#fbfcfe, #f3f7f9);
+}
+
+:root[data-theme="light"] .welcome-panel h1 {
+  color: #203847;
+}
+
+:root[data-theme="light"] .welcome-panel p {
+  color: #617886;
+}
+
+:root[data-theme="light"] .modal-header {
+  background: #f7fafb;
+}
+
+:root[data-theme="light"] .modal-title-wrap strong,
+:root[data-theme="light"] .modal-title-wrap h2 {
+  color: #203847;
+}
+
+:root[data-theme="light"] .modal-title-wrap small,
+:root[data-theme="light"] .modal-title-wrap p,
+:root[data-theme="light"] .settings-heading span,
+:root[data-theme="light"] .settings-tip {
+  color: #617886;
+}
+
+:root[data-theme="light"] .field,
+:root[data-theme="light"] .section-heading {
+  color: #526b78;
+}
+
+:root[data-theme="light"] .form-section {
+  border-color: #dce6eb;
+  background: #f7fafb;
+}
+
+:root[data-theme="light"] .terminal-font-preview {
+  color: #263746;
+  background: #fbfcfe;
+}
+
+:root[data-theme="light"] .terminal-font-preview .prompt,
+:root[data-theme="light"] .terminal-font-preview .success {
+  color: #167a55;
+}
+
+:root[data-theme="light"] .terminal-font-preview .path {
+  color: #1769aa;
 }
