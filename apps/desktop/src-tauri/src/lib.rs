@@ -15,7 +15,10 @@ use xsh_domain::{
     SessionDraft, SessionGroup, SessionGroupDraft, SessionId, TerminalEvent, TransferEvent,
     TransferId,
 };
-use xsh_security::{CredentialKind, CredentialStore, LocalCredentialStore};
+use xsh_security::{
+    BackupImportSummary, CredentialKind, CredentialStore, LocalCredentialStore,
+    SESSION_EXPORT_MAGIC, WORKSPACE_EXPORT_MAGIC, decrypt_export_payload, encrypt_export_payload,
+};
 use xsh_sftp::{SftpConnectOptions, SftpManager};
 use xsh_ssh::config::SshConfigEntry;
 use xsh_ssh::known_hosts::read_user_known_host;
@@ -38,7 +41,6 @@ struct ImportSummary {
     groups_created: usize,
     sessions_created: usize,
 }
-
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -809,11 +811,27 @@ async fn export_credentials_backup(
 }
 
 #[tauri::command]
+async fn inspect_credentials_backup(
+    state: State<'_, AppState>,
+    source_path: PathBuf,
+    password: String,
+) -> CommandResult<BackupImportSummary> {
+    if password.is_empty() || password.len() > 4096 {
+        return Err("备份密码不能为空且不能超过 4096 个字符".into());
+    }
+    let bytes = tokio::fs::read(source_path).await.map_err(display_error)?;
+    state
+        .credentials
+        .inspect_backup(&bytes, &password)
+        .map_err(display_error)
+}
+
+#[tauri::command]
 async fn import_credentials_backup(
     state: State<'_, AppState>,
     source_path: PathBuf,
     password: String,
-) -> CommandResult<usize> {
+) -> CommandResult<BackupImportSummary> {
     if password.is_empty() || password.len() > 4096 {
         return Err("备份密码不能为空且不能超过 4096 个字符".into());
     }
@@ -828,26 +846,37 @@ async fn import_credentials_backup(
 async fn export_sessions(
     state: State<'_, AppState>,
     target_path: PathBuf,
+    password: String,
     include_known_hosts: bool,
 ) -> CommandResult<()> {
+    validate_export_password(&password)?;
     let bundle = state
         .repository
         .export_bundle(include_known_hosts)
         .map_err(display_error)?;
-    let json = serde_json::to_vec_pretty(&bundle).map_err(display_error)?;
-    tokio::fs::write(target_path, json)
-        .await
-        .map_err(display_error)
+    let payload = serde_json::to_vec(&bundle).map_err(display_error)?;
+    let encrypted =
+        encrypt_export_payload(SESSION_EXPORT_MAGIC, &password, &payload).map_err(display_error)?;
+    write_export_file(&target_path, encrypted).await
 }
 
 #[tauri::command]
 async fn import_sessions(
     state: State<'_, AppState>,
     source_path: PathBuf,
+    password: String,
 ) -> CommandResult<ImportSummary> {
-    let json = tokio::fs::read(source_path).await.map_err(display_error)?;
+    validate_export_password(&password)?;
+    let encrypted = read_export_file(&source_path).await?;
+    let json = decrypt_export_payload(SESSION_EXPORT_MAGIC, &password, &encrypted)
+        .map_err(display_error)?;
     let bundle: SessionBundle = serde_json::from_slice(&json).map_err(display_error)?;
     bundle.validate().map_err(display_error)?;
+    // Validate the complete payload before creating any rows, so malformed
+    // startup commands cannot leave a half-imported directory tree behind.
+    for session in &bundle.sessions {
+        validate_startup_command(session.startup_command.as_deref())?;
+    }
 
     let mut group_map = HashMap::new();
     for group in &bundle.groups {
@@ -880,7 +909,6 @@ async fn import_sessions(
     }
 
     for session in &bundle.sessions {
-        validate_startup_command(session.startup_command.as_deref())?;
         state
             .repository
             .create_session(SessionDraft {
@@ -914,6 +942,61 @@ async fn import_sessions(
         groups_created: bundle.groups.len(),
         sessions_created: bundle.sessions.len(),
     })
+}
+
+#[tauri::command]
+async fn export_workspaces(
+    target_path: PathBuf,
+    password: String,
+    payload: String,
+) -> CommandResult<()> {
+    validate_export_password(&password)?;
+    if payload.len() > 5 * 1024 * 1024 {
+        return Err("工作区导出文件不能超过 5 MiB".into());
+    }
+    let encrypted = encrypt_export_payload(WORKSPACE_EXPORT_MAGIC, &password, payload.as_bytes())
+        .map_err(display_error)?;
+    write_export_file(&target_path, encrypted).await
+}
+
+#[tauri::command]
+async fn import_workspaces(source_path: PathBuf, password: String) -> CommandResult<String> {
+    validate_export_password(&password)?;
+    let encrypted = read_export_file(&source_path).await?;
+    let payload = decrypt_export_payload(WORKSPACE_EXPORT_MAGIC, &password, &encrypted)
+        .map_err(display_error)?;
+    String::from_utf8(payload).map_err(|_| "工作区文件内容不是有效文本".into())
+}
+
+fn validate_export_password(password: &str) -> CommandResult<()> {
+    if password.trim().is_empty() || password.len() > 4096 {
+        return Err("文件密码不能为空且不能超过 4096 个字符".into());
+    }
+    Ok(())
+}
+
+async fn write_export_file(path: &PathBuf, bytes: Vec<u8>) -> CommandResult<()> {
+    if path.as_os_str().is_empty() {
+        return Err("文件保存路径不能为空".into());
+    }
+    tokio::fs::write(path, bytes)
+        .await
+        .map_err(|error| format!("无法保存加密导出文件：{error}"))
+}
+
+async fn read_export_file(path: &PathBuf) -> CommandResult<Vec<u8>> {
+    if path.as_os_str().is_empty() {
+        return Err("文件路径不能为空".into());
+    }
+    let metadata = tokio::fs::metadata(path)
+        .await
+        .map_err(|error| format!("无法读取导出文件信息：{error}"))?;
+    if metadata.len() > 5 * 1024 * 1024 {
+        return Err("导出文件不能超过 5 MiB".into());
+    }
+    tokio::fs::read(path)
+        .await
+        .map_err(|error| format!("无法读取加密导出文件：{error}"))
 }
 
 fn require_session(state: &AppState, session_id: SessionId) -> CommandResult<SavedSession> {
@@ -1288,9 +1371,12 @@ pub fn run() {
             sftp_download,
             cancel_transfer,
             export_credentials_backup,
+            inspect_credentials_backup,
             import_credentials_backup,
             export_sessions,
             import_sessions,
+            export_workspaces,
+            import_workspaces,
         ])
         .run(tauri::generate_context!())
         .expect("error while running XSH");

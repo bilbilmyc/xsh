@@ -94,8 +94,19 @@ export function SettingsModal({ preferences, onSave, onClose, onToast }: Setting
         await api.exportCredentialsBackup(backupDialog.path, backupPassword);
         onToast("XSH 凭据加密备份已导出。请妥善保存备份密码。");
       } else {
-        const count = await api.importCredentialsBackup(backupDialog.path, backupPassword);
-        onToast(`已恢复 ${count} 条 XSH 凭据。`);
+        const preview = await api.inspectCredentialsBackup(backupDialog.path, backupPassword);
+        if (preview.imported === 0) {
+          onToast("备份中没有可恢复的凭据记录。");
+          return;
+        }
+        const overwriteHint = preview.overwritten > 0
+          ? `其中 ${preview.overwritten} 条会覆盖当前同名凭据。`
+          : "不会覆盖当前凭据。";
+        if (!window.confirm(`备份中有 ${preview.imported} 条可恢复凭据，${overwriteHint}\n\n确认继续恢复吗？`)) return;
+        const summary = await api.importCredentialsBackup(backupDialog.path, backupPassword);
+        onToast(summary.overwritten > 0
+          ? `已恢复 ${summary.imported} 条 XSH 凭据，其中 ${summary.overwritten} 条覆盖了同名凭据。`
+          : `已恢复 ${summary.imported} 条 XSH 凭据。`);
       }
       setBackupDialog(null);
       setBackupPassword("");
@@ -272,7 +283,7 @@ export function SettingsModal({ preferences, onSave, onClose, onToast }: Setting
             <div className="backup-dialog-body">
               <label className="field"><span>{backupDialog.mode === "export" ? "设置备份密码" : "输入备份密码"}</span><input type="password" autoFocus value={backupPassword} onChange={(event) => setBackupPassword(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void submitBackupDialog(); }} placeholder="请输入至少 1 个字符" autoComplete="new-password" /></label>
               {backupDialog.mode === "export" && <label className="field"><span>再次输入备份密码</span><input type="password" value={backupConfirmation} onChange={(event) => setBackupConfirmation(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void submitBackupDialog(); }} autoComplete="new-password" /></label>}
-              <small className="field-help">恢复会合并到当前 XSH 凭据库；同名 credential_ref 会被覆盖。</small>
+              <small className="field-help">恢复会先完整校验文件，再以事务方式合并到当前 XSH 凭据库；同名 credential_ref 会被覆盖，失败时不会留下半份恢复结果。</small>
             </div>
             <footer className="modal-footer"><button className="secondary-button" disabled={backupBusy} onClick={() => setBackupDialog(null)}>取消</button><button className="primary-button" disabled={backupBusy || !backupPassword} onClick={() => void submitBackupDialog()}>{backupBusy ? "处理中…" : backupDialog.mode === "export" ? "导出备份" : "恢复备份"}</button></footer>
           </section>
@@ -329,7 +340,8 @@ const UI_FONTS = [
   { label: "Segoe UI", value: '"Segoe UI", Arial, sans-serif' },
 ];
 const TERMINAL_FONTS = [
-  { label: "Monaco（推荐）", value: defaultPreferences.terminalFontFamily },
+  { label: "系统等宽字体（推荐）", value: defaultPreferences.terminalFontFamily },
+  { label: "Monaco（可选）", value: '"Monaco", "SFMono-Regular", Menlo, Consolas, monospace' },
   { label: "SF Mono", value: '"SFMono-Regular", Menlo, monospace' },
   { label: "Cascadia Code", value: '"Cascadia Code", Consolas, monospace' },
   { label: "JetBrains Mono", value: '"JetBrains Mono", Menlo, monospace' },

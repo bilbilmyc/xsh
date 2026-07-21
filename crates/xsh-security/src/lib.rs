@@ -14,6 +14,8 @@ const KEY_BYTES: usize = 32;
 const NONCE_BYTES: usize = 12;
 const BACKUP_SALT_BYTES: usize = 16;
 const BACKUP_MAGIC: &[u8] = b"XSHBACK1";
+pub const SESSION_EXPORT_MAGIC: &[u8] = b"XSHPACK1";
+pub const WORKSPACE_EXPORT_MAGIC: &[u8] = b"XSHWORK1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CredentialKind {
@@ -48,11 +50,18 @@ pub enum CredentialError {
     InvalidKey,
     #[error("invalid XSH credential backup format")]
     InvalidBackupFormat,
-    #[error("credential backup password is incorrect or backup is corrupted")]
+    #[error("文件密码错误或文件已损坏")]
     InvalidBackupPassword,
 }
 
 pub type Result<T> = std::result::Result<T, CredentialError>;
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupImportSummary {
+    pub imported: usize,
+    pub overwritten: usize,
+}
 
 pub trait CredentialStore: Send + Sync {
     fn create(&self, kind: CredentialKind, secret: &str) -> Result<String>;
@@ -152,23 +161,70 @@ impl LocalCredentialStore {
         encrypt_backup_payload(password, &payload)
     }
 
-    /// Merge credentials from a password-protected backup into the current
-    /// XSH vault. Existing references are updated in place, preserving saved
-    /// sessions without exposing secrets to the UI.
-    pub fn import_backup(&self, backup: &[u8], password: &str) -> Result<usize> {
+    /// Inspect a backup without modifying the credential vault. This lets the
+    /// UI show the user how many records will be added or overwritten before
+    /// the restore is committed.
+    pub fn inspect_backup(&self, backup: &[u8], password: &str) -> Result<BackupImportSummary> {
         let payload = decrypt_backup_payload(password, backup)?;
         if payload.format != "xsh-credential-backup" || payload.schema_version != 1 {
             return Err(CredentialError::InvalidBackupFormat);
         }
+        let connection = self.connection()?;
         let mut imported = 0;
+        let mut overwritten = 0;
         for credential in payload.credentials {
             if credential.secret.is_empty() || credential.credential_ref.trim().is_empty() {
                 continue;
             }
-            let (nonce, ciphertext) = self.encrypt(&credential.secret)?;
-            let now = chrono::Utc::now().to_rfc3339();
-            let connection = self.connection()?;
-            connection.execute(
+            let exists: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM xsh_credentials WHERE credential_ref = ?1)",
+                params![credential.credential_ref],
+                |row| row.get(0),
+            )?;
+            imported += 1;
+            overwritten += usize::from(exists);
+        }
+        Ok(BackupImportSummary {
+            imported,
+            overwritten,
+        })
+    }
+
+    /// Merge credentials from a password-protected backup into the current
+    /// XSH vault. Existing references are updated in place, preserving saved
+    /// sessions without exposing secrets to the UI.
+    pub fn import_backup(&self, backup: &[u8], password: &str) -> Result<BackupImportSummary> {
+        let payload = decrypt_backup_payload(password, backup)?;
+        if payload.format != "xsh-credential-backup" || payload.schema_version != 1 {
+            return Err(CredentialError::InvalidBackupFormat);
+        }
+
+        // Decrypt and validate the whole payload before touching the vault. The
+        // database transaction below then prevents a half-restored backup when
+        // one row fails to write.
+        let mut records = Vec::new();
+        for credential in payload.credentials {
+            if credential.secret.is_empty() || credential.credential_ref.trim().is_empty() {
+                continue;
+            }
+            records.push((
+                credential.credential_ref,
+                credential.kind,
+                self.encrypt(&credential.secret)?,
+            ));
+        }
+
+        let imported_count = records.len();
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        let mut overwritten = 0;
+        for (credential_ref, kind, (nonce, ciphertext)) in records {
+            let existed: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM xsh_credentials WHERE credential_ref = ?1)",
+                params![credential_ref],
+                |row| row.get(0),
+            )?;
+            transaction.execute(
                 "INSERT INTO xsh_credentials
                  (credential_ref, kind, nonce, ciphertext, created_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?5)
@@ -176,16 +232,20 @@ impl LocalCredentialStore {
                    kind = excluded.kind, nonce = excluded.nonce,
                    ciphertext = excluded.ciphertext, updated_at = excluded.updated_at",
                 params![
-                    credential.credential_ref,
-                    credential.kind,
+                    credential_ref,
+                    kind,
                     nonce.as_slice(),
                     ciphertext,
-                    now
+                    chrono::Utc::now().to_rfc3339()
                 ],
             )?;
-            imported += 1;
+            overwritten += usize::from(existed);
         }
-        Ok(imported)
+        transaction.commit()?;
+        Ok(BackupImportSummary {
+            imported: imported_count,
+            overwritten,
+        })
     }
 
     fn connection(&self) -> Result<MutexGuard<'_, Connection>> {
@@ -350,7 +410,64 @@ fn derive_backup_key(password: &str, salt: &[u8]) -> Result<[u8; KEY_BYTES]> {
     Ok(key)
 }
 
+/// Encrypt an XSH export payload with Argon2id-derived AES-256-GCM.
+///
+/// The magic header identifies the file kind while the authenticated ciphertext
+/// keeps the JSON payload opaque to text editors and other programs.
+pub fn encrypt_export_payload(magic: &[u8], password: &str, payload: &[u8]) -> Result<Vec<u8>> {
+    if password.trim().is_empty() || magic.is_empty() || magic.len() > u8::MAX as usize {
+        return Err(CredentialError::InvalidBackupPassword);
+    }
+    let mut salt = [0_u8; BACKUP_SALT_BYTES];
+    let mut nonce = [0_u8; NONCE_BYTES];
+    OsRng.fill_bytes(&mut salt);
+    OsRng.fill_bytes(&mut nonce);
+    let key = derive_backup_key(password, &salt)?;
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
+    let ciphertext = cipher
+        .encrypt(Nonce::from_slice(&nonce), payload)
+        .map_err(|_| CredentialError::Crypto("无法加密导出文件".into()))?;
+    let mut output = Vec::with_capacity(
+        1 + magic.len() + 1 + BACKUP_SALT_BYTES + NONCE_BYTES + ciphertext.len(),
+    );
+    output.push(magic.len() as u8);
+    output.extend_from_slice(magic);
+    output.push(1);
+    output.extend_from_slice(&salt);
+    output.extend_from_slice(&nonce);
+    output.extend_from_slice(&ciphertext);
+    Ok(output)
+}
+
+/// Decrypt and authenticate an XSH export payload.
+pub fn decrypt_export_payload(magic: &[u8], password: &str, encrypted: &[u8]) -> Result<Vec<u8>> {
+    if password.trim().is_empty() || magic.is_empty() {
+        return Err(CredentialError::InvalidBackupPassword);
+    }
+    let prefix_len = 1 + magic.len() + 1 + BACKUP_SALT_BYTES + NONCE_BYTES;
+    if encrypted.len() <= prefix_len
+        || encrypted[0] as usize != magic.len()
+        || &encrypted[1..1 + magic.len()] != magic
+        || encrypted[1 + magic.len()] != 1
+    {
+        return Err(CredentialError::InvalidBackupFormat);
+    }
+    let salt_start = 1 + magic.len() + 1;
+    let nonce_start = salt_start + BACKUP_SALT_BYTES;
+    let ciphertext_start = nonce_start + NONCE_BYTES;
+    let key = derive_backup_key(password, &encrypted[salt_start..nonce_start])?;
+    Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key))
+        .decrypt(
+            Nonce::from_slice(&encrypted[nonce_start..ciphertext_start]),
+            &encrypted[ciphertext_start..],
+        )
+        .map_err(|_| CredentialError::InvalidBackupPassword)
+}
+
 fn encrypt_backup_payload(password: &str, payload: &[u8]) -> Result<Vec<u8>> {
+    if password.trim().is_empty() {
+        return Err(CredentialError::InvalidBackupPassword);
+    }
     let mut salt = [0_u8; BACKUP_SALT_BYTES];
     let mut nonce = [0_u8; NONCE_BYTES];
     OsRng.fill_bytes(&mut salt);
@@ -502,7 +619,7 @@ mod tests {
             Err(CredentialError::NotFound(_))
         ));
         let imported = store.import_backup(&backup, "backup-password").unwrap();
-        assert_eq!(imported, 1);
+        assert_eq!(imported.imported, 1);
         assert_eq!(store.get(&reference).unwrap().as_str(), "backup-secret");
         drop(store);
         fs::remove_dir_all(database.parent().unwrap()).unwrap();

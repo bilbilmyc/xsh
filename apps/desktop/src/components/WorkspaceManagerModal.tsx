@@ -2,6 +2,7 @@ import { useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { Download, FolderOpen, RefreshCw, Save, Trash2, Upload, X } from "lucide-react";
 import { api } from "../api";
+import { PasswordPromptModal } from "./PasswordPromptModal";
 import {
   createNamedWorkspace,
   loadNamedWorkspaces,
@@ -24,6 +25,8 @@ export function WorkspaceManagerModal({ currentSnapshot, onOpen, onClose, onToas
   const [workspaces, setWorkspaces] = useState<NamedWorkspace[]>(() => loadNamedWorkspaces());
   const [name, setName] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [fileDialog, setFileDialog] = useState<{ mode: "export" | "import"; path: string } | null>(null);
+  const [fileBusy, setFileBusy] = useState(false);
 
   const persist = (next: NamedWorkspace[]) => {
     const sorted = [...next]
@@ -82,56 +85,63 @@ export function WorkspaceManagerModal({ currentSnapshot, onOpen, onClose, onToas
       return;
     }
     const targetPath = await save({
-      title: "导出 XSH 工作区",
-      defaultPath: `xsh-workspaces-${new Date().toISOString().slice(0, 10)}.json`,
-      filters: [{ name: "XSH 工作区", extensions: ["json"] }],
+      title: "导出加密 XSH 工作区",
+      defaultPath: `xsh-workspaces-${new Date().toISOString().slice(0, 10)}.xshworkspace`,
+      filters: [{ name: "XSH 加密工作区", extensions: ["xshworkspace"] }],
     });
-    if (!targetPath) return;
-    try {
-      await api.writeTextFile(targetPath, serializeNamedWorkspaces(workspaces));
-      setError(null);
-      onToast(`已导出 ${workspaces.length} 个工作区；文件不包含凭据或终端内容。`);
-    } catch (caught) {
-      setError(`导出失败：${String(caught)}`);
-    }
+    if (typeof targetPath === "string") setFileDialog({ mode: "export", path: targetPath });
   };
 
   const importWorkspaces = async () => {
     const sourcePath = await open({
-      title: "导入 XSH 工作区",
+      title: "导入加密 XSH 工作区",
       multiple: false,
       directory: false,
-      filters: [{ name: "XSH 工作区", extensions: ["json"] }],
+      filters: [{ name: "XSH 加密工作区", extensions: ["xshworkspace"] }],
     });
-    if (typeof sourcePath !== "string") return;
+    if (typeof sourcePath === "string") setFileDialog({ mode: "import", path: sourcePath });
+  };
+
+  const submitFileDialog = async (password: string) => {
+    if (!fileDialog) return;
+    setFileBusy(true);
     try {
-      const imported = parseNamedWorkspaces(await api.readTextFile(sourcePath));
-      if (imported.length === 0) {
-        setError("文件中没有命名工作区。");
-        return;
+      if (fileDialog.mode === "export") {
+        await api.exportWorkspaces(fileDialog.path, password, serializeNamedWorkspaces(workspaces));
+        setError(null);
+        onToast(`已加密导出 ${workspaces.length} 个工作区；文件不包含凭据或终端内容。`);
+      } else {
+        const imported = parseNamedWorkspaces(await api.importWorkspaces(fileDialog.path, password));
+        if (imported.length === 0) {
+          setError("文件中没有命名工作区。");
+          return;
+        }
+        const usedIds = new Set(workspaces.map((workspace) => workspace.id));
+        const usedNames = new Set(workspaces.map((workspace) => workspace.name.toLowerCase()));
+        const additions = imported.map((workspace) => {
+          const id = usedIds.has(workspace.id) ? crypto.randomUUID() : workspace.id;
+          usedIds.add(id);
+          const name = uniqueWorkspaceName(workspace.name, usedNames);
+          usedNames.add(name.toLowerCase());
+          return { ...workspace, id, name };
+        });
+        const availableSlots = Math.max(0, 24 - workspaces.length);
+        const accepted = additions.slice(0, availableSlots);
+        if (accepted.length === 0) {
+          setError("命名工作区已达到 24 个上限，请先删除不再使用的工作区。");
+          return;
+        }
+        persist([...workspaces, ...accepted]);
+        setError(null);
+        onToast(accepted.length < additions.length
+          ? `已导入 ${accepted.length} 个工作区；其余因 24 个上限未保留。`
+          : `已导入 ${accepted.length} 个工作区。缺失的会话请先导入会话配置。`);
       }
-      const usedIds = new Set(workspaces.map((workspace) => workspace.id));
-      const usedNames = new Set(workspaces.map((workspace) => workspace.name.toLowerCase()));
-      const additions = imported.map((workspace) => {
-        const id = usedIds.has(workspace.id) ? crypto.randomUUID() : workspace.id;
-        usedIds.add(id);
-        const name = uniqueWorkspaceName(workspace.name, usedNames);
-        usedNames.add(name.toLowerCase());
-        return { ...workspace, id, name };
-      });
-      const availableSlots = Math.max(0, 24 - workspaces.length);
-      const accepted = additions.slice(0, availableSlots);
-      if (accepted.length === 0) {
-        setError("命名工作区已达到 24 个上限，请先删除不再使用的工作区。");
-        return;
-      }
-      persist([...workspaces, ...accepted]);
-      setError(null);
-      onToast(accepted.length < additions.length
-        ? `已导入 ${accepted.length} 个工作区；其余因 24 个上限未保留。`
-        : `已导入 ${accepted.length} 个工作区。缺失的会话请先导入会话配置。`);
+      setFileDialog(null);
     } catch (caught) {
-      setError(`导入失败：${String(caught)}`);
+      setError(`${fileDialog.mode === "export" ? "导出" : "导入"}失败：${String(caught)}`);
+    } finally {
+      setFileBusy(false);
     }
   };
 
@@ -188,6 +198,16 @@ export function WorkspaceManagerModal({ currentSnapshot, onOpen, onClose, onToas
           <button className="secondary-button" onClick={onClose}>关闭</button>
         </footer>
       </section>
+      {fileDialog && (
+        <PasswordPromptModal
+          mode={fileDialog.mode}
+          title={fileDialog.mode === "export" ? "导出加密工作区" : "导入加密工作区"}
+          description="工作区文件使用密码加密，记事本等工具无法直接读取其中的 JSON。"
+          busy={fileBusy}
+          onSubmit={(password) => void submitFileDialog(password)}
+          onClose={() => !fileBusy && setFileDialog(null)}
+        />
+      )}
     </div>
   );
 }

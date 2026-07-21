@@ -33,6 +33,7 @@ import { PortForwardModal } from "./components/PortForwardModal";
 import { SessionBatchEditorModal, type SessionBatchUpdates } from "./components/SessionBatchEditorModal";
 import { SessionEditor } from "./components/SessionEditor";
 import { SettingsModal } from "./components/SettingsModal";
+import { PasswordPromptModal } from "./components/PasswordPromptModal";
 import { SessionSidebar, type SessionActivitySummary } from "./components/SessionSidebar";
 import { WorkspaceManagerModal } from "./components/WorkspaceManagerModal";
 import { OnboardingModal } from "./components/OnboardingModal";
@@ -235,6 +236,8 @@ function App() {
   const [sessionDataReady, setSessionDataReady] = useState(false);
   const [workspaceRestored, setWorkspaceRestored] = useState(false);
   const [workspaceManagerVisible, setWorkspaceManagerVisible] = useState(false);
+  const [sessionFileDialog, setSessionFileDialog] = useState<{ mode: "export" | "import"; path: string } | null>(null);
+  const [sessionFileBusy, setSessionFileBusy] = useState(false);
   const [connectionManagerVisible, setConnectionManagerVisible] = useState(false);
   const [batchEditorSessions, setBatchEditorSessions] = useState<SavedSession[]>([]);
   const [workspaceOpening, setWorkspaceOpening] = useState<{
@@ -1168,33 +1171,42 @@ function App() {
 
   const exportSessions = async () => {
     const targetPath = await save({
-      title: "导出 XSH 会话",
+      title: "导出加密 XSH 会话",
       defaultPath: "xsh-sessions.xshpack",
-      filters: [{ name: "XSH Session Pack", extensions: ["xshpack"] }],
+      filters: [{ name: "XSH 加密 Session Pack", extensions: ["xshpack"] }],
     });
-    if (!targetPath) return;
-    try {
-      await api.exportSessions(targetPath, false);
-      setToast("会话已导出；默认未包含密码和私钥内容。 ");
-    } catch (error) {
-      setToast(`导出失败：${String(error)}`);
-    }
+    if (typeof targetPath !== "string") return;
+    setSessionFileDialog({ mode: "export", path: targetPath });
   };
 
   const importSessions = async () => {
     const sourcePath = await open({
-      title: "导入 XSH 会话",
+      title: "导入加密 XSH 会话",
       multiple: false,
       directory: false,
-      filters: [{ name: "XSH Session Pack", extensions: ["xshpack", "json"] }],
+      filters: [{ name: "XSH 加密 Session Pack", extensions: ["xshpack"] }],
     });
     if (typeof sourcePath !== "string") return;
+    setSessionFileDialog({ mode: "import", path: sourcePath });
+  };
+
+  const submitSessionFileDialog = async (password: string) => {
+    if (!sessionFileDialog) return;
+    setSessionFileBusy(true);
     try {
-      const summary = await api.importSessions(sourcePath);
-      await refresh();
-      setToast(`已导入 ${summary.groupsCreated} 个目录和 ${summary.sessionsCreated} 个会话；认证信息需要重新填写。`);
+      if (sessionFileDialog.mode === "export") {
+        await api.exportSessions(sessionFileDialog.path, password, false);
+        setToast("会话已加密导出；密码、私钥口令等凭据不会写入会话文件。请妥善保存文件密码。");
+      } else {
+        const summary = await api.importSessions(sessionFileDialog.path, password);
+        await refresh();
+        setToast(`已导入 ${summary.groupsCreated} 个目录和 ${summary.sessionsCreated} 个会话；认证信息需要通过独立凭据备份恢复。`);
+      }
+      setSessionFileDialog(null);
     } catch (error) {
-      setToast(`导入失败：${String(error)}`);
+      setToast(`${sessionFileDialog.mode === "export" ? "导出" : "导入"}失败：${String(error)}`);
+    } finally {
+      setSessionFileBusy(false);
     }
   };
 
@@ -1211,7 +1223,7 @@ function App() {
       const chromeShift = IS_MACOS ? !event.shiftKey : event.shiftKey;
       const hasOverlay = editorSession !== undefined || settingsVisible || sshConfigVisible ||
         commandCenterVisible || historyVisible || diagnosticSession !== null || groupEditor !== null ||
-        workspaceManagerVisible || connectionManagerVisible || batchEditorSessions.length > 0 || portForwardVisible;
+        workspaceManagerVisible || sessionFileDialog !== null || connectionManagerVisible || batchEditorSessions.length > 0 || portForwardVisible;
       if (hasOverlay) return;
 
       if (key === "p" && event.shiftKey && !event.altKey) {
@@ -1290,7 +1302,7 @@ function App() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [activeTabId, batchEditorSessions.length, commandCenterVisible, connectionManagerVisible, diagnosticSession, editorSession, groupEditor, historyVisible, paneLayout, portForwardVisible, preferences.terminalShortcutMode, settingsVisible, sshConfigVisible, tabs, workspaceManagerVisible]);
+  }, [activeTabId, batchEditorSessions.length, commandCenterVisible, connectionManagerVisible, diagnosticSession, editorSession, groupEditor, historyVisible, paneLayout, portForwardVisible, preferences.terminalShortcutMode, sessionFileDialog, settingsVisible, sshConfigVisible, tabs, workspaceManagerVisible]);
 
   return (
     <main className="app-shell">
@@ -1655,6 +1667,17 @@ function App() {
           onCreateSession={openOnboardingSessionEditor}
           onOpenSshConfig={openOnboardingSshConfig}
           onDismiss={dismissOnboarding}
+        />
+      )}
+
+      {sessionFileDialog && (
+        <PasswordPromptModal
+          mode={sessionFileDialog.mode}
+          title={sessionFileDialog.mode === "export" ? "导出加密会话" : "导入加密会话"}
+          description="会话文件使用密码加密，记事本等工具无法直接读取其中的 JSON。"
+          busy={sessionFileBusy}
+          onSubmit={(password) => void submitSessionFileDialog(password)}
+          onClose={() => !sessionFileBusy && setSessionFileDialog(null)}
         />
       )}
 

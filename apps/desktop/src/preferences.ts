@@ -29,6 +29,7 @@ const UI_FONT_MAX = 16;
 const TERMINAL_FONT_MIN = 12;
 const TERMINAL_FONT_MAX = 22;
 const LEGACY_DEFAULT_TERMINAL_FONT_FAMILY = '"SFMono-Regular", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace';
+const LEGACY_MONACO_DEFAULT_TERMINAL_FONT_FAMILY = '"Monaco", "SFMono-Regular", Menlo, Consolas, monospace';
 const LEGACY_DEFAULT_TERMINAL_LINE_HEIGHT = 1.22;
 const LEGACY_DEFAULT_TERMINAL_FONT_SIZE = 14;
 
@@ -37,7 +38,7 @@ export const defaultPreferences: AppPreferences = {
   accent: "cyan",
   uiFontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
   uiFontSize: 15,
-  terminalFontFamily: '"Monaco", "SFMono-Regular", Menlo, Consolas, monospace',
+  terminalFontFamily: '"Cascadia Mono", "Cascadia Code", "SFMono-Regular", "SF Mono", Menlo, Consolas, "Courier New", monospace',
   terminalFontSize: 15,
   terminalLineHeight: 1.22,
   terminalFontWeight: 400,
@@ -68,7 +69,8 @@ export function loadPreferences(): AppPreferences {
       && parsed.terminalLineHeight === 1
       && (parsed.terminalFontWeight === undefined || parsed.terminalFontWeight === defaultPreferences.terminalFontWeight)
       && (parsed.terminalFontWeightBold === undefined || parsed.terminalFontWeightBold === defaultPreferences.terminalFontWeightBold);
-    if (parsed.terminalFontFamily === LEGACY_DEFAULT_TERMINAL_FONT_FAMILY) {
+    if (parsed.terminalFontFamily === LEGACY_DEFAULT_TERMINAL_FONT_FAMILY
+      || parsed.terminalFontFamily === LEGACY_MONACO_DEFAULT_TERMINAL_FONT_FAMILY) {
       merged.terminalFontFamily = defaultPreferences.terminalFontFamily;
     }
     if (parsed.terminalLineHeight === LEGACY_DEFAULT_TERMINAL_LINE_HEIGHT) {

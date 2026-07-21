@@ -1,5 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import type {
+  BackupImportSummary,
   ForwardInfo,
   ImportSummary,
   SshConfigEntry,
@@ -142,11 +143,17 @@ export const api = {
 
   exportCredentialsBackup: (targetPath: string, password: string) =>
     invoke<void>("export_credentials_backup", { targetPath, password }),
+  inspectCredentialsBackup: (sourcePath: string, password: string) =>
+    invoke<BackupImportSummary>("inspect_credentials_backup", { sourcePath, password }),
   importCredentialsBackup: (sourcePath: string, password: string) =>
-    invoke<number>("import_credentials_backup", { sourcePath, password }),
+    invoke<BackupImportSummary>("import_credentials_backup", { sourcePath, password }),
 
-  exportSessions: (targetPath: string, includeKnownHosts: boolean) =>
-    invoke<void>("export_sessions", { targetPath, includeKnownHosts }),
-  importSessions: (sourcePath: string) =>
-    invoke<ImportSummary>("import_sessions", { sourcePath }),
+  exportSessions: (targetPath: string, password: string, includeKnownHosts: boolean) =>
+    invoke<void>("export_sessions", { targetPath, password, includeKnownHosts }),
+  importSessions: (sourcePath: string, password: string) =>
+    invoke<ImportSummary>("import_sessions", { sourcePath, password }),
+  exportWorkspaces: (targetPath: string, password: string, payload: string) =>
+    invoke<void>("export_workspaces", { targetPath, password, payload }),
+  importWorkspaces: (sourcePath: string, password: string) =>
+    invoke<string>("import_workspaces", { sourcePath, password }),
 };

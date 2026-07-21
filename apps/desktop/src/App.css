@@ -23,7 +23,7 @@
   --yellow: #e3b341;
   --red: #ff6b6b;
   --purple: #bc8cff;
-  --mono-font: Monaco, "SFMono-Regular", "SF Mono", Menlo, Consolas, monospace;
+  --mono-font: "Cascadia Mono", "Cascadia Code", "SFMono-Regular", "SF Mono", Menlo, Consolas, "Courier New", monospace;
   --header-height: 52px;
   --status-height: 27px;
 }

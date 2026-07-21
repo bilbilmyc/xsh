@@ -226,6 +226,11 @@ export interface SshDiagnosticReport {
   ready: boolean;
 }
 
+export interface BackupImportSummary {
+  imported: number;
+  overwritten: number;
+}
+
 export interface ImportSummary {
   groupsCreated: number;
   sessionsCreated: number;
