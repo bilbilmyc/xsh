@@ -1196,11 +1196,14 @@ function App() {
     try {
       if (sessionFileDialog.mode === "export") {
         await api.exportSessions(sessionFileDialog.path, password, false);
-        setToast("会话已加密导出；密码、私钥口令等凭据不会写入会话文件。请妥善保存文件密码。");
+        setToast("会话和关联凭据已加密导出。请妥善保存文件密码，导入到其他设备时需要输入同一密码。");
       } else {
         const summary = await api.importSessions(sessionFileDialog.path, password);
         await refresh();
-        setToast(`已导入 ${summary.groupsCreated} 个目录和 ${summary.sessionsCreated} 个会话；认证信息需要通过独立凭据备份恢复。`);
+        const credentialHint = summary.credentialsImported > 0
+          ? `同时恢复 ${summary.credentialsImported} 条登录凭据${summary.credentialsOverwritten > 0 ? `，覆盖 ${summary.credentialsOverwritten} 条已有凭据` : ""}。`
+          : "文件中没有关联的登录凭据。";
+        setToast(`已导入 ${summary.groupsCreated} 个目录和 ${summary.sessionsCreated} 个会话。${credentialHint}`);
       }
       setSessionFileDialog(null);
     } catch (error) {

@@ -16,7 +16,7 @@ use xsh_domain::{
     TransferId,
 };
 use xsh_security::{
-    BackupImportSummary, CredentialKind, CredentialStore, LocalCredentialStore,
+    BackupImportSummary, CredentialKind, CredentialRecord, CredentialStore, LocalCredentialStore,
     SESSION_EXPORT_MAGIC, WORKSPACE_EXPORT_MAGIC, decrypt_export_payload, encrypt_export_payload,
 };
 use xsh_sftp::{SftpConnectOptions, SftpManager};
@@ -40,6 +40,22 @@ struct AppState {
 struct ImportSummary {
     groups_created: usize,
     sessions_created: usize,
+    credentials_imported: usize,
+    credentials_overwritten: usize,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionExportPayload {
+    format: String,
+    schema_version: u32,
+    bundle: SessionBundle,
+    credentials: Vec<CredentialRecord>,
+}
+
+impl SessionExportPayload {
+    const FORMAT: &'static str = "xsh-session-export";
+    const SCHEMA_VERSION: u32 = 2;
 }
 
 #[derive(Debug, Serialize)]
@@ -859,7 +875,30 @@ async fn export_sessions(
         .repository
         .export_bundle(include_known_hosts)
         .map_err(display_error)?;
-    let payload = serde_json::to_vec(&bundle).map_err(display_error)?;
+    let credential_refs = bundle
+        .sessions
+        .iter()
+        .flat_map(session_credential_references)
+        .collect::<std::collections::BTreeSet<_>>();
+    let credential_refs = credential_refs.into_iter().collect::<Vec<_>>();
+    let credentials = if credential_refs.is_empty() {
+        Vec::new()
+    } else {
+        let credentials_store = Arc::clone(&state.credentials);
+        run_credential_operation(move || {
+            credentials_store
+                .export_selected(&credential_refs)
+                .map_err(display_error)
+        })
+        .await?
+    };
+    let payload = SessionExportPayload {
+        format: SessionExportPayload::FORMAT.into(),
+        schema_version: SessionExportPayload::SCHEMA_VERSION,
+        bundle,
+        credentials,
+    };
+    let payload = serde_json::to_vec(&payload).map_err(display_error)?;
     let encrypted =
         encrypt_export_payload(SESSION_EXPORT_MAGIC, &password, &payload).map_err(display_error)?;
     write_export_file(&target_path, encrypted).await
@@ -875,12 +914,57 @@ async fn import_sessions(
     let encrypted = read_export_file(&source_path).await?;
     let json = decrypt_export_payload(SESSION_EXPORT_MAGIC, &password, &encrypted)
         .map_err(display_error)?;
-    let bundle: SessionBundle = serde_json::from_slice(&json).map_err(display_error)?;
+    let (bundle, credentials) = match serde_json::from_slice::<SessionExportPayload>(&json) {
+        Ok(payload) => {
+            if payload.format != SessionExportPayload::FORMAT
+                || payload.schema_version != SessionExportPayload::SCHEMA_VERSION
+            {
+                return Err("会话导出文件版本不受支持，请使用同版本 XSH 重新导出".into());
+            }
+            (payload.bundle, payload.credentials)
+        }
+        Err(_) => {
+            // Keep importing v1 encrypted session packs created before the
+            // session export started carrying credentials. They remain safe,
+            // but require a separate credential backup for authentication.
+            let mut bundle: SessionBundle = serde_json::from_slice(&json)
+                .map_err(|_| "会话导出文件内容无效或版本过旧，请重新导出".to_owned())?;
+            for session in &mut bundle.sessions {
+                session.authentication = strip_credential_references(&session.authentication);
+                session.proxy_jump_authentication = session
+                    .proxy_jump_authentication
+                    .as_ref()
+                    .map(strip_credential_references);
+            }
+            (bundle, Vec::new())
+        }
+    };
     bundle.validate().map_err(display_error)?;
     // Validate the complete payload before creating any rows, so malformed
-    // startup commands cannot leave a half-imported directory tree behind.
+    // startup commands or credentials cannot leave a half-imported directory tree behind.
     for session in &bundle.sessions {
         validate_startup_command(session.startup_command.as_deref())?;
+    }
+    for credential in &credentials {
+        if credential.credential_ref.trim().is_empty() || credential.secret.is_empty() {
+            return Err("会话导出文件包含无效凭据记录".into());
+        }
+    }
+    let referenced_refs = bundle
+        .sessions
+        .iter()
+        .flat_map(session_credential_references)
+        .collect::<std::collections::BTreeSet<_>>();
+    let provided_refs = credentials
+        .iter()
+        .map(|credential| credential.credential_ref.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    if referenced_refs.len() != provided_refs.len()
+        || referenced_refs
+            .iter()
+            .any(|reference| !provided_refs.contains(reference.as_str()))
+    {
+        return Err("会话导出文件中的登录凭据与会话配置不匹配".into());
     }
 
     let mut group_map = HashMap::new();
@@ -913,6 +997,14 @@ async fn import_sessions(
         }
     }
 
+    let credentials_store = Arc::clone(&state.credentials);
+    let credential_summary = run_credential_operation(move || {
+        credentials_store
+            .import_selected(&credentials)
+            .map_err(display_error)
+    })
+    .await?;
+
     for session in &bundle.sessions {
         state
             .repository
@@ -924,11 +1016,8 @@ async fn import_sessions(
                 username: session.username.clone(),
                 proxy_jump: session.proxy_jump.clone(),
                 proxy_jump_username: session.proxy_jump_username.clone(),
-                proxy_jump_authentication: session
-                    .proxy_jump_authentication
-                    .as_ref()
-                    .map(strip_credential_references),
-                authentication: strip_credential_references(&session.authentication),
+                proxy_jump_authentication: session.proxy_jump_authentication.clone(),
+                authentication: session.authentication.clone(),
                 terminal: session.terminal.clone(),
                 initial_directory: session.initial_directory.clone(),
                 startup_command: session.startup_command.clone(),
@@ -946,6 +1035,8 @@ async fn import_sessions(
     Ok(ImportSummary {
         groups_created: bundle.groups.len(),
         sessions_created: bundle.sessions.len(),
+        credentials_imported: credential_summary.imported,
+        credentials_overwritten: credential_summary.overwritten,
     })
 }
 

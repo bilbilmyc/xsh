@@ -146,7 +146,7 @@ impl LocalCredentialStore {
         for row in rows {
             let (credential_ref, kind, nonce, ciphertext) = row?;
             let secret = self.decrypt(&credential_ref, &nonce, &ciphertext)?;
-            credentials.push(BackupCredential {
+            credentials.push(CredentialRecord {
                 credential_ref,
                 kind,
                 secret: secret.to_string(),
@@ -162,6 +162,85 @@ impl LocalCredentialStore {
         })
         .map_err(|error| CredentialError::Crypto(format!("无法编码凭据备份：{error}")))?;
         encrypt_backup_payload(password, &payload)
+    }
+
+    /// Export only the credentials referenced by a session bundle.
+    ///
+    /// The returned records are intended to remain inside an encrypted export
+    /// payload and must never be shown in the UI or written as plaintext.
+    pub fn export_selected(&self, credential_refs: &[String]) -> Result<Vec<CredentialRecord>> {
+        let connection = self.connection()?;
+        let mut records = Vec::with_capacity(credential_refs.len());
+        for credential_ref in credential_refs {
+            let row = connection
+                .query_row(
+                    "SELECT kind, nonce, ciphertext FROM xsh_credentials WHERE credential_ref = ?1",
+                    params![credential_ref],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Vec<u8>>(1)?,
+                            row.get::<_, Vec<u8>>(2)?,
+                        ))
+                    },
+                )
+                .optional()?
+                .ok_or_else(|| CredentialError::NotFound(credential_ref.clone()))?;
+            let secret = self.decrypt(credential_ref, &row.1, &row.2)?;
+            records.push(CredentialRecord {
+                credential_ref: credential_ref.clone(),
+                kind: row.0,
+                secret: secret.to_string(),
+            });
+        }
+        Ok(records)
+    }
+
+    /// Import credentials carried by an encrypted session export.
+    pub fn import_selected(&self, records: &[CredentialRecord]) -> Result<BackupImportSummary> {
+        let mut encrypted_records = Vec::with_capacity(records.len());
+        for record in records {
+            if record.credential_ref.trim().is_empty() || record.secret.is_empty() {
+                return Err(CredentialError::InvalidBackupFormat);
+            }
+            encrypted_records.push((
+                record.credential_ref.clone(),
+                record.kind.clone(),
+                self.encrypt(&record.secret)?,
+            ));
+        }
+
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        let mut overwritten = 0;
+        for (credential_ref, kind, (nonce, ciphertext)) in encrypted_records {
+            let existed: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM xsh_credentials WHERE credential_ref = ?1)",
+                params![credential_ref],
+                |row| row.get(0),
+            )?;
+            transaction.execute(
+                "INSERT INTO xsh_credentials
+                 (credential_ref, kind, nonce, ciphertext, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+                 ON CONFLICT(credential_ref) DO UPDATE SET
+                   kind = excluded.kind, nonce = excluded.nonce,
+                   ciphertext = excluded.ciphertext, updated_at = excluded.updated_at",
+                params![
+                    credential_ref,
+                    kind,
+                    nonce.as_slice(),
+                    ciphertext,
+                    chrono::Utc::now().to_rfc3339()
+                ],
+            )?;
+            overwritten += usize::from(existed);
+        }
+        transaction.commit()?;
+        Ok(BackupImportSummary {
+            imported: records.len(),
+            overwritten,
+        })
     }
 
     /// Inspect a backup without modifying the credential vault. This lets the
@@ -395,14 +474,16 @@ struct BackupPayload {
     format: String,
     schema_version: u32,
     created_at: String,
-    credentials: Vec<BackupCredential>,
+    credentials: Vec<CredentialRecord>,
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct BackupCredential {
-    credential_ref: String,
-    kind: String,
-    secret: String,
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialRecord {
+    #[serde(rename = "credentialRef", alias = "credential_ref")]
+    pub credential_ref: String,
+    pub kind: String,
+    pub secret: String,
 }
 
 fn derive_backup_key(password: &str, salt: &[u8]) -> Result<[u8; KEY_BYTES]> {
@@ -630,6 +711,34 @@ mod tests {
         let imported = store.import_backup(&backup, "backup-password").unwrap();
         assert_eq!(imported.imported, 1);
         assert_eq!(store.get(&reference).unwrap().as_str(), "backup-secret");
+        drop(store);
+        fs::remove_dir_all(database.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn selected_credentials_round_trip() {
+        let (database, key) = temp_paths("selected-round-trip");
+        fs::create_dir_all(database.parent().unwrap()).unwrap();
+        let store = LocalCredentialStore::open(&database, &key).unwrap();
+        let reference = store
+            .create(CredentialKind::Password, "selected-secret")
+            .unwrap();
+        let records = store
+            .export_selected(std::slice::from_ref(&reference))
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].credential_ref, reference);
+        assert_eq!(records[0].secret, "selected-secret");
+
+        store.delete(&reference).unwrap();
+        let summary = store.import_selected(&records).unwrap();
+        assert_eq!(summary.imported, 1);
+        assert_eq!(summary.overwritten, 0);
+        assert_eq!(store.get(&reference).unwrap().as_str(), "selected-secret");
+
+        let summary = store.import_selected(&records).unwrap();
+        assert_eq!(summary.imported, 1);
+        assert_eq!(summary.overwritten, 1);
         drop(store);
         fs::remove_dir_all(database.parent().unwrap()).unwrap();
     }

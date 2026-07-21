@@ -29,12 +29,12 @@ Build a local-first SSH2 desktop client for macOS and Windows that covers the da
 - Password, private-key, encrypted-key, SSH Agent, and keyboard-interactive authentication.
 - Known Hosts management, diagnostics, ProxyJump, and local/remote/dynamic port forwarding.
 - SFTP directory operations, remote editing, multi-select bulk actions, two-worker upload queue, retries, cancellation, and task cleanup.
-- Plain session export without secrets plus separately password-encrypted credential backup.
+- Password-protected session export carries the credentials referenced by those sessions; `.xshbackup` remains available for a separate full credential-vault backup.
 - macOS personal build and Windows build/CI preparation.
 
 ## Data and security boundaries
 
-- Never persist credentials in plaintext, logs, workspace state, command history, quick commands, or normal session exports.
+- Never persist credentials in plaintext, logs, workspace state, command history, quick commands, or unencrypted export payloads.
 - Never silently trust a changed server key.
 - Keep workspace snapshots limited to tab IDs, session IDs, active/secondary tab IDs, and layout.
 - Keep command snippets local and outside session exports; variable references such as `$TOKEN` are allowed, literal secrets are rejected.

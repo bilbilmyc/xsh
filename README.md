@@ -57,11 +57,11 @@ XSH 按“本地优先、默认不泄露”设计：
 
 - 密码和 Key Passphrase 只进入 XSH 自建的本地加密凭据库
 - SQLite 只保存 opaque Credential Ref，不保存明文秘密
-- 会话配置使用密码加密的 `.xshpack` 导入 / 导出；工作区使用密码加密的 `.xshworkspace` 导入 / 导出；凭据使用独立密码加密的 `.xshbackup` 备份
+- 会话配置与会话实际使用的登录密码 / Key Passphrase 一起使用同一个文件密码加密到 `.xshpack`；工作区使用密码加密的 `.xshworkspace` 导入 / 导出；凭据库仍可使用独立密码导出 `.xshbackup` 备份
 - Host Key 首次出现需要用户确认，发生变化时默认阻断连接
 - 命令中心和快捷命令栏拒绝保存高置信度敏感内容
 - 导入前先解密并校验完整文件；凭据恢复使用事务写入，避免失败后留下半份数据
-- 普通会话配置不包含密码、Key Passphrase 或 Token；完整迁移需要同时导入会话配置与凭据备份
+- `.xshpack` 会加密保存会话实际引用的密码和 Key Passphrase，导入另一台设备时只需输入导出时设置的文件密码；普通工作区文件不包含这些凭据，`.xshbackup` 仍用于全量凭据迁移
 - SFTP 使用流式传输和断点元数据，避免一次性读取完整文件
 
 完整边界请参阅 [SECURITY.md](SECURITY.md) 和 [产品规格](docs/product-spec.md)。

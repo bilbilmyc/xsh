@@ -234,6 +234,8 @@ export interface BackupImportSummary {
 export interface ImportSummary {
   groupsCreated: number;
   sessionsCreated: number;
+  credentialsImported: number;
+  credentialsOverwritten: number;
 }
 
 export const defaultTerminalProfile = (): TerminalProfile => ({
