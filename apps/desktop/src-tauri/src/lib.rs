@@ -801,13 +801,12 @@ async fn export_credentials_backup(
     if password.is_empty() || password.len() > 4096 {
         return Err("备份密码不能为空且不能超过 4096 个字符".into());
     }
-    let bytes = state
-        .credentials
-        .export_backup(&password)
-        .map_err(display_error)?;
-    tokio::fs::write(target_path, bytes)
-        .await
-        .map_err(display_error)
+    let credentials = Arc::clone(&state.credentials);
+    let bytes = run_credential_operation(move || {
+        credentials.export_backup(&password).map_err(display_error)
+    })
+    .await?;
+    write_export_file(&target_path, bytes).await
 }
 
 #[tauri::command]
@@ -819,11 +818,14 @@ async fn inspect_credentials_backup(
     if password.is_empty() || password.len() > 4096 {
         return Err("备份密码不能为空且不能超过 4096 个字符".into());
     }
-    let bytes = tokio::fs::read(source_path).await.map_err(display_error)?;
-    state
-        .credentials
-        .inspect_backup(&bytes, &password)
-        .map_err(display_error)
+    let bytes = read_export_file(&source_path).await?;
+    let credentials = Arc::clone(&state.credentials);
+    run_credential_operation(move || {
+        credentials
+            .inspect_backup(&bytes, &password)
+            .map_err(display_error)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -835,11 +837,14 @@ async fn import_credentials_backup(
     if password.is_empty() || password.len() > 4096 {
         return Err("备份密码不能为空且不能超过 4096 个字符".into());
     }
-    let bytes = tokio::fs::read(source_path).await.map_err(display_error)?;
-    state
-        .credentials
-        .import_backup(&bytes, &password)
-        .map_err(display_error)
+    let bytes = read_export_file(&source_path).await?;
+    let credentials = Arc::clone(&state.credentials);
+    run_credential_operation(move || {
+        credentials
+            .import_backup(&bytes, &password)
+            .map_err(display_error)
+    })
+    .await
 }
 
 #[tauri::command]

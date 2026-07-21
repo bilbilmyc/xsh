@@ -13,6 +13,7 @@ use zeroize::Zeroizing;
 const KEY_BYTES: usize = 32;
 const NONCE_BYTES: usize = 12;
 const BACKUP_SALT_BYTES: usize = 16;
+const MAX_CREDENTIAL_BACKUP_BYTES: usize = 5 * 1024 * 1024;
 const BACKUP_MAGIC: &[u8] = b"XSHBACK1";
 pub const SESSION_EXPORT_MAGIC: &[u8] = b"XSHPACK1";
 pub const WORKSPACE_EXPORT_MAGIC: &[u8] = b"XSHWORK1";
@@ -52,6 +53,8 @@ pub enum CredentialError {
     InvalidBackupFormat,
     #[error("文件密码错误或文件已损坏")]
     InvalidBackupPassword,
+    #[error("凭据备份文件不能超过 5 MiB")]
+    BackupTooLarge,
 }
 
 pub type Result<T> = std::result::Result<T, CredentialError>;
@@ -484,10 +487,16 @@ fn encrypt_backup_payload(password: &str, payload: &[u8]) -> Result<Vec<u8>> {
     output.extend_from_slice(&salt);
     output.extend_from_slice(&nonce);
     output.extend_from_slice(&ciphertext);
+    if output.len() > MAX_CREDENTIAL_BACKUP_BYTES {
+        return Err(CredentialError::BackupTooLarge);
+    }
     Ok(output)
 }
 
 fn decrypt_backup_payload(password: &str, backup: &[u8]) -> Result<BackupPayload> {
+    if backup.len() > MAX_CREDENTIAL_BACKUP_BYTES {
+        return Err(CredentialError::BackupTooLarge);
+    }
     let header_len = BACKUP_MAGIC.len() + 1 + BACKUP_SALT_BYTES + NONCE_BYTES;
     if backup.len() <= header_len
         || &backup[..BACKUP_MAGIC.len()] != BACKUP_MAGIC
@@ -646,6 +655,15 @@ mod tests {
         ));
         drop(store);
         fs::remove_dir_all(database.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn backup_rejects_oversized_files_before_decryption() {
+        let oversized = vec![0_u8; MAX_CREDENTIAL_BACKUP_BYTES + 1];
+        assert!(matches!(
+            decrypt_backup_payload("backup-password", &oversized),
+            Err(CredentialError::BackupTooLarge)
+        ));
     }
 
     #[test]
