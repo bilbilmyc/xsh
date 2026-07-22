@@ -108,16 +108,18 @@ export function SessionSidebar({
   const suppressNextGroupClickRef = useRef(false);
   const resizeStartRef = useRef<{ x: number; width: number } | null>(null);
   const dragFeedbackTimerRef = useRef<number | null>(null);
-  const recentUpdateTimersRef = useRef<Map<string, number>>(new Map());
+  const recentSessionsRef = useRef(recentSessions);
   const doubleClickStateRef = useRef<{ sessionId: string; wasOpen: boolean; timer: number } | null>(null);
 
   useEffect(() => {
     window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(sidebarWidth));
   }, [sidebarWidth]);
 
+  useEffect(() => {
+    recentSessionsRef.current = recentSessions;
+  }, [recentSessions]);
+
   useEffect(() => () => {
-    for (const timer of recentUpdateTimersRef.current.values()) window.clearTimeout(timer);
-    recentUpdateTimersRef.current.clear();
     if (doubleClickStateRef.current) window.clearTimeout(doubleClickStateRef.current.timer);
     doubleClickStateRef.current = null;
   }, []);
@@ -191,21 +193,23 @@ export function SessionSidebar({
   }, [activityBySessionId, normalizedQuery, recentSessions, sessionFilter, sessionSort, sessions]);
 
   const markSessionOpened = (session: SavedSession, options?: { forceNew?: boolean }) => {
-    // Keep the row in place during the native double-click interval. Updating
-    // the "recent" sort immediately can move the row between the first and
-    // second click, making the second click land on the neighboring session.
+    // Persist recency for the next launch, but keep the current sidebar order
+    // stable. Re-sorting while the connection/activity state is updating makes
+    // a double-click target jump vertically under the pointer.
+    const next = { ...recentSessionsRef.current, [session.id]: Date.now() };
+    recentSessionsRef.current = next;
+    window.localStorage.setItem(RECENT_SESSIONS_STORAGE_KEY, JSON.stringify(next));
     onOpen(session, options);
-    const previousTimer = recentUpdateTimersRef.current.get(session.id);
-    if (previousTimer !== undefined) window.clearTimeout(previousTimer);
-    const timer = window.setTimeout(() => {
-      recentUpdateTimersRef.current.delete(session.id);
-      setRecentSessions((current) => {
-        const next = { ...current, [session.id]: Date.now() };
-        window.localStorage.setItem(RECENT_SESSIONS_STORAGE_KEY, JSON.stringify(next));
-        return next;
-      });
-    }, 400);
-    recentUpdateTimersRef.current.set(session.id, timer);
+  };
+
+  const handleSessionSortChange = (value: string) => {
+    const nextSort = value as SessionSort;
+    if (nextSort === "recent") {
+      // Refresh the snapshot only when the user explicitly asks to view recent
+      // order; normal connection updates must not reorder the live list.
+      setRecentSessions({ ...recentSessionsRef.current });
+    }
+    setSessionSort(nextSort);
   };
 
   const toggleGroup = (groupId: string) => {
@@ -691,7 +695,7 @@ export function SessionSidebar({
             <option value="open">已打开</option>
             <option value="failed">需关注</option>
           </select>
-          <select value={sessionSort} onChange={(event) => setSessionSort(event.target.value as SessionSort)} aria-label="排序会话">
+          <select value={sessionSort} onChange={(event) => handleSessionSortChange(event.target.value)} aria-label="排序会话">
             <option value="recent">最近使用</option>
             <option value="status">连接状态</option>
             <option value="name">名称</option>
