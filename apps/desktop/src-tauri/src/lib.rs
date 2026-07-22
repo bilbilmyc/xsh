@@ -8,7 +8,9 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::ipc::Channel;
-use tauri::{AppHandle, Manager, State};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Manager, RunEvent, State, WindowEvent};
 use uuid::Uuid;
 use xsh_domain::{
     AuthenticationMethod, ConnectionId, KnownHost, RemoteEntry, SavedSession, SessionBundle,
@@ -1377,6 +1379,14 @@ fn display_error(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
 
+fn show_main_window<R: tauri::Runtime>(app: &AppHandle<R>) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
 fn user_home_directory() -> Option<PathBuf> {
     #[cfg(windows)]
     {
@@ -1419,7 +1429,39 @@ pub fn run() {
                 ssh: SshSessionManager::new(),
                 sftp: SftpManager::new(),
             });
+
+            let show = MenuItem::with_id(app, "show", "显示 XSH", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "退出 XSH", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show, &quit])?;
+            let mut tray = TrayIconBuilder::with_id("main-tray")
+                .menu(&menu)
+                .tooltip("XSH")
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => show_main_window(app),
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        show_main_window(tray.app_handle());
+                    }
+                });
+            if let Some(icon) = app.default_window_icon().cloned() {
+                tray = tray.icon(icon);
+            }
+            tray.build(app)?;
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
         })
         .invoke_handler(tauri::generate_handler![
             clipboard_write,
@@ -1474,6 +1516,12 @@ pub fn run() {
             export_workspaces,
             import_workspaces,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running XSH");
+        .build(tauri::generate_context!())
+        .expect("error while building XSH")
+        .run(|app, event| {
+            #[cfg(target_os = "macos")]
+            if let RunEvent::Reopen { .. } = event {
+                show_main_window(app);
+            }
+        });
 }
