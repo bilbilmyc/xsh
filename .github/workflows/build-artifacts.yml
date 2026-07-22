@@ -40,24 +40,23 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build macOS app
-        run: pnpm --filter desktop exec tauri build --bundles app
+        run: pnpm --filter desktop exec tauri build --bundles dmg,app
 
-      - name: Create portable macOS archive
+      - name: Verify macOS bundles
         shell: bash
         run: |
           set -euo pipefail
           app_path="target/release/bundle/macos/XSH.app"
-          archive_path="target/release/bundle/macos/XSH-personal-macos.zip"
+          dmg_path="$(find target/release/bundle/dmg -name "*.dmg" -print -quit)"
           test -d "$app_path"
-          rm -f "$archive_path"
-          ditto -c -k --sequesterRsrc --keepParent "$app_path" "$archive_path"
+          test -n "$dmg_path"
           codesign --verify --deep --strict "$app_path"
 
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
         with:
           name: xsh-macos-personal
-          path: target/release/bundle/macos/XSH-personal-macos.zip
+          path: target/release/bundle/dmg/*.dmg
           if-no-files-found: error
           retention-days: 14
 
@@ -121,6 +120,6 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
-            release-assets/XSH-personal-macos.zip
+            release-assets/*.dmg
             release-assets/nsis/*.exe
             release-assets/msi/*.msi

@@ -21,7 +21,7 @@ if ! command -v pnpm >/dev/null 2>&1; then
   echo "未找到 pnpm。请先执行：corepack enable && corepack prepare pnpm@11.10.0 --activate" >&2
   exit 1
 fi
-pnpm --filter desktop exec tauri build --bundles app
+pnpm --filter desktop exec tauri build --bundles dmg,app
 
 APP_PATH="$ROOT_DIR/target/release/bundle/macos/XSH.app"
 if [[ ! -d "$APP_PATH" ]]; then
@@ -36,15 +36,18 @@ if ! grep -q 'Signature=adhoc' <<<"$SIGNING_INFO"; then
   exit 1
 fi
 
-ARCHIVE_PATH="$ROOT_DIR/target/release/bundle/macos/XSH-personal-macos.zip"
-rm -f "$ARCHIVE_PATH"
-ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "$ARCHIVE_PATH"
+DMG_PATH="$(find "$ROOT_DIR/target/release/bundle/dmg" -type f -name '*.dmg' -print -quit)"
+if [[ -z "$DMG_PATH" || ! -f "$DMG_PATH" ]]; then
+  echo "构建完成，但没有找到 DMG：$DMG_PATH" >&2
+  exit 1
+fi
 
 echo
 echo "个人免费构建完成："
 echo "  $APP_PATH"
-echo "  $ARCHIVE_PATH"
+echo "  $DMG_PATH"
 echo
 echo "签名状态：ad-hoc（仅用于本机个人使用，不需要 Apple Developer Program）"
-echo "首次打开：Finder 中右键 XSH.app → 打开 → 再点一次“打开”。"
-echo "不要删除/移动应用后再从未知来源重复运行，否则 macOS 可能再次显示安全提示。"
+echo "安装方式：双击 DMG，然后把 XSH 拖到 Applications。"
+echo "首次打开：在 Applications 中右键 XSH → 打开 → 再点一次“打开”。"
+echo "当前是 Apple Silicon（aarch64）个人构建；仅用于本机个人使用。"

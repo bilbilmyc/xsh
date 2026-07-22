@@ -74,7 +74,7 @@ XSH 按“本地优先、默认不泄露”设计：
 
 | 平台 | 构建产物 | 说明 |
 | --- | --- | --- |
-| macOS Apple Silicon | `xsh-macos-personal` | `XSH-personal-macos.zip`，ad-hoc 签名，适合个人使用 |
+| macOS Apple Silicon | `xsh-macos-personal` | `.dmg` 安装包，ad-hoc 签名，适合个人使用 |
 | Windows x64 | `xsh-windows-installers` | NSIS `.exe` 和 MSI `.msi`，当前未签名 |
 
 未签名构建可能触发 macOS Gatekeeper 或 Windows SmartScreen。请确认构建来源后再允许运行。
@@ -114,8 +114,14 @@ macOS 个人版产物：
 
 ```text
 target/release/bundle/macos/XSH.app
-target/release/bundle/macos/XSH-personal-macos.zip
+target/release/bundle/dmg/*.dmg
 ```
+
+安装步骤：
+
+1. 双击 `.dmg` 文件。
+2. 在打开的窗口中把 `XSH` 拖到 `Applications`。
+3. 从“应用程序”中启动 XSH。首次启动如果 macOS 提示来源无法验证，请在 Finder 中右键 XSH，选择“打开”，再确认一次。
 
 Windows 安装包产物：
 
