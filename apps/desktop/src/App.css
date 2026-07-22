@@ -458,6 +458,13 @@ select {
   background: linear-gradient(90deg, rgba(31, 128, 151, 0.28), rgba(31, 128, 151, 0.06) 72%, transparent);
 }
 
+/* Keep hosts visually nested under their owning folder instead of aligning them
+   with the folder row itself. */
+.group-children > .session-row {
+  width: calc(100% - 14px);
+  margin-left: 14px;
+}
+
 .session-row {
   position: relative;
   width: 100%;
