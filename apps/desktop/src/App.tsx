@@ -248,9 +248,12 @@ function App() {
   } | null>(null);
   const workspaceRestoreStartedRef = useRef(false);
   const terminalStageRef = useRef<HTMLDivElement>(null);
+  const tabsRef = useRef<TerminalTab[]>([]);
+  const pendingSessionOpenRef = useRef(new Map<string, TerminalTab>());
   const activeTabIdRef = useRef<string | null>(null);
   const secondaryTabIdRef = useRef<string | null>(null);
   const paneLayoutRef = useRef<PaneLayout>(paneLayout);
+  tabsRef.current = tabs;
   activeTabIdRef.current = activeTabId;
   secondaryTabIdRef.current = secondaryTabId;
   paneLayoutRef.current = paneLayout;
@@ -313,6 +316,13 @@ function App() {
     }
     setWorkspaceRestored(true);
   }, [sessionDataReady, sessions]);
+
+  useEffect(() => {
+    const openSessionIds = new Set(tabs.map((tab) => tab.session.id));
+    for (const sessionId of pendingSessionOpenRef.current.keys()) {
+      if (openSessionIds.has(sessionId)) pendingSessionOpenRef.current.delete(sessionId);
+    }
+  }, [tabs]);
 
   useEffect(() => {
     const inFlight = tabs.filter((tab) => isConnectionInFlight(tab.state)).length;
@@ -595,22 +605,33 @@ function App() {
   }, []);
 
   const openSession = (session: SavedSession) => {
-    const existing = tabs.find((tab) => tab.session.id === session.id);
+    // A double-click emits two click events before React necessarily commits the
+    // first state update. Track the pending tab so both events target one tab.
+    const currentTabs = tabsRef.current;
+    const existing = currentTabs.find((tab) => tab.session.id === session.id);
     if (existing) {
       // Opening an already active session only focuses its existing terminal.
       // Reconnecting here would discard shell state and differs from Xshell/SecureCRT.
       focusTab(existing.id);
       return;
     }
+    const pending = pendingSessionOpenRef.current.get(session.id);
+    if (pending) {
+      focusTab(pending.id);
+      return;
+    }
     const tab: TerminalTab = {
       id: crypto.randomUUID(),
       session,
-      state: initialConnectionState(tabs),
+      state: initialConnectionState(currentTabs),
       connectionVersion: 0,
       locked: false,
       color: normalizeTabColor(session.color),
     };
-    setTabs((current) => [...current, tab]);
+    pendingSessionOpenRef.current.set(session.id, tab);
+    setTabs((current) => current.some((candidate) => candidate.session.id === session.id)
+      ? current
+      : [...current, tab]);
     setActiveTabId(tab.id);
   };
 

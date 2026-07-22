@@ -108,10 +108,16 @@ export function SessionSidebar({
   const suppressNextGroupClickRef = useRef(false);
   const resizeStartRef = useRef<{ x: number; width: number } | null>(null);
   const dragFeedbackTimerRef = useRef<number | null>(null);
+  const recentUpdateTimersRef = useRef<Map<string, number>>(new Map());
 
   useEffect(() => {
     window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(sidebarWidth));
   }, [sidebarWidth]);
+
+  useEffect(() => () => {
+    for (const timer of recentUpdateTimersRef.current.values()) window.clearTimeout(timer);
+    recentUpdateTimersRef.current.clear();
+  }, []);
 
   useEffect(() => {
     setExpanded((current) => {
@@ -182,10 +188,21 @@ export function SessionSidebar({
   }, [activityBySessionId, normalizedQuery, recentSessions, sessionFilter, sessionSort, sessions]);
 
   const markSessionOpened = (session: SavedSession) => {
-    const next = { ...recentSessions, [session.id]: Date.now() };
-    setRecentSessions(next);
-    window.localStorage.setItem(RECENT_SESSIONS_STORAGE_KEY, JSON.stringify(next));
+    // Keep the row in place during the native double-click interval. Updating
+    // the "recent" sort immediately can move the row between the first and
+    // second click, making the second click land on the neighboring session.
     onOpen(session);
+    const previousTimer = recentUpdateTimersRef.current.get(session.id);
+    if (previousTimer !== undefined) window.clearTimeout(previousTimer);
+    const timer = window.setTimeout(() => {
+      recentUpdateTimersRef.current.delete(session.id);
+      setRecentSessions((current) => {
+        const next = { ...current, [session.id]: Date.now() };
+        window.localStorage.setItem(RECENT_SESSIONS_STORAGE_KEY, JSON.stringify(next));
+        return next;
+      });
+    }, 400);
+    recentUpdateTimersRef.current.set(session.id, timer);
   };
 
   const toggleGroup = (groupId: string) => {
@@ -493,7 +510,6 @@ export function SessionSidebar({
       key={session.id}
       className={`session-row ${activeSessionId === session.id ? "active" : ""} ${selectedSessionIds.has(session.id) ? "selected" : ""} ${draggedSessionIds.has(session.id) ? "dragging" : ""}`}
       onPointerDown={(event) => beginPointerDrag(event, session)}
-      onDoubleClick={() => markSessionOpened(session)}
       onClick={(event) => handleSessionClick(event, session)}
       onContextMenu={(event) => showSessionMenu(event, session)}
       aria-pressed={selectedSessionIds.has(session.id)}
