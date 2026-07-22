@@ -31,7 +31,7 @@ interface SessionSidebarProps {
   sessions: SavedSession[];
   activeSessionId?: string;
   activityBySessionId: Record<string, SessionActivitySummary>;
-  onOpen: (session: SavedSession) => void;
+  onOpen: (session: SavedSession, options?: { forceNew?: boolean }) => void;
   onOpenGroup: (group: SessionGroup) => void;
   onDiagnose: (session: SavedSession) => void;
   onEdit: (session: SavedSession) => void;
@@ -109,6 +109,7 @@ export function SessionSidebar({
   const resizeStartRef = useRef<{ x: number; width: number } | null>(null);
   const dragFeedbackTimerRef = useRef<number | null>(null);
   const recentUpdateTimersRef = useRef<Map<string, number>>(new Map());
+  const doubleClickStateRef = useRef<{ sessionId: string; wasOpen: boolean; timer: number } | null>(null);
 
   useEffect(() => {
     window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(sidebarWidth));
@@ -117,6 +118,8 @@ export function SessionSidebar({
   useEffect(() => () => {
     for (const timer of recentUpdateTimersRef.current.values()) window.clearTimeout(timer);
     recentUpdateTimersRef.current.clear();
+    if (doubleClickStateRef.current) window.clearTimeout(doubleClickStateRef.current.timer);
+    doubleClickStateRef.current = null;
   }, []);
 
   useEffect(() => {
@@ -187,11 +190,11 @@ export function SessionSidebar({
     });
   }, [activityBySessionId, normalizedQuery, recentSessions, sessionFilter, sessionSort, sessions]);
 
-  const markSessionOpened = (session: SavedSession) => {
+  const markSessionOpened = (session: SavedSession, options?: { forceNew?: boolean }) => {
     // Keep the row in place during the native double-click interval. Updating
     // the "recent" sort immediately can move the row between the first and
     // second click, making the second click land on the neighboring session.
-    onOpen(session);
+    onOpen(session, options);
     const previousTimer = recentUpdateTimersRef.current.get(session.id);
     if (previousTimer !== undefined) window.clearTimeout(previousTimer);
     const timer = window.setTimeout(() => {
@@ -498,7 +501,39 @@ export function SessionSidebar({
       setSelectionAnchorId(session.id);
       return;
     }
+    // The first click opens/focuses immediately. The native double-click
+    // handler below decides whether this gesture should create another tab.
+    // Ignore the second click itself so it cannot create a duplicate tab.
+    if (event.detail > 1) return;
+    if (doubleClickStateRef.current) {
+      window.clearTimeout(doubleClickStateRef.current.timer);
+      doubleClickStateRef.current = null;
+    }
+    const timer = window.setTimeout(() => {
+      if (doubleClickStateRef.current?.sessionId === session.id) {
+        doubleClickStateRef.current = null;
+      }
+    }, 500);
+    doubleClickStateRef.current = {
+      sessionId: session.id,
+      wasOpen: (activityBySessionId[session.id]?.openTabs ?? 0) > 0,
+      timer,
+    };
     markSessionOpened(session);
+  };
+
+  const handleSessionDoubleClick = (event: React.MouseEvent, session: SavedSession) => {
+    if (event.metaKey || event.ctrlKey || event.shiftKey || selectedSessionIds.size > 0) return;
+    event.preventDefault();
+    const pending = doubleClickStateRef.current;
+    const wasOpen = pending?.sessionId === session.id
+      ? pending.wasOpen
+      : (activityBySessionId[session.id]?.openTabs ?? 0) > 0;
+    if (pending) window.clearTimeout(pending.timer);
+    doubleClickStateRef.current = null;
+    // A double-click on an already-open saved session creates a fresh SSH tab;
+    // the first double-click on a closed session keeps the tab it just opened.
+    if (wasOpen) markSessionOpened(session, { forceNew: true });
   };
 
   const sessionRow = (session: SavedSession) => {
@@ -511,6 +546,7 @@ export function SessionSidebar({
       className={`session-row ${activeSessionId === session.id ? "active" : ""} ${selectedSessionIds.has(session.id) ? "selected" : ""} ${draggedSessionIds.has(session.id) ? "dragging" : ""}`}
       onPointerDown={(event) => beginPointerDrag(event, session)}
       onClick={(event) => handleSessionClick(event, session)}
+      onDoubleClick={(event) => handleSessionDoubleClick(event, session)}
       onContextMenu={(event) => showSessionMenu(event, session)}
       aria-pressed={selectedSessionIds.has(session.id)}
       aria-label={`${session.name}，${session.username}@${session.host}:${session.port}${activityDescription ? `，${activityDescription}` : ""}`}

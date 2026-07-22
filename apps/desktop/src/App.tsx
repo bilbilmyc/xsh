@@ -604,19 +604,19 @@ function App() {
     setEditorSession(session);
   }, []);
 
-  const openSession = (session: SavedSession) => {
+  const openSession = (session: SavedSession, options?: { forceNew?: boolean }) => {
+    const forceNew = options?.forceNew === true;
     // A double-click emits two click events before React necessarily commits the
     // first state update. Track the pending tab so both events target one tab.
     const currentTabs = tabsRef.current;
     const existing = currentTabs.find((tab) => tab.session.id === session.id);
-    if (existing) {
-      // Opening an already active session only focuses its existing terminal.
-      // Reconnecting here would discard shell state and differs from Xshell/SecureCRT.
+    if (!forceNew && existing) {
+      // A normal click on an already-open session focuses its existing terminal.
       focusTab(existing.id);
       return;
     }
     const pending = pendingSessionOpenRef.current.get(session.id);
-    if (pending) {
+    if (!forceNew && pending) {
       focusTab(pending.id);
       return;
     }
@@ -628,8 +628,8 @@ function App() {
       locked: false,
       color: normalizeTabColor(session.color),
     };
-    pendingSessionOpenRef.current.set(session.id, tab);
-    setTabs((current) => current.some((candidate) => candidate.session.id === session.id)
+    if (!forceNew) pendingSessionOpenRef.current.set(session.id, tab);
+    setTabs((current) => !forceNew && current.some((candidate) => candidate.session.id === session.id)
       ? current
       : [...current, tab]);
     setActiveTabId(tab.id);
