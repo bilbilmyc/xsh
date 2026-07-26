@@ -47,7 +47,7 @@ export const defaultPreferences: AppPreferences = {
   useSessionTerminalFont: false,
   useSessionTerminalScrollback: false,
   rightClickAction: "paste",
-  copyOnSelect: false,
+  copyOnSelect: true,
   confirmMultiLinePaste: false,
   terminalShortcutMode: "platform-safe",
 };

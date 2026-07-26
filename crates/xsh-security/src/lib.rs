@@ -45,10 +45,12 @@ pub enum CredentialError {
     Crypto(String),
     #[error("credential store lock was poisoned")]
     Poisoned,
-    #[error("credential not found: {0}")]
+    #[error("credential not found")]
     NotFound(String),
     #[error("credential encryption key must be exactly 32 bytes")]
     InvalidKey,
+    #[error("凭据密钥文件必须是普通文件，不能是符号链接")]
+    InvalidKeyFile,
     #[error("invalid XSH credential backup format")]
     InvalidBackupFormat,
     #[error("文件密码错误或文件已损坏")]
@@ -92,7 +94,9 @@ impl LocalCredentialStore {
         let key_path = key_path.as_ref().to_owned();
         let database_path = database_path.as_ref().to_owned();
         let encryption_key = load_or_create_key(&key_path)?;
+        harden_database_path(&database_path)?;
         let connection = Connection::open(&database_path)?;
+        harden_regular_file(&database_path)?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         connection.execute_batch(
             "PRAGMA foreign_keys = ON;
@@ -357,14 +361,12 @@ impl LocalCredentialStore {
         ciphertext: &[u8],
     ) -> Result<Zeroizing<String>> {
         if nonce.len() != NONCE_BYTES {
-            return Err(CredentialError::Crypto(format!(
-                "凭据“{credential_ref}”的随机数长度无效"
-            )));
+            return Err(CredentialError::Crypto("凭据随机数长度无效".to_owned()));
         }
         let plaintext = self
             .cipher()
             .decrypt(Nonce::from_slice(nonce), ciphertext)
-            .map_err(|_| CredentialError::Crypto(format!("无法解密凭据“{credential_ref}”")))?;
+            .map_err(|_| CredentialError::Crypto("无法解密凭据".to_owned()))?;
         let value = String::from_utf8(plaintext)
             .map_err(|error| CredentialError::Crypto(format!("凭据不是有效文本：{error}")))?;
         if value.is_empty() {
@@ -598,8 +600,13 @@ fn decrypt_backup_payload(password: &str, backup: &[u8]) -> Result<BackupPayload
 }
 
 fn load_or_create_key(path: &Path) -> Result<Zeroizing<[u8; KEY_BYTES]>> {
-    match fs::read(path) {
-        Ok(bytes) => {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_file() {
+                return Err(CredentialError::InvalidKeyFile);
+            }
+            harden_regular_file(path)?;
+            let bytes = fs::read(path)?;
             if bytes.len() != KEY_BYTES {
                 return Err(CredentialError::InvalidKey);
             }
@@ -621,11 +628,38 @@ fn load_or_create_key(path: &Path) -> Result<Zeroizing<[u8; KEY_BYTES]>> {
         Ok(mut file) => {
             file.write_all(&key)?;
             file.sync_all()?;
+            harden_regular_file(path)?;
             Ok(Zeroizing::new(key))
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => load_or_create_key(path),
         Err(error) => Err(error.into()),
     }
+}
+
+fn harden_database_path(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => harden_regular_file(path),
+        Ok(_) => Err(CredentialError::InvalidKeyFile),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn harden_regular_file(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_file() {
+        return Err(CredentialError::InvalidKeyFile);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = metadata.permissions();
+        if permissions.mode() & 0o777 != 0o600 {
+            permissions.set_mode(0o600);
+            fs::set_permissions(path, permissions)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -637,6 +671,42 @@ mod tests {
         (root.join("credentials.sqlite3"), root.join("vault.key"))
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn key_and_database_files_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (database, key) = temp_paths("private-files");
+        fs::create_dir_all(database.parent().unwrap()).unwrap();
+        let store = LocalCredentialStore::open(&database, &key).unwrap();
+        drop(store);
+
+        assert_eq!(
+            fs::metadata(&key).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(&database).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        fs::remove_dir_all(database.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn key_symlink_is_rejected() {
+        let (database, key) = temp_paths("key-symlink");
+        let real_key = key.with_extension("real");
+        fs::create_dir_all(database.parent().unwrap()).unwrap();
+        fs::write(&real_key, [0_u8; 32]).unwrap();
+        std::os::unix::fs::symlink(&real_key, &key).unwrap();
+
+        assert!(matches!(
+            LocalCredentialStore::open(&database, &key),
+            Err(CredentialError::InvalidKeyFile)
+        ));
+        fs::remove_dir_all(database.parent().unwrap()).unwrap();
+    }
     #[test]
     fn local_store_round_trips_encrypted_secret() {
         let (database, key) = temp_paths("round-trip");

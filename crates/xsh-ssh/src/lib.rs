@@ -1,10 +1,8 @@
 pub mod config;
 pub mod known_hosts;
 
-use config::resolve_proxy_jump;
-use known_hosts::read_user_known_host;
-
 use anyhow::{Context, anyhow, bail};
+use config::resolve_proxy_jump;
 use russh::client;
 use russh::keys::agent::AgentIdentity;
 use russh::keys::agent::client::{AgentClient, AgentStream};
@@ -55,6 +53,7 @@ pub struct ConnectOptions {
     pub initial_directory: Option<String>,
     pub startup_command: Option<String>,
     pub known_host: Option<KnownHost>,
+    pub proxy_jump_known_host: Option<KnownHost>,
     pub trust_unknown_host: bool,
 }
 
@@ -844,12 +843,7 @@ async fn authenticate_session(
                 &private_key_path,
                 passphrase.as_ref().map(|value| value.as_str()),
             )
-            .with_context(|| {
-                format!(
-                    "failed to load private key {}",
-                    private_key_path.to_string_lossy()
-                )
-            })?;
+            .context("无法读取或解密 OpenSSH 私钥")?;
             let hash_algorithm = session
                 .best_supported_rsa_hash()
                 .await
@@ -907,11 +901,10 @@ async fn run_terminal_connection(
     };
 
     let mut session = if let Some(proxy) = proxy_target {
-        let proxy_known_host = read_user_known_host(&proxy.host, proxy.port).ok().flatten();
         let proxy_handler = HostKeyHandler {
             host: proxy.host.clone(),
             port: proxy.port,
-            known_host: proxy_known_host,
+            known_host: options.proxy_jump_known_host.clone(),
             trust_unknown_host: options.trust_unknown_host,
             event_tx: event_tx.clone(),
             remote_forwards: Arc::clone(&remote_forwards),
@@ -1595,7 +1588,7 @@ fn humanize_ssh_error(error: &anyhow::Error) -> String {
     let details = format!("{error:#}");
     let category = classify_ssh_error(&details);
     format!(
-        "{}（{}）：{}。详细信息：{details}",
+        "{}（{}）：{}。",
         category.title(),
         category.code(),
         category.suggestion()
@@ -1663,6 +1656,17 @@ mod tests {
             classify_ssh_error("Host key changed: fingerprint mismatch"),
             SshErrorCategory::HostKeyChanged
         );
+    }
+
+    #[test]
+    fn humanize_ssh_error_hides_private_key_path() {
+        let error = anyhow!(
+            "failed to load private key /Users/alice/.ssh/id_ed25519: incorrect passphrase"
+        );
+        let message = humanize_ssh_error(&error);
+        assert!(!message.contains("/Users/alice"));
+        assert!(!message.contains("id_ed25519"));
+        assert!(message.contains("私钥"));
     }
 
     #[test]

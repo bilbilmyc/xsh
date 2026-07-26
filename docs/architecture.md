@@ -25,8 +25,8 @@ XSH uses a Rust workspace behind a Tauri 2 desktop application. React renders ap
 
 ## Persistence and secrets
 
-SQLite contains session metadata, trusted public host keys, and AES-256-GCM encrypted XSH credential records. Passwords and private-key passphrases are addressed by opaque credential references; the encryption key is stored in the XSH app-data directory, and no OS credential manager is used.
+SQLite contains session metadata, trusted public host keys, and AES-256-GCM encrypted XSH credential records. Passwords and private-key passphrases are addressed by opaque credential references. The encryption key is stored in a separate file in the XSH app-data directory; on Unix, the key and credential database use `0600` permissions, and symlink key files are rejected. No OS credential manager is used. This protects against casual database inspection and accidental disclosure, but not a malicious process that already has the current user's file access.
 
 ## Import/export
 
-The versioned domain bundle is independent of SQLite. The default format contains folders, sessions, tags, settings, and optionally known hosts. It excludes passwords, passphrases, and private-key material.
+The versioned domain bundle is independent of SQLite. The default format contains folders, sessions, tags, settings, and optionally known hosts. It excludes passwords, passphrases, and private-key material. Terminal, SFTP, and ProxyJump all resolve trust only from XSH's SQLite Known Hosts records; the user's OpenSSH `known_hosts` file is not silently adopted as XSH trust.

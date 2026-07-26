@@ -19,7 +19,6 @@ use xsh_domain::{
 };
 use xsh_ssh::RuntimeAuthentication;
 use xsh_ssh::config::resolve_proxy_jump;
-use xsh_ssh::known_hosts::read_user_known_host;
 
 #[derive(Debug)]
 pub struct SftpConnectOptions {
@@ -31,6 +30,7 @@ pub struct SftpConnectOptions {
     pub proxy_jump_authentication: Option<RuntimeAuthentication>,
     pub authentication: RuntimeAuthentication,
     pub known_host: Option<KnownHost>,
+    pub proxy_jump_known_host: Option<KnownHost>,
     pub trust_unknown_host: bool,
 }
 
@@ -214,12 +214,7 @@ async fn authenticate_sftp_session(
                 &private_key_path,
                 passphrase.as_ref().map(|value| value.as_str()),
             )
-            .with_context(|| {
-                format!(
-                    "failed to load private key {}",
-                    private_key_path.to_string_lossy()
-                )
-            })?;
+            .context("无法读取或解密 OpenSSH 私钥")?;
             let hash_algorithm = session
                 .best_supported_rsa_hash()
                 .await
@@ -292,7 +287,7 @@ impl SftpManager {
             let proxy_handler = SftpHostKeyHandler {
                 host: proxy.host.clone(),
                 port: proxy.port,
-                known_host: read_user_known_host(&proxy.host, proxy.port).ok().flatten(),
+                known_host: options.proxy_jump_known_host.clone(),
                 trust_unknown_host: options.trust_unknown_host,
                 trusted_host_key,
             };

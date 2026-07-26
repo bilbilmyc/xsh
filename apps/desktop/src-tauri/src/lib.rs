@@ -22,8 +22,7 @@ use xsh_security::{
     SESSION_EXPORT_MAGIC, WORKSPACE_EXPORT_MAGIC, decrypt_export_payload, encrypt_export_payload,
 };
 use xsh_sftp::{SftpConnectOptions, SftpManager};
-use xsh_ssh::config::SshConfigEntry;
-use xsh_ssh::known_hosts::read_user_known_host;
+use xsh_ssh::config::{SshConfigEntry, resolve_proxy_jump};
 use xsh_ssh::{
     ConnectOptions, ForwardInfo, RuntimeAuthentication, SshAgentKey, SshDiagnosticReport,
     SshSessionManager, diagnose_connection, list_agent_keys, validate_dimensions,
@@ -142,22 +141,26 @@ fn clipboard_read() -> CommandResult<String> {
 
 #[tauri::command]
 async fn write_text_file(target_path: PathBuf, contents: String) -> CommandResult<()> {
-    if target_path.as_os_str().is_empty() {
-        return Err("文件保存路径不能为空".into());
+    validate_local_path(&target_path, "文件保存路径")?;
+    if contents.len() > 32 * 1024 * 1024 {
+        return Err("文本文件不能超过 32 MiB".into());
     }
-    tokio::fs::write(target_path, contents)
+    tokio::fs::write(&target_path, contents)
         .await
-        .map_err(|error| format!("无法保存文本文件：{error}"))
+        .map_err(|error| format!("无法保存文本文件：{error}"))?;
+    set_private_file_permissions(&target_path)
+        .map_err(|error| format!("无法设置文本文件权限：{error}"))
 }
 
 #[tauri::command]
 async fn read_text_file(source_path: PathBuf) -> CommandResult<String> {
-    if source_path.as_os_str().is_empty() {
-        return Err("文件路径不能为空".into());
-    }
+    validate_local_path(&source_path, "文件路径")?;
     let metadata = tokio::fs::metadata(&source_path)
         .await
         .map_err(|error| format!("无法读取文件信息：{error}"))?;
+    if !metadata.is_file() {
+        return Err("指定路径不是普通文件".into());
+    }
     if metadata.len() > 5 * 1024 * 1024 {
         return Err("文本文件不能超过 5 MiB".into());
     }
@@ -345,15 +348,8 @@ async fn connect_terminal(
     let known_host = state
         .repository
         .find_known_host(&session.host, session.port)
-        .map_err(display_error)?
-        .or_else(|| {
-            // Reuse the user's OpenSSH trust database when XSH has not seen
-            // this host yet. A malformed or unreadable system file should not
-            // prevent a normal first connection, so this lookup is best-effort.
-            read_user_known_host(&session.host, session.port)
-                .ok()
-                .flatten()
-        });
+        .map_err(display_error)?;
+    let proxy_jump_known_host = find_proxy_jump_known_host(&state, session.proxy_jump.as_deref())?;
     let subscription = state
         .ssh
         .connect(ConnectOptions {
@@ -372,6 +368,7 @@ async fn connect_terminal(
             initial_directory: session.initial_directory.clone(),
             startup_command: session.startup_command.clone(),
             known_host,
+            proxy_jump_known_host,
             trust_unknown_host,
         })
         .await;
@@ -554,15 +551,8 @@ async fn connect_sftp(
     let known_host = state
         .repository
         .find_known_host(&session.host, session.port)
-        .map_err(display_error)?
-        .or_else(|| {
-            // Reuse the user's OpenSSH trust database when XSH has not seen
-            // this host yet. A malformed or unreadable system file should not
-            // prevent a normal first connection, so this lookup is best-effort.
-            read_user_known_host(&session.host, session.port)
-                .ok()
-                .flatten()
-        });
+        .map_err(display_error)?;
+    let proxy_jump_known_host = find_proxy_jump_known_host(&state, session.proxy_jump.as_deref())?;
     let result = state
         .sftp
         .connect(SftpConnectOptions {
@@ -574,6 +564,7 @@ async fn connect_sftp(
             proxy_jump_authentication,
             authentication,
             known_host,
+            proxy_jump_known_host,
             trust_unknown_host,
         })
         .await
@@ -684,13 +675,19 @@ fn prepare_remote_edit_path(app: AppHandle, remote_name: String) -> CommandResul
 
 #[tauri::command]
 fn create_local_directory(path: PathBuf) -> CommandResult<()> {
+    validate_local_path(&path, "本地目录路径")?;
     std::fs::create_dir_all(path).map_err(display_error)
 }
 
 #[tauri::command]
 fn open_local_path(path: PathBuf) -> CommandResult<()> {
+    validate_local_path(&path, "本地路径")?;
     if !path.exists() {
         return Err(format!("本地文件不存在：{}", path.display()));
+    }
+    let metadata = std::fs::metadata(&path).map_err(display_error)?;
+    if !metadata.is_file() && !metadata.is_dir() {
+        return Err("指定路径不是普通文件或目录".into());
     }
     #[cfg(target_os = "macos")]
     let mut command = Command::new("open");
@@ -758,6 +755,13 @@ async fn sftp_upload(
     overwrite: bool,
     on_event: Channel<TransferEvent>,
 ) -> CommandResult<TransferId> {
+    validate_local_path(&local_path, "上传文件路径")?;
+    let metadata = tokio::fs::metadata(&local_path)
+        .await
+        .map_err(|error| format!("无法读取上传文件信息：{error}"))?;
+    if !metadata.is_file() {
+        return Err("上传路径不是普通文件".into());
+    }
     let subscription = state
         .sftp
         .upload(connection_id, local_path, remote_path, overwrite)
@@ -784,6 +788,7 @@ async fn sftp_download(
     overwrite: bool,
     on_event: Channel<TransferEvent>,
 ) -> CommandResult<TransferId> {
+    validate_local_path(&local_path, "下载文件路径")?;
     let subscription = state
         .sftp
         .download(connection_id, remote_path, local_path, overwrite)
@@ -1073,19 +1078,46 @@ fn validate_export_password(password: &str) -> CommandResult<()> {
     Ok(())
 }
 
+fn validate_local_path(path: &std::path::Path, label: &str) -> CommandResult<()> {
+    if path.as_os_str().is_empty() {
+        return Err(format!("{label}不能为空"));
+    }
+    if path.as_os_str().to_string_lossy().contains('\0') {
+        return Err(format!("{label}不能包含 NUL 字符"));
+    }
+    if !path.is_absolute() {
+        return Err(format!("{label}必须使用绝对路径"));
+    }
+    if let Ok(metadata) = std::fs::symlink_metadata(path)
+        && metadata.file_type().is_symlink()
+    {
+        return Err(format!("{label}不能直接使用符号链接"));
+    }
+    Ok(())
+}
+
+fn set_private_file_permissions(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
 async fn write_export_file(path: &PathBuf, bytes: Vec<u8>) -> CommandResult<()> {
     if path.as_os_str().is_empty() {
         return Err("文件保存路径不能为空".into());
     }
+    validate_local_path(path, "文件保存路径")?;
     tokio::fs::write(path, bytes)
         .await
-        .map_err(|error| format!("无法保存加密导出文件：{error}"))
+        .map_err(|error| format!("无法保存加密导出文件：{error}"))?;
+    set_private_file_permissions(path).map_err(|error| format!("无法设置导出文件权限：{error}"))
 }
 
 async fn read_export_file(path: &PathBuf) -> CommandResult<Vec<u8>> {
-    if path.as_os_str().is_empty() {
-        return Err("文件路径不能为空".into());
-    }
+    validate_local_path(path, "文件路径")?;
     let metadata = tokio::fs::metadata(path)
         .await
         .map_err(|error| format!("无法读取导出文件信息：{error}"))?;
@@ -1095,6 +1127,25 @@ async fn read_export_file(path: &PathBuf) -> CommandResult<Vec<u8>> {
     tokio::fs::read(path)
         .await
         .map_err(|error| format!("无法读取加密导出文件：{error}"))
+}
+
+fn find_proxy_jump_known_host(
+    state: &AppState,
+    proxy_jump: Option<&str>,
+) -> CommandResult<Option<KnownHost>> {
+    let Some(proxy_jump) = proxy_jump else {
+        return Ok(None);
+    };
+    let proxy = resolve_proxy_jump(proxy_jump).map_err(display_error)?;
+    proxy
+        .map(|proxy| {
+            state
+                .repository
+                .find_known_host(&proxy.host, proxy.port)
+                .map_err(display_error)
+        })
+        .transpose()
+        .map(|value| value.flatten())
 }
 
 fn require_session(state: &AppState, session_id: SessionId) -> CommandResult<SavedSession> {
@@ -1524,4 +1575,30 @@ pub fn run() {
                 show_main_window(app);
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_path_validation_requires_absolute_non_symlink_paths() {
+        assert!(validate_local_path(std::path::Path::new("relative.txt"), "文件").is_err());
+        assert!(validate_local_path(std::path::Path::new("/tmp/file\0.txt"), "文件").is_err());
+        assert!(validate_local_path(std::path::Path::new("/tmp/file.txt"), "文件").is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_path_validation_rejects_final_symlink() {
+        let root = std::env::temp_dir().join(format!("xsh-path-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let real = root.join("real.txt");
+        let link = root.join("link.txt");
+        std::fs::write(&real, "safe").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        assert!(validate_local_path(&link, "文件").is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

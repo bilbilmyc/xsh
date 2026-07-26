@@ -1,7 +1,7 @@
 {
   "name": "xsh",
   "private": true,
-  "version": "0.1.9",
+  "version": "0.1.10",
   "packageManager": "pnpm@11.10.0",
   "engines": {
     "node": ">=22",
@@ -11,8 +11,10 @@
     "dev": "pnpm --filter desktop exec tauri dev",
     "build": "pnpm --filter desktop run build",
     "tauri:build": "pnpm --filter desktop exec tauri build",
-    "check": "pnpm run build && cargo test --workspace",
+    "check": "pnpm run build && pnpm test && cargo test --workspace",
     "build:macos:personal": "bash scripts/build-macos-personal.sh",
-    "build:windows": "powershell -ExecutionPolicy Bypass -File scripts/build-windows.ps1"
-  }
+    "build:windows": "powershell -ExecutionPolicy Bypass -File scripts/build-windows.ps1",
+    "test": "node --test tests/*.test.ts"
+  },
+  "type": "module"
 }

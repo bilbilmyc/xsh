@@ -330,6 +330,21 @@ export function TerminalPane({
       }
     };
 
+    const pasteFromRightClick = async () => {
+      // xterm emits selectionchange asynchronously. If the user selects text
+      // and immediately right-clicks, the delayed copy-on-select callback may
+      // not have run yet, leaving the system clipboard with stale contents.
+      // Flush that selection synchronously before reading the clipboard.
+      if (selectionCopyTimer !== undefined) {
+        window.clearTimeout(selectionCopyTimer);
+        selectionCopyTimer = undefined;
+      }
+      if (terminal.hasSelection()) {
+        await copySelection();
+      }
+      await safePaste();
+    };
+
     const isMac = /mac|iphone|ipad/i.test(`${navigator.platform} ${navigator.userAgent}`);
     const isCopyShortcut = (event: KeyboardEvent) => isMac
       ? event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "c"
@@ -403,7 +418,7 @@ export function TerminalPane({
       terminal.focus();
       if (preferencesRef.current.rightClickAction === "paste") {
         setContextMenu(null);
-        void safePaste().catch((error) => {
+        void pasteFromRightClick().catch((error) => {
           terminal.writeln(`\r\n\x1b[31m粘贴失败：${String(error)}\x1b[0m`);
         });
       } else {
@@ -981,7 +996,7 @@ export function TerminalPane({
             {
               label: "粘贴",
               onClick: () =>
-                void pasteIntoTerminal(terminalRef.current, preferencesRef.current.confirmMultiLinePaste, session.name).catch((error) => {
+                void pasteIntoTerminal(terminalRef.current, preferencesRef.current.confirmMultiLinePaste, session.name, preferencesRef.current.copyOnSelect).catch((error) => {
                   terminalRef.current?.writeln(`\r\n\x1b[31m粘贴失败：${String(error)}\x1b[0m`);
                 }),
             },
@@ -1008,8 +1023,12 @@ async function copyFromTerminal(terminal: Terminal | null) {
   await writeClipboardText(selection);
 }
 
-async function pasteIntoTerminal(terminal: Terminal | null, confirmMultiLine: boolean, sessionName: string) {
+async function pasteIntoTerminal(terminal: Terminal | null, confirmMultiLine: boolean, sessionName: string, copySelectionFirst = false) {
   if (!terminal) return;
+  if (copySelectionFirst && terminal.hasSelection()) {
+    const selection = terminal.getSelection();
+    if (selection) await writeClipboardText(selection);
+  }
   const text = await readClipboardText();
   if (!text) return;
   const lineCount = text.split(/\r?\n/).length;
