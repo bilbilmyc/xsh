@@ -2,11 +2,8 @@ use chrono::Utc;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::env;
-use std::io::Write;
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 #[cfg(target_os = "macos")]
@@ -71,84 +68,6 @@ struct SshKeyDefaults {
 }
 
 type CommandResult<T> = Result<T, String>;
-
-#[tauri::command]
-fn clipboard_write(text: String) -> CommandResult<()> {
-    #[cfg(target_os = "macos")]
-    let mut command = Command::new("pbcopy");
-    #[cfg(target_os = "windows")]
-    let mut command = {
-        let mut command = Command::new("powershell.exe");
-        command.args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-STA",
-            "-Command",
-            "$text = [Console]::In.ReadToEnd(); Set-Clipboard -Value $text",
-        ]);
-        // `powershell.exe` is a console application. Without this flag,
-        // Windows can briefly show a blue console window for every clipboard
-        // write (including copy-on-select in the terminal).
-        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-        command
-    };
-    #[cfg(target_os = "linux")]
-    let mut command = Command::new("xclip");
-    #[cfg(target_os = "linux")]
-    command.args(["-selection", "clipboard"]);
-
-    let mut child = command
-        .stdin(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("无法访问系统剪贴板：{error}"))?;
-    child
-        .stdin
-        .take()
-        .ok_or_else(|| "无法打开系统剪贴板写入通道".to_owned())?
-        .write_all(text.as_bytes())
-        .map_err(|error| format!("无法写入系统剪贴板：{error}"))?;
-    let status = child
-        .wait()
-        .map_err(|error| format!("系统剪贴板进程失败：{error}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("系统剪贴板进程退出码：{}", status))
-    }
-}
-
-#[tauri::command]
-fn clipboard_read() -> CommandResult<String> {
-    #[cfg(target_os = "macos")]
-    let mut command = Command::new("pbpaste");
-    #[cfg(target_os = "windows")]
-    let mut command = {
-        let mut command = Command::new("powershell.exe");
-        command.args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-STA",
-            "-Command",
-            "[Console]::Out.Write((Get-Clipboard -Raw))",
-        ]);
-        // Keep the clipboard-read helper hidden as well, so a paste cannot
-        // produce the same momentary console window.
-        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-        command
-    };
-    #[cfg(target_os = "linux")]
-    let mut command = Command::new("xclip");
-    #[cfg(target_os = "linux")]
-    command.args(["-selection", "clipboard", "-o"]);
-
-    let output = command
-        .output()
-        .map_err(|error| format!("无法读取系统剪贴板：{error}"))?;
-    if !output.status.success() {
-        return Err(format!("系统剪贴板进程退出码：{}", output.status));
-    }
-    String::from_utf8(output.stdout).map_err(|error| format!("系统剪贴板内容不是有效文本：{error}"))
-}
 
 #[tauri::command]
 async fn write_text_file(target_path: PathBuf, contents: String) -> CommandResult<()> {
@@ -1479,6 +1398,7 @@ fn expand_user_path(path: &std::path::Path) -> PathBuf {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
@@ -1528,8 +1448,6 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            clipboard_write,
-            clipboard_read,
             write_text_file,
             read_text_file,
             list_groups,

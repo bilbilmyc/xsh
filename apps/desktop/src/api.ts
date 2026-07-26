@@ -1,4 +1,5 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import type {
   BackupImportSummary,
   ForwardInfo,
@@ -19,8 +20,8 @@ import type {
 } from "./types";
 
 export const api = {
-  clipboardWrite: (text: string) => invoke<void>("clipboard_write", { text }),
-  clipboardRead: () => invoke<string>("clipboard_read"),
+  clipboardWrite: (text: string) => writeText(text),
+  clipboardRead: () => readText(),
   writeTextFile: (targetPath: string, contents: string) =>
     invoke<void>("write_text_file", { targetPath, contents }),
   readTextFile: (sourcePath: string) =>
