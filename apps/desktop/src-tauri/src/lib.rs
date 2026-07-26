@@ -7,10 +7,12 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(target_os = "macos")]
+use tauri::RunEvent;
 use tauri::ipc::Channel;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager, RunEvent, State, WindowEvent};
+use tauri::{AppHandle, Manager, State, WindowEvent};
 use uuid::Uuid;
 use xsh_domain::{
     AuthenticationMethod, ConnectionId, KnownHost, RemoteEntry, SavedSession, SessionBundle,
@@ -1097,6 +1099,8 @@ fn validate_local_path(path: &std::path::Path, label: &str) -> CommandResult<()>
 }
 
 fn set_private_file_permissions(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1573,6 +1577,11 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             if let RunEvent::Reopen { .. } = event {
                 show_main_window(app);
+            }
+
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = (app, event);
             }
         });
 }
