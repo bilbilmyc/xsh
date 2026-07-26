@@ -1594,7 +1594,8 @@ mod tests {
     fn local_path_validation_requires_absolute_non_symlink_paths() {
         assert!(validate_local_path(std::path::Path::new("relative.txt"), "文件").is_err());
         assert!(validate_local_path(std::path::Path::new("/tmp/file\0.txt"), "文件").is_err());
-        assert!(validate_local_path(std::path::Path::new("/tmp/file.txt"), "文件").is_ok());
+        let absolute_path = std::env::temp_dir().join(format!("xsh-path-test-{}", Uuid::new_v4()));
+        assert!(validate_local_path(&absolute_path, "文件").is_ok());
     }
 
     #[cfg(unix)]
