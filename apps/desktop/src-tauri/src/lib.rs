@@ -3,6 +3,8 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::env;
 use std::io::Write;
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -84,6 +86,10 @@ fn clipboard_write(text: String) -> CommandResult<()> {
             "-Command",
             "$text = [Console]::In.ReadToEnd(); Set-Clipboard -Value $text",
         ]);
+        // `powershell.exe` is a console application. Without this flag,
+        // Windows can briefly show a blue console window for every clipboard
+        // write (including copy-on-select in the terminal).
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         command
     };
     #[cfg(target_os = "linux")]
@@ -125,6 +131,9 @@ fn clipboard_read() -> CommandResult<String> {
             "-Command",
             "[Console]::Out.Write((Get-Clipboard -Raw))",
         ]);
+        // Keep the clipboard-read helper hidden as well, so a paste cannot
+        // produce the same momentary console window.
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         command
     };
     #[cfg(target_os = "linux")]
