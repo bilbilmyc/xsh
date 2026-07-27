@@ -164,6 +164,7 @@ export interface RemoteEntry {
 export type TransferStatus =
   | "queued"
   | "running"
+  | "paused"
   | "completed"
   | "cancelled"
   | "failed";
@@ -176,6 +177,7 @@ export interface TransferEvent {
   status: TransferStatus;
   transferredBytes: number;
   totalBytes: number | null;
+  speedBytesPerSecond: number | null;
   error: string | null;
 }
 

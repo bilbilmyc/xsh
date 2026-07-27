@@ -95,6 +95,12 @@ export const api = {
     invoke<Uuid>("connect_sftp", { sessionId, trustUnknownHost }),
   disconnectSftp: (connectionId: Uuid) =>
     invoke<void>("disconnect_sftp", { connectionId }),
+  releaseSftpConnection: (connectionId: Uuid) =>
+    invoke<void>("release_sftp_connection", { connectionId }),
+  listTransfers: () => invoke<TransferEvent[]>("list_transfers"),
+  pauseTransfer: (transferId: Uuid) => invoke<TransferEvent>("pause_transfer", { transferId }),
+  resumeTransfer: (transferId: Uuid) => invoke<TransferEvent>("resume_transfer", { transferId }),
+  removeTransfer: (transferId: Uuid) => invoke<void>("remove_transfer", { transferId }),
   sftpCanonicalize: (connectionId: Uuid, path: string) =>
     invoke<string>("sftp_canonicalize", { connectionId, path }),
   sftpListDirectory: (connectionId: Uuid, path: string) =>
@@ -140,7 +146,7 @@ export const api = {
       onEvent,
     }),
   cancelTransfer: (transferId: Uuid) =>
-    invoke<void>("cancel_transfer", { transferId }),
+    invoke<TransferEvent>("cancel_transfer", { transferId }),
 
   exportCredentialsBackup: (targetPath: string, password: string) =>
     invoke<void>("export_credentials_backup", { targetPath, password }),

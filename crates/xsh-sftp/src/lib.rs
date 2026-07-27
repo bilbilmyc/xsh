@@ -4,12 +4,11 @@ use russh::keys::{HashAlg, PrivateKeyWithHashAlg, PublicKey, load_secret_key};
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::{FileType, OpenFlags};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::UNIX_EPOCH;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::{Mutex, mpsc, watch};
 use uuid::Uuid;
@@ -52,7 +51,7 @@ pub struct SftpConnectResult {
 #[derive(Debug)]
 pub struct TransferSubscription {
     pub transfer_id: TransferId,
-    pub events: mpsc::UnboundedReceiver<TransferEvent>,
+    pub events: mpsc::Receiver<TransferEvent>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -65,8 +64,11 @@ pub enum SftpManagerError {
     Operation(#[from] anyhow::Error),
 }
 
-const DOWNLOAD_RESUME_METADATA_VERSION: u8 = 1;
+const DOWNLOAD_RESUME_METADATA_VERSION: u8 = 2;
 const UPLOAD_RESUME_METADATA_VERSION: u8 = 1;
+const TRANSFER_EVENT_CAPACITY: usize = 16;
+const TRANSFER_PROGRESS_INTERVAL: Duration = Duration::from_millis(150);
+const RESUME_VERIFICATION_BLOCK_BYTES: u64 = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct UploadResumeMetadata {
@@ -83,6 +85,8 @@ struct DownloadResumeMetadata {
     remote_path: String,
     total_bytes: u64,
     modified_at_unix: Option<u32>,
+    #[serde(default)]
+    source_identity: String,
 }
 
 struct DownloadFileRequest<'a> {
@@ -91,14 +95,111 @@ struct DownloadFileRequest<'a> {
     overwrite: bool,
     total_bytes: u64,
     modified_at_unix: Option<u32>,
+    source_identity: &'a str,
 }
 
+#[derive(Clone)]
 struct TerminalTransferContext {
     transfer_id: TransferId,
     direction: TransferDirection,
     local_path: PathBuf,
     remote_path: String,
     total_bytes: u64,
+}
+
+impl TerminalTransferContext {
+    fn event(
+        &self,
+        status: TransferStatus,
+        transferred_bytes: u64,
+        speed_bytes_per_second: Option<u64>,
+        error: Option<String>,
+    ) -> TransferEvent {
+        TransferEvent {
+            transfer_id: self.transfer_id,
+            direction: self.direction.clone(),
+            local_path: self.local_path.clone(),
+            remote_path: self.remote_path.clone(),
+            status,
+            transferred_bytes,
+            total_bytes: Some(self.total_bytes),
+            speed_bytes_per_second,
+            error,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransferControl {
+    Running,
+    Paused,
+    Cancelled,
+}
+
+struct ManagedTransfer {
+    connection_id: ConnectionId,
+    control: watch::Sender<TransferControl>,
+    snapshot: Arc<StdMutex<TransferEvent>>,
+}
+
+fn update_transfer_snapshot(snapshot: &StdMutex<TransferEvent>, event: TransferEvent) {
+    if let Ok(mut current) = snapshot.lock() {
+        *current = event;
+    }
+}
+
+struct TransferProgressReporter {
+    events: mpsc::Sender<TransferEvent>,
+    context: TerminalTransferContext,
+    snapshot: Arc<StdMutex<TransferEvent>>,
+    last_speed_sample: Instant,
+    last_speed_bytes: u64,
+    last_sent_at: Option<Instant>,
+}
+
+impl TransferProgressReporter {
+    fn new(
+        events: mpsc::Sender<TransferEvent>,
+        context: TerminalTransferContext,
+        snapshot: Arc<StdMutex<TransferEvent>>,
+    ) -> Self {
+        Self {
+            events,
+            context,
+            snapshot,
+            last_speed_sample: Instant::now(),
+            last_speed_bytes: 0,
+            last_sent_at: None,
+        }
+    }
+
+    fn report(&mut self, transferred_bytes: u64) {
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last_speed_sample);
+        let speed_bytes_per_second = if elapsed.is_zero() {
+            None
+        } else {
+            let bytes = transferred_bytes.saturating_sub(self.last_speed_bytes);
+            Some((bytes as f64 / elapsed.as_secs_f64()) as u64)
+        };
+        self.last_speed_sample = now;
+        self.last_speed_bytes = transferred_bytes;
+        let event = self.context.event(
+            TransferStatus::Running,
+            transferred_bytes,
+            speed_bytes_per_second,
+            None,
+        );
+        update_transfer_snapshot(&self.snapshot, event.clone());
+        if self
+            .last_sent_at
+            .is_some_and(|last_sent| now.duration_since(last_sent) < TRANSFER_PROGRESS_INTERVAL)
+        {
+            return;
+        }
+        self.last_sent_at = Some(now);
+        let _ = self.events.try_send(event);
+    }
 }
 
 struct SftpHostKeyHandler {
@@ -240,6 +341,7 @@ async fn authenticate_sftp_session(
 
 struct ActiveSftpConnection {
     sftp: Arc<SftpSession>,
+    download_source_identity: String,
     _ssh: client::Handle<SftpHostKeyHandler>,
     _proxy_ssh: Option<client::Handle<SftpHostKeyHandler>>,
 }
@@ -247,7 +349,8 @@ struct ActiveSftpConnection {
 #[derive(Default)]
 struct SftpManagerInner {
     connections: Mutex<HashMap<ConnectionId, ActiveSftpConnection>>,
-    transfers: Mutex<HashMap<TransferId, watch::Sender<bool>>>,
+    transfers: Mutex<HashMap<TransferId, ManagedTransfer>>,
+    released_connections: Mutex<HashSet<ConnectionId>>,
 }
 
 #[derive(Clone, Default)]
@@ -379,17 +482,30 @@ impl SftpManager {
             .context("failed to initialize the SFTP protocol")?;
         sftp.set_timeout(30);
 
+        let known_host_fingerprint = options
+            .known_host
+            .as_ref()
+            .map(|known_host| known_host.fingerprint.clone());
+        let presented_target_key = target_trusted_host_key.lock().await.take();
+        let target_fingerprint = presented_target_key
+            .as_ref()
+            .map(|key| key.fingerprint.as_str())
+            .or(known_host_fingerprint.as_deref())
+            .unwrap_or("unverified");
+        let download_source_identity =
+            format!("{}:{}:{target_fingerprint}", options.host, options.port);
         let connection_id = Uuid::new_v4();
         self.inner.connections.lock().await.insert(
             connection_id,
             ActiveSftpConnection {
                 sftp: Arc::new(sftp),
+                download_source_identity,
                 _ssh: ssh,
                 _proxy_ssh: proxy_ssh,
             },
         );
         let mut trusted_host_keys = Vec::new();
-        if let Some(key) = target_trusted_host_key.lock().await.take() {
+        if let Some(key) = presented_target_key {
             trusted_host_keys.push(key);
         }
         if let Some(value) = proxy_trusted_host_key
@@ -404,6 +520,154 @@ impl SftpManager {
     }
 
     pub async fn disconnect(&self, connection_id: ConnectionId) -> Result<(), SftpManagerError> {
+        self.inner
+            .released_connections
+            .lock()
+            .await
+            .remove(&connection_id);
+        self.close_connection(connection_id).await
+    }
+
+    pub async fn release_connection(
+        &self,
+        connection_id: ConnectionId,
+    ) -> Result<(), SftpManagerError> {
+        let has_active_transfers = self
+            .inner
+            .transfers
+            .lock()
+            .await
+            .values()
+            .filter(|transfer| transfer.connection_id == connection_id)
+            .any(|transfer| {
+                transfer
+                    .snapshot
+                    .lock()
+                    .map(|snapshot| transfer_is_active(&snapshot.status))
+                    .unwrap_or(false)
+            });
+        if has_active_transfers {
+            self.inner
+                .released_connections
+                .lock()
+                .await
+                .insert(connection_id);
+            return Ok(());
+        }
+        self.close_connection(connection_id).await
+    }
+
+    pub async fn list_transfers(&self) -> Vec<TransferEvent> {
+        let transfers = self.inner.transfers.lock().await;
+        let mut snapshots = transfers
+            .values()
+            .filter_map(|transfer| {
+                transfer
+                    .snapshot
+                    .lock()
+                    .ok()
+                    .map(|snapshot| snapshot.clone())
+            })
+            .collect::<Vec<_>>();
+        snapshots.sort_by_key(|transfer| transfer.transfer_id);
+        snapshots
+    }
+
+    pub async fn pause_transfer(
+        &self,
+        transfer_id: TransferId,
+    ) -> Result<TransferEvent, SftpManagerError> {
+        self.update_transfer_control(transfer_id, TransferControl::Paused)
+            .await
+    }
+
+    pub async fn resume_transfer(
+        &self,
+        transfer_id: TransferId,
+    ) -> Result<TransferEvent, SftpManagerError> {
+        self.update_transfer_control(transfer_id, TransferControl::Running)
+            .await
+    }
+
+    pub async fn cancel_transfer(
+        &self,
+        transfer_id: TransferId,
+    ) -> Result<TransferEvent, SftpManagerError> {
+        self.update_transfer_control(transfer_id, TransferControl::Cancelled)
+            .await
+    }
+
+    pub async fn remove_transfer(&self, transfer_id: TransferId) -> Result<(), SftpManagerError> {
+        let connection_id = {
+            let mut transfers = self.inner.transfers.lock().await;
+            let transfer = transfers
+                .get(&transfer_id)
+                .ok_or(SftpManagerError::TransferNotFound(transfer_id))?;
+            let is_active = transfer
+                .snapshot
+                .lock()
+                .map(|snapshot| transfer_is_active(&snapshot.status))
+                .unwrap_or(true);
+            if is_active {
+                return Err(SftpManagerError::Operation(anyhow::anyhow!(
+                    "cannot remove an active transfer"
+                )));
+            }
+            transfers
+                .remove(&transfer_id)
+                .map(|transfer| transfer.connection_id)
+        };
+        if let Some(connection_id) = connection_id {
+            self.close_released_connection_if_idle(connection_id)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn update_transfer_control(
+        &self,
+        transfer_id: TransferId,
+        control: TransferControl,
+    ) -> Result<TransferEvent, SftpManagerError> {
+        let transfers = self.inner.transfers.lock().await;
+        let transfer = transfers
+            .get(&transfer_id)
+            .ok_or(SftpManagerError::TransferNotFound(transfer_id))?;
+        let mut snapshot = transfer.snapshot.lock().map_err(|_| {
+            SftpManagerError::Operation(anyhow::anyhow!("transfer state lock poisoned"))
+        })?;
+        if !transfer_is_active(&snapshot.status) {
+            return Ok(snapshot.clone());
+        }
+        match control {
+            TransferControl::Running => {
+                if snapshot.status == TransferStatus::Paused {
+                    snapshot.status = TransferStatus::Running;
+                    snapshot.speed_bytes_per_second = None;
+                }
+            }
+            TransferControl::Paused => {
+                if snapshot.status == TransferStatus::Running
+                    || snapshot.status == TransferStatus::Queued
+                {
+                    snapshot.status = TransferStatus::Paused;
+                    snapshot.speed_bytes_per_second = Some(0);
+                }
+            }
+            TransferControl::Cancelled => {
+                snapshot.status = TransferStatus::Cancelled;
+                snapshot.speed_bytes_per_second = Some(0);
+            }
+        }
+        let event = snapshot.clone();
+        transfer
+            .control
+            .send(control)
+            .map_err(|error| SftpManagerError::Operation(anyhow::anyhow!(error.to_string())))?;
+        Ok(event)
+    }
+
+    async fn close_connection(&self, connection_id: ConnectionId) -> Result<(), SftpManagerError> {
         let connection = self
             .inner
             .connections
@@ -416,6 +680,39 @@ impl SftpManager {
             .close()
             .await
             .context("failed to close SFTP session")?;
+        Ok(())
+    }
+
+    async fn close_released_connection_if_idle(
+        &self,
+        connection_id: ConnectionId,
+    ) -> Result<(), SftpManagerError> {
+        let has_active_transfers = self
+            .inner
+            .transfers
+            .lock()
+            .await
+            .values()
+            .filter(|transfer| transfer.connection_id == connection_id)
+            .any(|transfer| {
+                transfer
+                    .snapshot
+                    .lock()
+                    .map(|snapshot| transfer_is_active(&snapshot.status))
+                    .unwrap_or(false)
+            });
+        if has_active_transfers {
+            return Ok(());
+        }
+        if self
+            .inner
+            .released_connections
+            .lock()
+            .await
+            .remove(&connection_id)
+        {
+            self.close_connection(connection_id).await?;
+        }
         Ok(())
     }
 
@@ -556,55 +853,63 @@ impl SftpManager {
         let upload_metadata =
             make_upload_resume_metadata(&local_path, &remote_path, &local_metadata);
         let transfer_id = Uuid::new_v4();
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
-        let (cancel_tx, cancel_rx) = watch::channel(false);
-        self.inner
-            .transfers
-            .lock()
-            .await
-            .insert(transfer_id, cancel_tx);
-        let inner = Arc::clone(&self.inner);
-        let event_local_path = local_path.clone();
-        let event_remote_path = remote_path.clone();
+        let (event_tx, event_rx) = mpsc::channel(TRANSFER_EVENT_CAPACITY);
+        let (control_tx, control_rx) = watch::channel(TransferControl::Running);
+        let context = TerminalTransferContext {
+            transfer_id,
+            direction: TransferDirection::Upload,
+            local_path: local_path.clone(),
+            remote_path: remote_path.clone(),
+            total_bytes,
+        };
+        let snapshot = Arc::new(StdMutex::new(context.event(
+            TransferStatus::Queued,
+            0,
+            None,
+            None,
+        )));
+        self.inner.transfers.lock().await.insert(
+            transfer_id,
+            ManagedTransfer {
+                connection_id,
+                control: control_tx,
+                snapshot: Arc::clone(&snapshot),
+            },
+        );
+        let _ = event_tx.try_send(
+            snapshot
+                .lock()
+                .map(|event| event.clone())
+                .unwrap_or_else(|_| context.event(TransferStatus::Queued, 0, None, None)),
+        );
+        let manager = self.clone();
 
         tokio::spawn(async move {
-            let latest_transferred = Arc::new(AtomicU64::new(0));
-            let progress_transferred = Arc::clone(&latest_transferred);
+            let mut latest_transferred = 0;
+            let mut reporter = TransferProgressReporter::new(
+                event_tx.clone(),
+                context.clone(),
+                Arc::clone(&snapshot),
+            );
             let result = upload_file(
                 &session,
                 &local_path,
                 &remote_path,
                 overwrite,
                 &upload_metadata,
-                cancel_rx,
+                control_rx,
                 |transferred| {
-                    progress_transferred.store(transferred, Ordering::Relaxed);
-                    let _ = event_tx.send(TransferEvent {
-                        transfer_id,
-                        direction: TransferDirection::Upload,
-                        local_path: event_local_path.clone(),
-                        remote_path: event_remote_path.clone(),
-                        status: TransferStatus::Running,
-                        transferred_bytes: transferred,
-                        total_bytes: Some(total_bytes),
-                        error: None,
-                    });
+                    latest_transferred = transferred;
+                    reporter.report(transferred);
                 },
             )
             .await;
-            send_terminal_transfer_event(
-                &event_tx,
-                TerminalTransferContext {
-                    transfer_id,
-                    direction: TransferDirection::Upload,
-                    local_path: event_local_path,
-                    remote_path: event_remote_path,
-                    total_bytes,
-                },
-                latest_transferred.load(Ordering::Relaxed),
-                result,
-            );
-            inner.transfers.lock().await.remove(&transfer_id);
+            let terminal_event = terminal_transfer_event(context, latest_transferred, result);
+            update_transfer_snapshot(&snapshot, terminal_event.clone());
+            let _ = event_tx.send(terminal_event).await;
+            let _ = manager
+                .close_released_connection_if_idle(connection_id)
+                .await;
         });
 
         Ok(TransferSubscription {
@@ -620,7 +925,7 @@ impl SftpManager {
         local_path: PathBuf,
         overwrite: bool,
     ) -> Result<TransferSubscription, SftpManagerError> {
-        let session = self.session(connection_id).await?;
+        let (session, source_identity) = self.download_connection(connection_id).await?;
         let remote_metadata = session
             .metadata(remote_path.clone())
             .await
@@ -628,20 +933,44 @@ impl SftpManager {
         let total_bytes = remote_metadata.len();
         let modified_at_unix = remote_metadata.mtime;
         let transfer_id = Uuid::new_v4();
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
-        let (cancel_tx, cancel_rx) = watch::channel(false);
-        self.inner
-            .transfers
-            .lock()
-            .await
-            .insert(transfer_id, cancel_tx);
-        let inner = Arc::clone(&self.inner);
-        let event_local_path = local_path.clone();
-        let event_remote_path = remote_path.clone();
+        let (event_tx, event_rx) = mpsc::channel(TRANSFER_EVENT_CAPACITY);
+        let (control_tx, control_rx) = watch::channel(TransferControl::Running);
+        let context = TerminalTransferContext {
+            transfer_id,
+            direction: TransferDirection::Download,
+            local_path: local_path.clone(),
+            remote_path: remote_path.clone(),
+            total_bytes,
+        };
+        let snapshot = Arc::new(StdMutex::new(context.event(
+            TransferStatus::Queued,
+            0,
+            None,
+            None,
+        )));
+        self.inner.transfers.lock().await.insert(
+            transfer_id,
+            ManagedTransfer {
+                connection_id,
+                control: control_tx,
+                snapshot: Arc::clone(&snapshot),
+            },
+        );
+        let _ = event_tx.try_send(
+            snapshot
+                .lock()
+                .map(|event| event.clone())
+                .unwrap_or_else(|_| context.event(TransferStatus::Queued, 0, None, None)),
+        );
+        let manager = self.clone();
 
         tokio::spawn(async move {
-            let latest_transferred = Arc::new(AtomicU64::new(0));
-            let progress_transferred = Arc::clone(&latest_transferred);
+            let mut latest_transferred = 0;
+            let mut reporter = TransferProgressReporter::new(
+                event_tx.clone(),
+                context.clone(),
+                Arc::clone(&snapshot),
+            );
             let result = download_file(
                 &session,
                 DownloadFileRequest {
@@ -650,53 +979,27 @@ impl SftpManager {
                     overwrite,
                     total_bytes,
                     modified_at_unix,
+                    source_identity: &source_identity,
                 },
-                cancel_rx,
+                control_rx,
                 |transferred| {
-                    progress_transferred.store(transferred, Ordering::Relaxed);
-                    let _ = event_tx.send(TransferEvent {
-                        transfer_id,
-                        direction: TransferDirection::Download,
-                        local_path: event_local_path.clone(),
-                        remote_path: event_remote_path.clone(),
-                        status: TransferStatus::Running,
-                        transferred_bytes: transferred,
-                        total_bytes: Some(total_bytes),
-                        error: None,
-                    });
+                    latest_transferred = transferred;
+                    reporter.report(transferred);
                 },
             )
             .await;
-            send_terminal_transfer_event(
-                &event_tx,
-                TerminalTransferContext {
-                    transfer_id,
-                    direction: TransferDirection::Download,
-                    local_path: event_local_path,
-                    remote_path: event_remote_path,
-                    total_bytes,
-                },
-                latest_transferred.load(Ordering::Relaxed),
-                result,
-            );
-            inner.transfers.lock().await.remove(&transfer_id);
+            let terminal_event = terminal_transfer_event(context, latest_transferred, result);
+            update_transfer_snapshot(&snapshot, terminal_event.clone());
+            let _ = event_tx.send(terminal_event).await;
+            let _ = manager
+                .close_released_connection_if_idle(connection_id)
+                .await;
         });
 
         Ok(TransferSubscription {
             transfer_id,
             events: event_rx,
         })
-    }
-
-    pub async fn cancel_transfer(&self, transfer_id: TransferId) -> Result<(), SftpManagerError> {
-        self.inner
-            .transfers
-            .lock()
-            .await
-            .get(&transfer_id)
-            .ok_or(SftpManagerError::TransferNotFound(transfer_id))?
-            .send(true)
-            .map_err(|error| SftpManagerError::Operation(anyhow::anyhow!(error.to_string())))
     }
 
     async fn session(
@@ -711,6 +1014,40 @@ impl SftpManager {
             .map(|connection| Arc::clone(&connection.sftp))
             .ok_or(SftpManagerError::ConnectionNotFound(connection_id))
     }
+
+    async fn download_connection(
+        &self,
+        connection_id: ConnectionId,
+    ) -> Result<(Arc<SftpSession>, String), SftpManagerError> {
+        self.inner
+            .connections
+            .lock()
+            .await
+            .get(&connection_id)
+            .map(|connection| {
+                (
+                    Arc::clone(&connection.sftp),
+                    connection.download_source_identity.clone(),
+                )
+            })
+            .ok_or(SftpManagerError::ConnectionNotFound(connection_id))
+    }
+}
+
+async fn wait_for_transfer_control(
+    control: &mut watch::Receiver<TransferControl>,
+) -> anyhow::Result<Option<TransferStatus>> {
+    loop {
+        let current = *control.borrow_and_update();
+        match current {
+            TransferControl::Running => return Ok(None),
+            TransferControl::Cancelled => return Ok(Some(TransferStatus::Cancelled)),
+            TransferControl::Paused => control
+                .changed()
+                .await
+                .map_err(|_| anyhow::anyhow!("transfer control channel closed"))?,
+        }
+    }
 }
 
 async fn upload_file(
@@ -719,7 +1056,7 @@ async fn upload_file(
     remote_path: &str,
     overwrite: bool,
     expected_metadata: &UploadResumeMetadata,
-    cancel: watch::Receiver<bool>,
+    mut control: watch::Receiver<TransferControl>,
     mut progress: impl FnMut(u64),
 ) -> anyhow::Result<TransferStatus> {
     if session.try_exists(remote_path.to_owned()).await? && !overwrite {
@@ -762,10 +1099,10 @@ async fn upload_file(
 
     let mut buffer = vec![0_u8; 64 * 1024];
     loop {
-        if *cancel.borrow() {
+        if let Some(status) = wait_for_transfer_control(&mut control).await? {
             remote.flush().await.ok();
             remote.shutdown().await.ok();
-            return Ok(TransferStatus::Cancelled);
+            return Ok(status);
         }
         let read = local.read(&mut buffer).await?;
         if read == 0 {
@@ -778,8 +1115,8 @@ async fn upload_file(
 
     remote.flush().await?;
     remote.shutdown().await?;
-    if *cancel.borrow() {
-        return Ok(TransferStatus::Cancelled);
+    if let Some(status) = wait_for_transfer_control(&mut control).await? {
+        return Ok(status);
     }
     if transferred != expected_metadata.total_bytes {
         bail!(
@@ -936,7 +1273,7 @@ async fn remove_remote_file_if_exists(session: &SftpSession, path: &str) -> anyh
 async fn download_file(
     session: &SftpSession,
     request: DownloadFileRequest<'_>,
-    cancel: watch::Receiver<bool>,
+    mut control: watch::Receiver<TransferControl>,
     mut progress: impl FnMut(u64),
 ) -> anyhow::Result<TransferStatus> {
     if tokio::fs::try_exists(request.local_path).await? && !request.overwrite {
@@ -953,6 +1290,7 @@ async fn download_file(
         remote_path: request.remote_path.to_owned(),
         total_bytes: request.total_bytes,
         modified_at_unix: request.modified_at_unix,
+        source_identity: request.source_identity.to_owned(),
     };
     let partial_bytes =
         resumable_partial_bytes(&temporary_path, &metadata_path, &expected_metadata).await?;
@@ -963,6 +1301,20 @@ async fn download_file(
         write_download_resume_metadata(&metadata_path, &expected_metadata).await?;
     }
     let mut transferred = partial_bytes.unwrap_or(0);
+    if transferred > 0
+        && !verify_download_resume_samples(
+            session,
+            request.remote_path,
+            &temporary_path,
+            transferred,
+        )
+        .await?
+    {
+        remove_file_if_exists(&temporary_path).await?;
+        remove_file_if_exists(&metadata_path).await?;
+        write_download_resume_metadata(&metadata_path, &expected_metadata).await?;
+        transferred = 0;
+    }
     progress(transferred);
 
     if transferred == request.total_bytes {
@@ -987,10 +1339,10 @@ async fn download_file(
         .await?;
     let mut buffer = vec![0_u8; 64 * 1024];
     loop {
-        if *cancel.borrow() {
+        if let Some(status) = wait_for_transfer_control(&mut control).await? {
             local.flush().await.ok();
             local.shutdown().await.ok();
-            return Ok(TransferStatus::Cancelled);
+            return Ok(status);
         }
         let read = remote.read(&mut buffer).await?;
         if read == 0 {
@@ -1058,6 +1410,43 @@ async fn resumable_partial_bytes(
     Ok(can_resume_download(&saved, expected, partial_bytes).then_some(partial_bytes))
 }
 
+fn resume_sample_offsets(partial_bytes: u64) -> Vec<u64> {
+    if partial_bytes == 0 {
+        return Vec::new();
+    }
+    let sample_bytes = partial_bytes.min(RESUME_VERIFICATION_BLOCK_BYTES);
+    let tail_offset = partial_bytes - sample_bytes;
+    if tail_offset == 0 {
+        vec![0]
+    } else {
+        vec![0, tail_offset]
+    }
+}
+
+async fn verify_download_resume_samples(
+    session: &SftpSession,
+    remote_path: &str,
+    temporary_path: &Path,
+    partial_bytes: u64,
+) -> anyhow::Result<bool> {
+    let sample_bytes = partial_bytes.min(RESUME_VERIFICATION_BLOCK_BYTES) as usize;
+    for offset in resume_sample_offsets(partial_bytes) {
+        let mut remote = session.open(remote_path.to_owned()).await?;
+        remote.seek(SeekFrom::Start(offset)).await?;
+        let mut local = tokio::fs::File::open(temporary_path).await?;
+        local.seek(SeekFrom::Start(offset)).await?;
+        let mut remote_sample = vec![0_u8; sample_bytes];
+        let mut local_sample = vec![0_u8; sample_bytes];
+        if remote.read_exact(&mut remote_sample).await.is_err()
+            || local.read_exact(&mut local_sample).await.is_err()
+            || remote_sample != local_sample
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 async fn write_download_resume_metadata(
     metadata_path: &Path,
     metadata: &DownloadResumeMetadata,
@@ -1095,12 +1484,11 @@ async fn remove_file_if_exists(path: &Path) -> anyhow::Result<()> {
     }
 }
 
-fn send_terminal_transfer_event(
-    event_tx: &mpsc::UnboundedSender<TransferEvent>,
+fn terminal_transfer_event(
     context: TerminalTransferContext,
     last_transferred_bytes: u64,
     result: anyhow::Result<TransferStatus>,
-) {
+) -> TransferEvent {
     let (status, error, transferred_bytes) = match result {
         Ok(status) => {
             let transferred = if status == TransferStatus::Completed {
@@ -1116,16 +1504,14 @@ fn send_terminal_transfer_event(
             last_transferred_bytes,
         ),
     };
-    let _ = event_tx.send(TransferEvent {
-        transfer_id: context.transfer_id,
-        direction: context.direction,
-        local_path: context.local_path,
-        remote_path: context.remote_path,
+    context.event(status, transferred_bytes, Some(0), error)
+}
+
+fn transfer_is_active(status: &TransferStatus) -> bool {
+    matches!(
         status,
-        transferred_bytes,
-        total_bytes: Some(context.total_bytes),
-        error,
-    });
+        TransferStatus::Queued | TransferStatus::Running | TransferStatus::Paused
+    )
 }
 
 fn map_file_type(file_type: FileType) -> RemoteFileType {
@@ -1163,7 +1549,98 @@ mod tests {
             remote_path: remote_path.to_owned(),
             total_bytes,
             modified_at_unix: Some(1_700_000_000),
+            source_identity: "files.example.com:22:SHA256:expected".into(),
         }
+    }
+
+    #[test]
+    fn transfer_progress_is_throttled_before_the_event_queue() {
+        let (events, mut received) = mpsc::channel(TRANSFER_EVENT_CAPACITY);
+        let context = TerminalTransferContext {
+            transfer_id: Uuid::new_v4(),
+            direction: TransferDirection::Upload,
+            local_path: PathBuf::from("C:/tmp/archive.tar"),
+            remote_path: "/tmp/archive.tar".into(),
+            total_bytes: 2_048,
+        };
+        let snapshot = Arc::new(StdMutex::new(context.event(
+            TransferStatus::Queued,
+            0,
+            None,
+            None,
+        )));
+        let mut reporter = TransferProgressReporter::new(events, context, snapshot);
+
+        reporter.report(0);
+        reporter.report(1_024);
+
+        assert_eq!(received.try_recv().unwrap().transferred_bytes, 0);
+        assert!(received.try_recv().is_err());
+    }
+
+    #[test]
+    fn terminal_transfer_event_preserves_terminal_status() {
+        let context = TerminalTransferContext {
+            transfer_id: Uuid::new_v4(),
+            direction: TransferDirection::Download,
+            local_path: PathBuf::from("C:/tmp/archive.tar"),
+            remote_path: "/tmp/archive.tar".into(),
+            total_bytes: 2_048,
+        };
+        let event = terminal_transfer_event(context, 1_024, Ok(TransferStatus::Completed));
+        assert_eq!(event.status, TransferStatus::Completed);
+        assert_eq!(event.transferred_bytes, 2_048);
+        assert_eq!(event.speed_bytes_per_second, Some(0));
+    }
+
+    #[tokio::test]
+    async fn paused_transfer_waits_until_resumed() {
+        let (control_tx, mut control_rx) = watch::channel(TransferControl::Paused);
+        let mut task =
+            tokio::spawn(async move { wait_for_transfer_control(&mut control_rx).await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut task)
+                .await
+                .is_err()
+        );
+        control_tx.send(TransferControl::Running).unwrap();
+        assert!(task.await.unwrap().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn manager_updates_paused_transfer_snapshot() {
+        let manager = SftpManager::new();
+        let transfer_id = Uuid::new_v4();
+        let connection_id = Uuid::new_v4();
+        let context = TerminalTransferContext {
+            transfer_id,
+            direction: TransferDirection::Upload,
+            local_path: PathBuf::from("C:/tmp/archive.tar"),
+            remote_path: "/tmp/archive.tar".into(),
+            total_bytes: 2_048,
+        };
+        let (control, _control_receiver) = watch::channel(TransferControl::Running);
+        manager.inner.transfers.lock().await.insert(
+            transfer_id,
+            ManagedTransfer {
+                connection_id,
+                control,
+                snapshot: Arc::new(StdMutex::new(context.event(
+                    TransferStatus::Running,
+                    512,
+                    Some(42),
+                    None,
+                ))),
+            },
+        );
+
+        let paused = manager.pause_transfer(transfer_id).await.unwrap();
+        assert_eq!(paused.status, TransferStatus::Paused);
+        assert_eq!(paused.speed_bytes_per_second, Some(0));
+        assert_eq!(
+            manager.resume_transfer(transfer_id).await.unwrap().status,
+            TransferStatus::Running
+        );
     }
 
     #[test]
@@ -1246,6 +1723,20 @@ mod tests {
         let mut changed_time = expected.clone();
         changed_time.modified_at_unix = Some(1_800_000_000);
         assert!(!can_resume_download(&changed_time, &expected, 1_024));
+
+        let mut changed_source = expected.clone();
+        changed_source.source_identity = "other.example.com:22:SHA256:other".into();
+        assert!(!can_resume_download(&changed_source, &expected, 1_024));
+    }
+
+    #[test]
+    fn download_resume_samples_cover_the_start_and_tail() {
+        assert_eq!(resume_sample_offsets(0), Vec::<u64>::new());
+        assert_eq!(resume_sample_offsets(512), vec![0]);
+        assert_eq!(
+            resume_sample_offsets(RESUME_VERIFICATION_BLOCK_BYTES + 512),
+            vec![0, 512]
+        );
     }
 
     #[test]

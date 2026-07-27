@@ -37,6 +37,7 @@ import { PasswordPromptModal } from "./components/PasswordPromptModal";
 import { SessionSidebar, type SessionActivitySummary } from "./components/SessionSidebar";
 import { WorkspaceManagerModal } from "./components/WorkspaceManagerModal";
 import { OnboardingModal } from "./components/OnboardingModal";
+import { TransferManagerModal } from "./components/TransferManagerModal";
 import type { TerminalCommandRequest } from "./components/TerminalPane";
 import { loadCommandLibrary, saveCommandLibrary, type CommandSnippet } from "./command-library";
 import { loadCommandHistory, recordCommandHistory, saveCommandHistory, type CommandHistoryEntry } from "./command-history";
@@ -206,6 +207,7 @@ function App() {
   const [groupEditor, setGroupEditor] = useState<GroupEditorState | null>(null);
   const [preferences, setPreferences] = useState<AppPreferences>(() => loadPreferences());
   const [sftpVisible, setSftpVisible] = useState(false);
+  const [transferManagerVisible, setTransferManagerVisible] = useState(false);
   const [portForwardVisible, setPortForwardVisible] = useState(false);
   const [connectionIds, setConnectionIds] = useState<Record<string, string | null>>({});
   const [settingsVisible, setSettingsVisible] = useState(false);
@@ -1354,6 +1356,7 @@ function App() {
           <button className={`toolbar-button connection-manager-trigger ${tabs.length > 0 ? "has-connections" : ""}`} onClick={() => setConnectionManagerVisible(true)} title="查看和管理所有活动连接">
             <Activity size={14} />连接 {tabs.filter((tab) => tab.state === "connected").length}/{tabs.length}
           </button>
+          <button className="toolbar-button" onClick={() => setTransferManagerVisible(true)} title="查看后台传输任务"><Activity size={14} />传输</button>
           <button className="toolbar-button command-center-trigger" onClick={() => setCommandCenterVisible(true)}><Command size={14} />命令中心</button>
           <button className="toolbar-button" onClick={() => setHistoryVisible(true)}><History size={14} />历史</button>
           <button className="toolbar-button" onClick={() => setEditorSession(null)}><Plus size={15} />新建会话</button>
@@ -1703,6 +1706,10 @@ function App() {
           onSubmit={(password) => void submitSessionFileDialog(password)}
           onClose={() => !sessionFileBusy && setSessionFileDialog(null)}
         />
+      )}
+
+      {transferManagerVisible && (
+        <TransferManagerModal onClose={() => setTransferManagerVisible(false)} onToast={setToast} />
       )}
 
       {settingsVisible && (

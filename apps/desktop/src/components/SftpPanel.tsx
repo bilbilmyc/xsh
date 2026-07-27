@@ -10,6 +10,8 @@ import {
   Folder,
   FolderPlus,
   Pencil,
+  Play,
+  Pause,
   RefreshCw,
   Trash2,
   X,
@@ -44,6 +46,7 @@ interface UploadSlotWaiter {
 }
 
 const MAX_CONCURRENT_UPLOADS = 2;
+const MAX_CONCURRENT_DOWNLOADS = 2;
 
 export function SftpPanel({ session, onClose, onToast }: SftpPanelProps) {
   const [connectionId, setConnectionId] = useState<string | null>(null);
@@ -62,6 +65,7 @@ export function SftpPanel({ session, onClose, onToast }: SftpPanelProps) {
   const uploadQueueCancelEpochRef = useRef(0);
   const activeUploadCountRef = useRef(0);
   const uploadSlotWaitersRef = useRef<UploadSlotWaiter[]>([]);
+  const enqueueUploadsRef = useRef<(paths: string[]) => Promise<void>>(async () => undefined);
 
   const transferItems = useMemo(() => Object.values(transfers).sort((left, right) => {
     const rank = (status: TransferEvent["status"]) => status === "running" ? 0 : status === "queued" ? 1 : status === "failed" ? 2 : 3;
@@ -127,7 +131,7 @@ export function SftpPanel({ session, onClose, onToast }: SftpPanelProps) {
     void connect(false);
     return () => {
       disposed = true;
-      if (activeId) void api.disconnectSftp(activeId).catch(() => undefined);
+      if (activeId) void api.releaseSftpConnection(activeId).catch(() => undefined);
     };
   }, [session.id]);
 
@@ -135,6 +139,24 @@ export function SftpPanel({ session, onClose, onToast }: SftpPanelProps) {
     uploadQueueCancelEpochRef.current += 1;
     const waiters = uploadSlotWaitersRef.current.splice(0);
     waiters.forEach((waiter) => waiter.resolve(false));
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    const refreshTransfers = async () => {
+      try {
+        const next = await api.listTransfers();
+        if (!disposed) setTransfers(Object.fromEntries(next.map((transfer) => [transfer.transferId, transfer])));
+      } catch {
+        // A disconnected panel must not surface background polling errors.
+      }
+    };
+    void refreshTransfers();
+    const timer = window.setInterval(() => void refreshTransfers(), 750);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
   }, []);
 
   useEffect(() => {
@@ -154,23 +176,25 @@ export function SftpPanel({ session, onClose, onToast }: SftpPanelProps) {
         }
         setDraggingFiles(false);
         const rect = remoteListRef.current?.getBoundingClientRect();
-        if (!rect || !connectionId) return;
+        if (!rect) return;
         const scale = window.devicePixelRatio || 1;
         const x = payload.position.x / scale;
         const y = payload.position.y / scale;
         if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) return;
-        void enqueueUploads(payload.paths);
+        void enqueueUploadsRef.current(payload.paths);
       })
       .then((cleanup) => {
         if (disposed) cleanup();
         else unlisten = cleanup;
       })
-      .catch((caught) => setError(`启用文件拖拽失败：${String(caught)}`));
+      .catch((caught) => {
+        if (!disposed) setError(`启用文件拖拽失败：${String(caught)}`);
+      });
     return () => {
       disposed = true;
       unlisten?.();
     };
-  }, [connectionId, path, entries]);
+  }, []);
 
   const parentPath = () => {
     if (path === "/") return "/";
@@ -253,6 +277,7 @@ export function SftpPanel({ session, onClose, onToast }: SftpPanelProps) {
   const enqueueUploads = async (paths: string[]) => {
     await uploadFiles(paths);
   };
+  enqueueUploadsRef.current = enqueueUploads;
 
   const acquireUploadSlot = (cancelEpoch: number): Promise<boolean> => {
     if (uploadQueueCancelEpochRef.current !== cancelEpoch) return Promise.resolve(false);
@@ -338,20 +363,43 @@ export function SftpPanel({ session, onClose, onToast }: SftpPanelProps) {
     );
   };
 
-  const downloadDirectoryEntry = async (entry: RemoteEntry, localParent: string): Promise<number> => {
-    if (!connectionId) return 0;
+  const collectDirectoryDownloadTasks = async (
+    entry: RemoteEntry,
+    localParent: string,
+  ): Promise<Array<{ remotePath: string; localPath: string }>> => {
+    if (!connectionId) return [];
     const localDirectory = joinLocalPath(localParent, entry.name);
     await api.createLocalDirectory(localDirectory);
     const children = await api.sftpListDirectory(connectionId, entry.path);
-    let downloaded = 0;
+    const tasks: Array<{ remotePath: string; localPath: string }> = [];
     for (const child of children) {
-      if (child.fileType === "directory") downloaded += await downloadDirectoryEntry(child, localDirectory);
-      else {
-        await downloadTo(child.path, joinLocalPath(localDirectory, child.name));
-        downloaded += 1;
+      if (child.fileType === "directory") {
+        tasks.push(...await collectDirectoryDownloadTasks(child, localDirectory));
+      } else {
+        tasks.push({ remotePath: child.path, localPath: joinLocalPath(localDirectory, child.name) });
       }
     }
-    return downloaded;
+    return tasks;
+  };
+
+  const runDownloadQueue = async (tasks: Array<{ remotePath: string; localPath: string }>) => {
+    let cursor = 0;
+    let completed = 0;
+    let failure: unknown;
+    const worker = async () => {
+      while (!failure && cursor < tasks.length) {
+        const task = tasks[cursor++];
+        try {
+          await downloadTo(task.remotePath, task.localPath);
+          completed += 1;
+        } catch (caught) {
+          failure ??= caught;
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(MAX_CONCURRENT_DOWNLOADS, tasks.length) }, () => worker()));
+    if (failure) throw failure;
+    return completed;
   };
 
   const download = async (openAfterDownload: boolean) => {
@@ -375,14 +423,15 @@ export function SftpPanel({ session, onClose, onToast }: SftpPanelProps) {
       if (typeof localDirectory !== "string") return;
     }
     try {
-      let downloaded = 0;
-      for (const [index, entry] of files.entries()) {
-        const localPath = singleLocalPath ?? joinLocalPath(localDirectory!, entry.name);
-        await downloadTo(entry.path, localPath);
-        downloaded += 1;
-        if (openAfterDownload && index === 0) await api.openLocalPath(localPath);
+      const tasks = files.map((entry) => ({
+        remotePath: entry.path,
+        localPath: singleLocalPath ?? joinLocalPath(localDirectory!, entry.name),
+      }));
+      for (const directory of directories) {
+        tasks.push(...await collectDirectoryDownloadTasks(directory, localDirectory!));
       }
-      for (const directory of directories) downloaded += await downloadDirectoryEntry(directory, localDirectory!);
+      const downloaded = await runDownloadQueue(tasks);
+      if (openAfterDownload && singleLocalPath) await api.openLocalPath(singleLocalPath);
       setSelectedPaths(new Set());
       onToast?.(`${downloaded} 个文件已下载。`);
     } catch (caught) {
@@ -476,7 +525,8 @@ export function SftpPanel({ session, onClose, onToast }: SftpPanelProps) {
     }
   };
 
-  const removeTransfer = (transferId: string) => {
+  const removeTransfer = async (transferId: string) => {
+    await api.removeTransfer(transferId);
     setTransfers((current) => {
       const next = { ...current };
       delete next[transferId];
@@ -484,9 +534,11 @@ export function SftpPanel({ session, onClose, onToast }: SftpPanelProps) {
     });
   };
 
-  const clearFinishedTransfers = () => {
+  const clearFinishedTransfers = async () => {
+    const finished = transferItems.filter((transfer) => !["queued", "running", "paused"].includes(transfer.status));
+    await Promise.all(finished.map((transfer) => api.removeTransfer(transfer.transferId).catch(() => undefined)));
     setTransfers((current) => Object.fromEntries(
-      Object.entries(current).filter(([, transfer]) => transfer.status === "queued" || transfer.status === "running" || transfer.status === "failed"),
+      Object.entries(current).filter(([, transfer]) => ["queued", "running", "paused"].includes(transfer.status)),
     ));
   };
 
@@ -494,8 +546,12 @@ export function SftpPanel({ session, onClose, onToast }: SftpPanelProps) {
     const pendingCount = pendingUploads.length;
     uploadQueueCancelEpochRef.current += 1;
     cancelWaitingUploadSlots();
-    const active = transferItems.filter((transfer) => transfer.status === "queued" || transfer.status === "running");
-    await Promise.all(active.map((transfer) => api.cancelTransfer(transfer.transferId).catch(() => undefined)));
+    const active = transferItems.filter((transfer) => ["queued", "running", "paused"].includes(transfer.status));
+    const updates = await Promise.all(active.map((transfer) => api.cancelTransfer(transfer.transferId).catch(() => null)));
+    setTransfers((current) => ({
+      ...current,
+      ...Object.fromEntries(updates.filter((transfer): transfer is TransferEvent => transfer !== null).map((transfer) => [transfer.transferId, transfer])),
+    }));
     setPendingUploads([]);
     onToast?.(`已请求取消 ${active.length + pendingCount} 个传输任务。`);
   };
@@ -666,8 +722,8 @@ export function SftpPanel({ session, onClose, onToast }: SftpPanelProps) {
               <div className="transfer-title transfer-title-row">
                 <span>传输任务{pendingUploads.length ? ` · 队列 ${pendingUploads.length}` : ""}</span>
                 <span className="transfer-list-actions">
-                  {(pendingUploads.length > 0 || transferItems.some((transfer) => transfer.status === "queued" || transfer.status === "running")) && <button onClick={() => void cancelActiveTransfers()}>取消全部</button>}
-                  {transferItems.some((transfer) => transfer.status === "completed" || transfer.status === "cancelled") && <button onClick={clearFinishedTransfers}>清理已结束</button>}
+                  {(pendingUploads.length > 0 || transferItems.some((transfer) => ["queued", "running", "paused"].includes(transfer.status))) && <button onClick={() => void cancelActiveTransfers()}>取消全部</button>}
+                  {transferItems.some((transfer) => !["queued", "running", "paused"].includes(transfer.status)) && <button onClick={() => void clearFinishedTransfers()}>清理已结束</button>}
                 </span>
               </div>
               {pendingUploads.map((task) => (
@@ -680,20 +736,29 @@ export function SftpPanel({ session, onClose, onToast }: SftpPanelProps) {
                     <div className="transfer-copy">
                       <span>{transfer.direction === "upload" ? "上传" : "下载"} · {transfer.remotePath.split("/").pop()}</span>
                       <small className={`transfer-status ${transfer.status}`} title={transfer.error ?? undefined}>
-                        {formatTransferStatus(transfer.status)} · {percent}% · {formatBytes(transfer.transferredBytes)}{transfer.totalBytes ? ` / ${formatBytes(transfer.totalBytes)}` : ""}
+                        {formatTransferStatus(transfer.status)} · {percent}% · {formatBytes(transfer.transferredBytes)}{transfer.totalBytes ? ` / ${formatBytes(transfer.totalBytes)}` : ""}{transfer.speedBytesPerSecond !== null && transfer.status === "running" ? ` · ${formatSpeed(transfer.speedBytesPerSecond)}` : ""}
                       </small>
                       {transfer.error && <small className="transfer-error" title={transfer.error}>{transfer.error}</small>}
                     </div>
                     <div className="progress-track"><div className={transfer.status} style={{ width: `${percent}%` }} /></div>
                     <div className="transfer-actions">
                       {(transfer.status === "queued" || transfer.status === "running") && (
-                        <button onClick={() => void api.cancelTransfer(transfer.transferId)} title="取消传输"><X size={12} /></button>
+                        <>
+                          <button onClick={() => void api.pauseTransfer(transfer.transferId).then(updateTransfer)} title="暂停传输"><Pause size={12} /></button>
+                          <button onClick={() => void api.cancelTransfer(transfer.transferId).then(updateTransfer)} title="取消传输"><X size={12} /></button>
+                        </>
+                      )}
+                      {transfer.status === "paused" && (
+                        <>
+                          <button onClick={() => void api.resumeTransfer(transfer.transferId).then(updateTransfer)} title="继续传输"><Play size={12} /></button>
+                          <button onClick={() => void api.cancelTransfer(transfer.transferId).then(updateTransfer)} title="取消传输"><X size={12} /></button>
+                        </>
                       )}
                       {(transfer.status === "failed" || transfer.status === "cancelled") && (
                         <button onClick={() => void retryTransfer(transfer)} title="重试传输"><RefreshCw size={12} /></button>
                       )}
                       {(transfer.status === "completed" || transfer.status === "failed" || transfer.status === "cancelled") && (
-                        <button onClick={() => removeTransfer(transfer.transferId)} title="移除任务"><Trash2 size={12} /></button>
+                        <button onClick={() => void removeTransfer(transfer.transferId)} title="移除任务"><Trash2 size={12} /></button>
                       )}
                     </div>
                   </div>
@@ -725,6 +790,7 @@ function formatTransferStatus(status: TransferEvent["status"]) {
   return {
     queued: "等待中",
     running: "传输中",
+    paused: "已暂停",
     completed: "已完成",
     cancelled: "已取消",
     failed: "失败",
@@ -736,4 +802,8 @@ function formatBytes(value: number) {
   if (value < 1024 ** 2) return `${(value / 1024).toFixed(1)} KB`;
   if (value < 1024 ** 3) return `${(value / 1024 ** 2).toFixed(1)} MB`;
   return `${(value / 1024 ** 3).toFixed(1)} GB`;
+}
+
+function formatSpeed(value: number) {
+  return `${formatBytes(value)}/s`;
 }

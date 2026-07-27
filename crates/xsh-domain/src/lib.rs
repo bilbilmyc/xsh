@@ -308,6 +308,7 @@ pub enum TransferDirection {
 pub enum TransferStatus {
     Queued,
     Running,
+    Paused,
     Completed,
     Cancelled,
     Failed,
@@ -323,6 +324,7 @@ pub struct TransferEvent {
     pub status: TransferStatus,
     pub transferred_bytes: u64,
     pub total_bytes: Option<u64>,
+    pub speed_bytes_per_second: Option<u64>,
     pub error: Option<String>,
 }
 

@@ -530,6 +530,56 @@ async fn disconnect_sftp(
 }
 
 #[tauri::command]
+async fn release_sftp_connection(
+    state: State<'_, AppState>,
+    connection_id: ConnectionId,
+) -> CommandResult<()> {
+    state
+        .sftp
+        .release_connection(connection_id)
+        .await
+        .map_err(display_error)
+}
+
+#[tauri::command]
+async fn list_transfers(state: State<'_, AppState>) -> CommandResult<Vec<TransferEvent>> {
+    Ok(state.sftp.list_transfers().await)
+}
+
+#[tauri::command]
+async fn pause_transfer(
+    state: State<'_, AppState>,
+    transfer_id: TransferId,
+) -> CommandResult<TransferEvent> {
+    state
+        .sftp
+        .pause_transfer(transfer_id)
+        .await
+        .map_err(display_error)
+}
+
+#[tauri::command]
+async fn resume_transfer(
+    state: State<'_, AppState>,
+    transfer_id: TransferId,
+) -> CommandResult<TransferEvent> {
+    state
+        .sftp
+        .resume_transfer(transfer_id)
+        .await
+        .map_err(display_error)
+}
+
+#[tauri::command]
+async fn remove_transfer(state: State<'_, AppState>, transfer_id: TransferId) -> CommandResult<()> {
+    state
+        .sftp
+        .remove_transfer(transfer_id)
+        .await
+        .map_err(display_error)
+}
+
+#[tauri::command]
 async fn sftp_canonicalize(
     state: State<'_, AppState>,
     connection_id: ConnectionId,
@@ -737,7 +787,10 @@ async fn sftp_download(
 }
 
 #[tauri::command]
-async fn cancel_transfer(state: State<'_, AppState>, transfer_id: TransferId) -> CommandResult<()> {
+async fn cancel_transfer(
+    state: State<'_, AppState>,
+    transfer_id: TransferId,
+) -> CommandResult<TransferEvent> {
     state
         .sftp
         .cancel_transfer(transfer_id)
@@ -1478,6 +1531,11 @@ pub fn run() {
             disconnect_terminal,
             connect_sftp,
             disconnect_sftp,
+            release_sftp_connection,
+            list_transfers,
+            pause_transfer,
+            resume_transfer,
+            remove_transfer,
             sftp_canonicalize,
             sftp_list_directory,
             sftp_stat,

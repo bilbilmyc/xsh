@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, params};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 use uuid::Uuid;
@@ -196,9 +197,16 @@ impl SessionRepository {
         let raw = statement
             .query_map([], map_session_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        raw.into_iter()
-            .map(|row| self.attach_tags_with_connection(&connection, row))
-            .collect()
+        let mut tags_by_session = load_tags_for_sessions(&connection)?;
+        Ok(raw
+            .into_iter()
+            .map(|mut session| {
+                session.tags = tags_by_session
+                    .remove(&session.id.to_string())
+                    .unwrap_or_default();
+                session
+            })
+            .collect())
     }
 
     pub fn get_session(&self, id: SessionId) -> Result<Option<SavedSession>> {
@@ -592,6 +600,20 @@ fn ensure_proxy_jump_columns(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn load_tags_for_sessions(connection: &Connection) -> Result<HashMap<String, Vec<String>>> {
+    let mut statement = connection.prepare(
+        "SELECT session_id, tag FROM session_tags ORDER BY session_id ASC, tag COLLATE NOCASE ASC",
+    )?;
+    let mut tags_by_session = HashMap::<String, Vec<String>>::new();
+    for row in statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })? {
+        let (session_id, tag) = row?;
+        tags_by_session.entry(session_id).or_default().push(tag);
+    }
+    Ok(tags_by_session)
+}
+
 fn replace_tags(connection: &Connection, session_id: SessionId, tags: &[String]) -> Result<()> {
     connection.execute(
         "DELETE FROM session_tags WHERE session_id = ?1",
@@ -704,6 +726,31 @@ mod tests {
 
         repository.delete_session(created.id).unwrap();
         assert!(repository.get_session(created.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn list_sessions_loads_tags_for_multiple_sessions() {
+        let repository = SessionRepository::in_memory().unwrap();
+        let first = repository.create_session(draft(None)).unwrap();
+        let mut second_draft = draft(None);
+        second_draft.name = "Analytics".into();
+        second_draft.tags = vec!["metrics".into(), "dashboards".into()];
+        let second = repository.create_session(second_draft).unwrap();
+
+        let sessions = repository.list_sessions().unwrap();
+        let tags_by_id = sessions
+            .into_iter()
+            .map(|session| (session.id, session.tags))
+            .collect::<std::collections::HashMap<_, _>>();
+
+        assert_eq!(
+            tags_by_id.get(&first.id),
+            Some(&vec!["api".into(), "Linux".into()])
+        );
+        assert_eq!(
+            tags_by_id.get(&second.id),
+            Some(&vec!["dashboards".into(), "metrics".into()])
+        );
     }
 
     #[test]
