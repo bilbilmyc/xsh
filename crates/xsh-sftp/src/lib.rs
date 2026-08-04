@@ -1,5 +1,8 @@
 mod remote_replace;
 
+#[cfg(test)]
+mod protocol_test;
+
 use anyhow::{Context, bail};
 use russh::client;
 use russh::keys::{HashAlg, PrivateKeyWithHashAlg, PublicKey, load_secret_key};
