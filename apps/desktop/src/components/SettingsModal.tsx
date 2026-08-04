@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { open, save as saveFile } from "@tauri-apps/plugin-dialog";
-import { Check, Copy, Fingerprint, Keyboard, Monitor, RotateCcw, Shield, TerminalSquare, Trash2, X } from "lucide-react";
+import { Check, Copy, Fingerprint, Gauge, Keyboard, Monitor, RotateCcw, Shield, TerminalSquare, Trash2, X } from "lucide-react";
 import { api } from "../api";
 import { defaultPreferences, type AccentColor, type AppPreferences, type AppTheme } from "../preferences";
 import type { KnownHost } from "../types";
@@ -12,7 +12,7 @@ interface SettingsModalProps {
   onToast: (message: string) => void;
 }
 
-type SettingsPage = "appearance" | "terminal" | "shortcuts" | "security";
+type SettingsPage = "appearance" | "terminal" | "transfer" | "shortcuts" | "security";
 
 export function SettingsModal({ preferences, onSave, onClose, onToast }: SettingsModalProps) {
   const [page, setPage] = useState<SettingsPage>("appearance");
@@ -39,9 +39,30 @@ export function SettingsModal({ preferences, onSave, onClose, onToast }: Setting
 
   const patch = (next: Partial<AppPreferences>) => setDraft((current) => ({ ...current, ...next }));
 
+  const updateGlobalTransferConcurrency = (value: number) => {
+    const globalSftpTransferConcurrency = clampInteger(value, 1, 32);
+    patch({
+      globalSftpTransferConcurrency,
+      perHostSftpTransferConcurrency: Math.min(
+        draft.perHostSftpTransferConcurrency,
+        globalSftpTransferConcurrency,
+      ),
+    });
+  };
+
+  const updatePerHostTransferConcurrency = (value: number) => {
+    patch({
+      perHostSftpTransferConcurrency: clampInteger(
+        value,
+        1,
+        draft.globalSftpTransferConcurrency,
+      ),
+    });
+  };
+
   const save = () => {
     onSave(draft);
-    onToast("外观与终端设置已保存。新设置已应用到所有终端标签。");
+    onToast("设置已保存并应用。");
     onClose();
   };
 
@@ -124,17 +145,18 @@ export function SettingsModal({ preferences, onSave, onClose, onToast }: Setting
         <header className="modal-header">
           <div className="modal-title-wrap">
             <span className="modal-icon"><Monitor size={18} /></span>
-            <div><h2>设置</h2><p>调整应用外观、终端显示和服务器信任记录。</p></div>
+            <div><h2>设置</h2><p>调整应用外观、终端、传输和服务器信任记录。</p></div>
           </div>
           <button className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button>
         </header>
 
         <div className="settings-layout">
-          <nav className="settings-nav">
-            <button className={page === "appearance" ? "active" : ""} onClick={() => setPage("appearance")}><Monitor size={15} />外观</button>
-            <button className={page === "terminal" ? "active" : ""} onClick={() => setPage("terminal")}><TerminalSquare size={15} />终端</button>
-            <button className={page === "shortcuts" ? "active" : ""} onClick={() => setPage("shortcuts")}><Keyboard size={15} />快捷键</button>
-            <button className={page === "security" ? "active" : ""} onClick={() => setPage("security")}><Shield size={15} />服务器指纹</button>
+          <nav className="settings-nav" aria-label="设置分类">
+            <button type="button" aria-current={page === "appearance" ? "page" : undefined} className={page === "appearance" ? "active" : ""} onClick={() => setPage("appearance")}><Monitor size={15} />外观</button>
+            <button type="button" aria-current={page === "terminal" ? "page" : undefined} className={page === "terminal" ? "active" : ""} onClick={() => setPage("terminal")}><TerminalSquare size={15} />终端</button>
+            <button type="button" aria-current={page === "transfer" ? "page" : undefined} className={page === "transfer" ? "active" : ""} onClick={() => setPage("transfer")}><Gauge size={15} />传输</button>
+            <button type="button" aria-current={page === "shortcuts" ? "page" : undefined} className={page === "shortcuts" ? "active" : ""} onClick={() => setPage("shortcuts")}><Keyboard size={15} />快捷键</button>
+            <button type="button" aria-current={page === "security" ? "page" : undefined} className={page === "security" ? "active" : ""} onClick={() => setPage("security")}><Shield size={15} />服务器指纹</button>
           </nav>
 
           <div className="settings-body settings-page">
@@ -213,6 +235,61 @@ export function SettingsModal({ preferences, onSave, onClose, onToast }: Setting
                   </div>
                 </div>
                 <div className="settings-tip">终端内可使用 macOS ⌘+ / ⌘- / ⌘0，或 Windows Ctrl+Shift++ / Ctrl+Shift+- / Ctrl+Shift+0 临时调整当前标签字号；不会修改其他会话。</div>
+              </>
+            )}
+
+            {page === "transfer" && (
+              <>
+                <SettingsHeading title="并发任务" description="限制同时占用网络和远端 SFTP 资源的传输数量。" />
+                <div className="settings-form-grid transfer-concurrency-grid">
+                  <label className="field transfer-number-field" htmlFor="global-sftp-transfer-concurrency">
+                    <span>全局并发</span>
+                    <input
+                      id="global-sftp-transfer-concurrency"
+                      type="number"
+                      inputMode="numeric"
+                      min={1}
+                      max={32}
+                      step={1}
+                      value={draft.globalSftpTransferConcurrency}
+                      onChange={(event) => updateGlobalTransferConcurrency(Number(event.target.value))}
+                    />
+                    <small className="field-help">所有服务器合计同时运行的传输任务，范围 1–32。</small>
+                  </label>
+                  <label className="field transfer-number-field" htmlFor="per-host-sftp-transfer-concurrency">
+                    <span>单主机并发</span>
+                    <input
+                      id="per-host-sftp-transfer-concurrency"
+                      type="number"
+                      inputMode="numeric"
+                      min={1}
+                      max={draft.globalSftpTransferConcurrency}
+                      step={1}
+                      value={draft.perHostSftpTransferConcurrency}
+                      onChange={(event) => updatePerHostTransferConcurrency(Number(event.target.value))}
+                    />
+                    <small className="field-help">同一服务器同时运行的任务，不超过全局并发。</small>
+                  </label>
+                </div>
+
+                <SettingsHeading title="聚合带宽" description="上传和下载分别限速，由对应方向的所有 SFTP 任务共享。" />
+                <div className="transfer-limit-list">
+                  <BandwidthLimitField
+                    id="sftp-upload-bandwidth"
+                    label="上传限速"
+                    description="所有上传任务共享"
+                    value={draft.sftpUploadBandwidthLimitBps}
+                    onChange={(value) => patch({ sftpUploadBandwidthLimitBps: value })}
+                  />
+                  <BandwidthLimitField
+                    id="sftp-download-bandwidth"
+                    label="下载限速"
+                    description="所有下载任务共享"
+                    value={draft.sftpDownloadBandwidthLimitBps}
+                    onChange={(value) => patch({ sftpDownloadBandwidthLimitBps: value })}
+                  />
+                </div>
+                <div className="settings-tip">限速只统计文件内容；关闭开关即不限制对应方向的聚合速率。</div>
               </>
             )}
 
@@ -299,6 +376,94 @@ function SettingsHeading({ title, description }: { title: string; description: s
 
 function RangeField({ label, value, min, max, step, suffix, onChange }: { label: string; value: number; min: number; max: number; step: number; suffix: string; onChange: (value: number) => void }) {
   return <label className="field range-field"><span>{label}<output>{value}{suffix}</output></span><input type="range" min={min} max={max} step={step} value={value} onChange={(event) => onChange(Number(event.target.value))} /></label>;
+}
+
+type BandwidthUnit = "kib" | "mib";
+
+const KIBIBYTE = 1024;
+const MEBIBYTE = 1024 * KIBIBYTE;
+const MAX_BANDWIDTH_BYTES_PER_SECOND = 1024 * MEBIBYTE;
+const DEFAULT_ENABLED_BANDWIDTH = 10 * MEBIBYTE;
+
+function BandwidthLimitField({ id, label, description, value, onChange }: {
+  id: string;
+  label: string;
+  description: string;
+  value: number;
+  onChange: (value: number) => void;
+}) {
+  const [unit, setUnit] = useState<BandwidthUnit>(() => value > 0 && value < MEBIBYTE ? "kib" : "mib");
+  const [lastEnabledValue, setLastEnabledValue] = useState(() => value || DEFAULT_ENABLED_BANDWIDTH);
+  const enabled = value > 0;
+  const multiplier = unit === "mib" ? MEBIBYTE : KIBIBYTE;
+  const displayValue = enabled ? formatBandwidthInputValue(value / multiplier, unit) : 0;
+  const minimum = KIBIBYTE / multiplier;
+  const maximum = MAX_BANDWIDTH_BYTES_PER_SECOND / multiplier;
+
+  const toggle = (checked: boolean) => {
+    if (checked) {
+      onChange(clampInteger(lastEnabledValue, KIBIBYTE, MAX_BANDWIDTH_BYTES_PER_SECOND));
+      return;
+    }
+    if (value > 0) setLastEnabledValue(value);
+    onChange(0);
+  };
+
+  const updateValue = (next: number) => {
+    if (!Number.isFinite(next)) return;
+    const bytesPerSecond = clampInteger(
+      Math.round(next * multiplier),
+      KIBIBYTE,
+      MAX_BANDWIDTH_BYTES_PER_SECOND,
+    );
+    setLastEnabledValue(bytesPerSecond);
+    onChange(bytesPerSecond);
+  };
+
+  return (
+    <div className="transfer-limit-row">
+      <div className="transfer-limit-copy">
+        <strong>{label}</strong>
+        <small>{description}</small>
+      </div>
+      <label className="transfer-limit-switch" title={enabled ? `关闭${label}` : `开启${label}`}>
+        <input type="checkbox" checked={enabled} onChange={(event) => toggle(event.target.checked)} aria-label={enabled ? `关闭${label}` : `开启${label}`} />
+        <span aria-hidden="true" />
+      </label>
+      <div className="transfer-limit-control">
+        <input
+          id={`${id}-value`}
+          type="number"
+          inputMode="decimal"
+          min={minimum}
+          max={maximum}
+          step={unit === "mib" ? 0.001 : 1}
+          value={displayValue}
+          disabled={!enabled}
+          onChange={(event) => updateValue(Number(event.target.value))}
+          aria-label={`${label}数值`}
+        />
+        <select
+          value={unit}
+          disabled={!enabled}
+          onChange={(event) => setUnit(event.target.value === "kib" ? "kib" : "mib")}
+          aria-label={`${label}单位`}
+        >
+          <option value="kib">KiB/s</option>
+          <option value="mib">MiB/s</option>
+        </select>
+      </div>
+    </div>
+  );
+}
+
+function clampInteger(value: number, min: number, max: number) {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
+
+function formatBandwidthInputValue(value: number, unit: BandwidthUnit) {
+  return Number(value.toFixed(unit === "mib" ? 4 : 0));
 }
 
 const SHORTCUTS = [

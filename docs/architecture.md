@@ -18,10 +18,15 @@ XSH uses a Rust workspace behind a Tauri 2 desktop application. React renders ap
 
 1. UI asks the Rust application state to connect a saved session.
 2. Rust resolves the credential from XSH’s local encrypted SQLite credential table and starts an SSH task.
-3. The SSH handler verifies the presented host key against SQLite.
+3. The SSH handler verifies the presented host key against SQLite. An unknown key is returned as a structured challenge bound to the target or ProxyJump endpoint; the approval command recomputes its algorithm and SHA-256 fingerprint before persistence.
 4. Rust requests an `xterm-256color` PTY and shell.
-5. Output bytes are forwarded through a Tauri channel; input is sent back in short batches.
-6. SFTP opens a subsystem channel on the authenticated SSH connection or a dedicated connection when isolation is needed.
+5. Output bytes are forwarded through a bounded Tauri channel using a 2 MiB per-connection credit window. Credit is returned only after xterm.js finishes consuming the bytes, so renderer slowdown applies backpressure to SSH reads; input is sent back in short batches.
+6. SFTP opens a subsystem channel on the authenticated SSH connection or a dedicated connection when isolation is needed. Uploads and downloads enter one Rust-owned scheduler that enforces an application-wide active limit, a normalized `host:port` limit, and earliest-eligible admission without host head-of-line blocking. Pausing releases admission and resuming requeues the task. Upload and download payloads, including remote resume samples, use separate aggregate token buckets with bounded bursts; short reads refund unused reservations and all queue registrations are drop-safe.
+7. Uploads, downloads, and file mutations share leases covering the final path, subtrees, partial files, metadata, and remote-replacement recovery artifacts. If a server rejects overwrite-by-rename, XSH records bounded SHA-256 identity samples, publishes a versioned journal before moving the destination to a deterministic backup, and publishes a separate installed marker before cleanup. The next upload can then recover an interrupted rename, rollback, or cleanup without guessing ownership.
+
+## Transfer policy
+
+The React preferences document in `xsh.preferences.v1` is the persistence source for the four user-facing SFTP policy values. Startup and settings saves send the normalized policy through one Tauri command. `SftpManager` validates it again and remains authoritative for runtime admission and bandwidth accounting. The defaults are four active transfers globally, two per target host, and unlimited aggregate upload/download bandwidth. A transfer carries its originating connection ID and endpoint; connection panels filter by that ownership while the global transfer manager can control background tasks from released panels.
 
 ## Persistence and secrets
 

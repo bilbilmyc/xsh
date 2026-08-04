@@ -1,8 +1,10 @@
 pub mod config;
 pub mod known_hosts;
+mod output_flow;
 
 use anyhow::{Context, anyhow, bail};
 use config::resolve_proxy_jump;
+use output_flow::{TERMINAL_OUTPUT_CHUNK_BYTES, TerminalOutputFlow};
 use russh::client;
 use russh::keys::agent::AgentIdentity;
 use russh::keys::agent::client::{AgentClient, AgentStream};
@@ -20,7 +22,8 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use uuid::Uuid;
 use xsh_domain::{
-    AuthPrompt, ConnectionId, ConnectionState, KnownHost, SessionId, TerminalEvent, TerminalProfile,
+    AuthPrompt, ConnectionId, ConnectionState, HostKeyApproval, HostKeyRole, KnownHost, SessionId,
+    TerminalEvent, TerminalProfile,
 };
 use zeroize::Zeroizing;
 
@@ -54,7 +57,46 @@ pub struct ConnectOptions {
     pub startup_command: Option<String>,
     pub known_host: Option<KnownHost>,
     pub proxy_jump_known_host: Option<KnownHost>,
-    pub trust_unknown_host: bool,
+}
+
+pub fn validate_host_key_approval(approval: &HostKeyApproval) -> anyhow::Result<KnownHost> {
+    let mut parsed = PublicKey::from_openssh(&approval.public_key)
+        .context("Host Key public_key 不是有效的 OpenSSH 公钥")?;
+    parsed.set_comment("");
+    let canonical_public_key = parsed
+        .to_openssh()
+        .context("无法规范化 Host Key public_key")?;
+    let key_type = parsed.algorithm().as_str().to_owned();
+    let fingerprint = parsed.fingerprint(HashAlg::Sha256).to_string();
+
+    if approval.public_key.trim() != canonical_public_key {
+        bail!("Host Key public_key 不是服务器提供的规范形式");
+    }
+    if approval.key_type != key_type {
+        bail!(
+            "Host Key 算法不匹配：声明为 {}，实际为 {}",
+            approval.key_type,
+            key_type
+        );
+    }
+    if approval.fingerprint != fingerprint {
+        bail!(
+            "Host Key 指纹不匹配：声明为 {}，实际为 {}",
+            approval.fingerprint,
+            fingerprint
+        );
+    }
+
+    let now = chrono::Utc::now();
+    Ok(KnownHost {
+        host: approval.host.clone(),
+        port: approval.port,
+        key_type,
+        fingerprint,
+        public_key: canonical_public_key,
+        first_seen: now,
+        last_seen: now,
+    })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -95,7 +137,13 @@ pub struct SshDiagnosticReport {
 #[derive(Debug)]
 pub struct ConnectionSubscription {
     pub connection_id: ConnectionId,
-    pub events: mpsc::UnboundedReceiver<TerminalEvent>,
+    pub events: mpsc::Receiver<TerminalEvent>,
+}
+
+const TERMINAL_EVENT_CAPACITY: usize = 128;
+
+fn terminal_event_channel() -> (mpsc::Sender<TerminalEvent>, mpsc::Receiver<TerminalEvent>) {
+    mpsc::channel(TERMINAL_EVENT_CAPACITY)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -378,7 +426,13 @@ enum SessionCommand {
 
 #[derive(Debug, Default)]
 struct ManagerInner {
-    connections: Mutex<HashMap<ConnectionId, mpsc::Sender<SessionCommand>>>,
+    connections: Mutex<HashMap<ConnectionId, ManagedConnection>>,
+}
+
+#[derive(Debug, Clone)]
+struct ManagedConnection {
+    commands: mpsc::Sender<SessionCommand>,
+    output_flow: Arc<TerminalOutputFlow>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -394,22 +448,38 @@ impl SshSessionManager {
     pub async fn connect(&self, options: ConnectOptions) -> ConnectionSubscription {
         let connection_id = Uuid::new_v4();
         let (command_tx, command_rx) = mpsc::channel(256);
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
-        self.inner
-            .connections
-            .lock()
-            .await
-            .insert(connection_id, command_tx);
+        let (event_tx, event_rx) = terminal_event_channel();
+        let output_flow = Arc::new(TerminalOutputFlow::default());
+        self.inner.connections.lock().await.insert(
+            connection_id,
+            ManagedConnection {
+                commands: command_tx,
+                output_flow: Arc::clone(&output_flow),
+            },
+        );
 
         let inner = Arc::clone(&self.inner);
         tokio::spawn(async move {
-            if let Err(error) = run_terminal_connection(options, command_rx, event_tx.clone()).await
+            if let Err(error) = run_terminal_connection(
+                options,
+                command_rx,
+                event_tx.clone(),
+                Arc::clone(&output_flow),
+            )
+            .await
+                && !output_flow.is_closed()
             {
-                let _ = event_tx.send(TerminalEvent::Error(humanize_ssh_error(&error)));
-                let _ = event_tx.send(TerminalEvent::StateChanged(ConnectionState::Failed));
+                let _ = event_tx
+                    .send(TerminalEvent::Error(humanize_ssh_error(&error)))
+                    .await;
+                let _ = event_tx
+                    .send(TerminalEvent::StateChanged(ConnectionState::Failed))
+                    .await;
             }
             inner.connections.lock().await.remove(&connection_id);
-            let _ = event_tx.send(TerminalEvent::StateChanged(ConnectionState::Disconnected));
+            let _ = event_tx
+                .send(TerminalEvent::StateChanged(ConnectionState::Disconnected))
+                .await;
         });
 
         ConnectionSubscription {
@@ -437,7 +507,25 @@ impl SshSessionManager {
     }
 
     pub async fn disconnect(&self, connection_id: ConnectionId) -> Result<(), SshManagerError> {
-        self.send(connection_id, SessionCommand::Disconnect).await
+        let connection = self.connection(connection_id).await?;
+        connection.output_flow.close();
+        connection
+            .commands
+            .send(SessionCommand::Disconnect)
+            .await
+            .map_err(|_| SshManagerError::ChannelClosed(connection_id))
+    }
+
+    pub async fn acknowledge_output(
+        &self,
+        connection_id: ConnectionId,
+        consumed_bytes: u64,
+    ) -> Result<(), SshManagerError> {
+        self.connection(connection_id)
+            .await?
+            .output_flow
+            .acknowledge(consumed_bytes);
+        Ok(())
     }
 
     pub async fn respond_auth(
@@ -573,28 +661,36 @@ impl SshSessionManager {
         connection_id: ConnectionId,
         command: SessionCommand,
     ) -> Result<(), SshManagerError> {
-        let sender = self
-            .inner
+        self.connection(connection_id)
+            .await?
+            .commands
+            .send(command)
+            .await
+            .map_err(|_| SshManagerError::ChannelClosed(connection_id))
+    }
+
+    async fn connection(
+        &self,
+        connection_id: ConnectionId,
+    ) -> Result<ManagedConnection, SshManagerError> {
+        self.inner
             .connections
             .lock()
             .await
             .get(&connection_id)
             .cloned()
-            .ok_or(SshManagerError::ConnectionNotFound(connection_id))?;
-        sender
-            .send(command)
-            .await
-            .map_err(|_| SshManagerError::ChannelClosed(connection_id))
+            .ok_or(SshManagerError::ConnectionNotFound(connection_id))
     }
 }
 
 #[derive(Debug)]
 struct HostKeyHandler {
+    role: HostKeyRole,
     host: String,
     port: u16,
     known_host: Option<KnownHost>,
-    trust_unknown_host: bool,
-    event_tx: mpsc::UnboundedSender<TerminalEvent>,
+    event_tx: mpsc::Sender<TerminalEvent>,
+    output_flow: Arc<TerminalOutputFlow>,
     remote_forwards: Arc<Mutex<HashMap<Uuid, RemoteForwardTarget>>>,
 }
 
@@ -618,27 +714,38 @@ impl client::Handler for HostKeyHandler {
             Some(known) => {
                 let _ = self
                     .event_tx
-                    .send(TerminalEvent::StateChanged(ConnectionState::Failed));
-                let _ = self.event_tx.send(TerminalEvent::HostKeyChanged {
-                    host: self.host.clone(),
-                    port: self.port,
-                    expected_fingerprint: known.fingerprint.clone(),
-                    presented_fingerprint: fingerprint,
-                });
+                    .send(TerminalEvent::StateChanged(ConnectionState::Failed))
+                    .await;
+                let _ = self
+                    .event_tx
+                    .send(TerminalEvent::HostKeyChanged {
+                        host: self.host.clone(),
+                        port: self.port,
+                        expected_fingerprint: known.fingerprint.clone(),
+                        presented_fingerprint: fingerprint,
+                    })
+                    .await;
                 Ok(false)
             }
             None => {
-                let _ = self.event_tx.send(TerminalEvent::StateChanged(
-                    ConnectionState::AwaitingHostKey,
-                ));
-                let _ = self.event_tx.send(TerminalEvent::HostKeyUnknown {
-                    host: self.host.clone(),
-                    port: self.port,
-                    key_type,
-                    fingerprint,
-                    public_key,
-                });
-                Ok(self.trust_unknown_host)
+                let _ = self
+                    .event_tx
+                    .send(TerminalEvent::StateChanged(
+                        ConnectionState::AwaitingHostKey,
+                    ))
+                    .await;
+                let _ = self
+                    .event_tx
+                    .send(TerminalEvent::HostKeyUnknown(HostKeyApproval {
+                        role: self.role,
+                        host: self.host.clone(),
+                        port: self.port,
+                        key_type,
+                        fingerprint,
+                        public_key,
+                    }))
+                    .await;
+                Ok(false)
             }
         }
     }
@@ -648,9 +755,15 @@ impl client::Handler for HostKeyHandler {
         banner: &str,
         _session: &mut client::Session,
     ) -> Result<(), Self::Error> {
-        let _ = self
-            .event_tx
-            .send(TerminalEvent::Output(format!("{banner}\r\n").into_bytes()));
+        if !send_terminal_output(
+            &self.event_tx,
+            &self.output_flow,
+            format!("{banner}\r\n").as_bytes(),
+        )
+        .await
+        {
+            bail!("terminal output consumer closed");
+        }
         Ok(())
     }
 
@@ -703,12 +816,33 @@ impl client::Handler for HostKeyHandler {
     }
 }
 
+async fn send_terminal_output(
+    event_tx: &mpsc::Sender<TerminalEvent>,
+    output_flow: &TerminalOutputFlow,
+    data: &[u8],
+) -> bool {
+    for chunk in data.chunks(TERMINAL_OUTPUT_CHUNK_BYTES) {
+        if !output_flow.reserve(chunk.len()).await {
+            return false;
+        }
+        if event_tx
+            .send(TerminalEvent::Output(chunk.to_vec()))
+            .await
+            .is_err()
+        {
+            output_flow.close();
+            return false;
+        }
+    }
+    true
+}
+
 async fn authenticate_with_password_fallback(
     session: &mut client::Handle<HostKeyHandler>,
     username: &str,
     password: &str,
     commands: &mut mpsc::Receiver<SessionCommand>,
-    event_tx: &mpsc::UnboundedSender<TerminalEvent>,
+    event_tx: &mpsc::Sender<TerminalEvent>,
 ) -> anyhow::Result<bool> {
     let password_result = session
         .authenticate_password(username.to_owned(), password.to_owned())
@@ -744,6 +878,7 @@ async fn authenticate_with_password_fallback(
                                 })
                                 .collect(),
                         })
+                        .await
                         .ok();
                     loop {
                         match commands.recv().await {
@@ -821,7 +956,7 @@ async fn authenticate_session(
     username: &str,
     authentication: RuntimeAuthentication,
     commands: &mut mpsc::Receiver<SessionCommand>,
-    event_tx: &mpsc::UnboundedSender<TerminalEvent>,
+    event_tx: &mpsc::Sender<TerminalEvent>,
 ) -> anyhow::Result<&'static str> {
     let (authentication_succeeded, authentication_method) = match authentication {
         RuntimeAuthentication::Password(password) => (
@@ -877,10 +1012,12 @@ async fn authenticate_session(
 async fn run_terminal_connection(
     options: ConnectOptions,
     mut commands: mpsc::Receiver<SessionCommand>,
-    event_tx: mpsc::UnboundedSender<TerminalEvent>,
+    event_tx: mpsc::Sender<TerminalEvent>,
+    output_flow: Arc<TerminalOutputFlow>,
 ) -> anyhow::Result<()> {
     event_tx
         .send(TerminalEvent::StateChanged(ConnectionState::Connecting))
+        .await
         .ok();
 
     let proxy_target = options
@@ -892,21 +1029,23 @@ async fn run_terminal_connection(
     let mut proxy_session: Option<client::Handle<HostKeyHandler>> = None;
     let remote_forwards = Arc::new(Mutex::new(HashMap::new()));
     let target_handler = HostKeyHandler {
+        role: HostKeyRole::Target,
         host: options.host.clone(),
         port: options.port,
         known_host: options.known_host.clone(),
-        trust_unknown_host: options.trust_unknown_host,
         event_tx: event_tx.clone(),
+        output_flow: Arc::clone(&output_flow),
         remote_forwards: Arc::clone(&remote_forwards),
     };
 
     let mut session = if let Some(proxy) = proxy_target {
         let proxy_handler = HostKeyHandler {
+            role: HostKeyRole::ProxyJump,
             host: proxy.host.clone(),
             port: proxy.port,
             known_host: options.proxy_jump_known_host.clone(),
-            trust_unknown_host: options.trust_unknown_host,
             event_tx: event_tx.clone(),
+            output_flow: Arc::clone(&output_flow),
             remote_forwards: Arc::clone(&remote_forwards),
         };
         let mut jump_session = client::connect(
@@ -973,6 +1112,7 @@ async fn run_terminal_connection(
 
     event_tx
         .send(TerminalEvent::StateChanged(ConnectionState::Authenticating))
+        .await
         .ok();
     authenticate_session(
         &mut session,
@@ -1027,6 +1167,7 @@ async fn run_terminal_connection(
 
     event_tx
         .send(TerminalEvent::StateChanged(ConnectionState::Connected))
+        .await
         .ok();
 
     let session = Arc::new(Mutex::new(session));
@@ -1083,7 +1224,7 @@ async fn run_terminal_connection(
                             .context("failed to resize remote PTY")?;
                     }
                     Some(SessionCommand::Disconnect) | None => {
-                        event_tx.send(TerminalEvent::StateChanged(ConnectionState::Disconnecting)).ok();
+                        event_tx.send(TerminalEvent::StateChanged(ConnectionState::Disconnecting)).await.ok();
                         channel.close().await.ok();
                         break;
                     }
@@ -1174,10 +1315,12 @@ async fn run_terminal_connection(
             message = channel.wait() => {
                 match message {
                     Some(ChannelMsg::Data { data }) | Some(ChannelMsg::ExtendedData { data, .. }) => {
-                        event_tx.send(TerminalEvent::Output(data.to_vec())).ok();
+                        if !send_terminal_output(&event_tx, &output_flow, &data).await {
+                            break;
+                        }
                     }
                     Some(ChannelMsg::ExitStatus { exit_status }) => {
-                        event_tx.send(TerminalEvent::ExitStatus(exit_status)).ok();
+                        event_tx.send(TerminalEvent::ExitStatus(exit_status)).await.ok();
                     }
                     Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
                     _ => {}
@@ -1701,6 +1844,43 @@ mod tests {
         assert!(validate_dimensions(1_001, 24).is_err());
     }
 
+    #[test]
+    fn host_key_approval_is_recomputed_before_it_can_be_saved() {
+        const ED25519_KEY: &str =
+            "AAAAC3NzaC1lZDI1NTE5AAAAIJdD7y3aLq454yWBdwLWbieU1ebz9/cu7/QEXn9OIeZJ";
+        let public_key = PublicKey::from_openssh(&format!("ssh-ed25519 {ED25519_KEY}"))
+            .expect("test public key");
+        let approval = HostKeyApproval {
+            role: HostKeyRole::ProxyJump,
+            host: "jump.example.com".into(),
+            port: 2222,
+            key_type: public_key.algorithm().as_str().into(),
+            fingerprint: public_key.fingerprint(HashAlg::Sha256).to_string(),
+            public_key: public_key.to_openssh().unwrap(),
+        };
+
+        let known_host = validate_host_key_approval(&approval).unwrap();
+        assert_eq!(known_host.host, approval.host);
+        assert_eq!(known_host.port, approval.port);
+        assert_eq!(known_host.key_type, approval.key_type);
+        assert_eq!(known_host.fingerprint, approval.fingerprint);
+        assert_eq!(known_host.public_key, approval.public_key);
+
+        let mut changed_fingerprint = approval.clone();
+        changed_fingerprint.fingerprint = "SHA256:not-the-presented-key".into();
+        assert!(validate_host_key_approval(&changed_fingerprint).is_err());
+
+        let mut changed_algorithm = approval.clone();
+        changed_algorithm.key_type = "ssh-rsa".into();
+        assert!(validate_host_key_approval(&changed_algorithm).is_err());
+
+        let mut non_canonical = approval;
+        non_canonical
+            .public_key
+            .push_str(" attacker-supplied-comment");
+        assert!(validate_host_key_approval(&non_canonical).is_err());
+    }
+
     #[tokio::test]
     async fn manager_reports_unknown_connection() {
         let manager = SshSessionManager::new();
@@ -1708,6 +1888,58 @@ mod tests {
         assert!(matches!(
             manager.send_input(id, vec![b'a']).await,
             Err(SshManagerError::ConnectionNotFound(value)) if value == id
+        ));
+        assert!(matches!(
+            manager.acknowledge_output(id, 1).await,
+            Err(SshManagerError::ConnectionNotFound(value)) if value == id
+        ));
+    }
+
+    #[tokio::test]
+    async fn terminal_output_waits_for_renderer_credit_before_sending_more() {
+        let flow = Arc::new(TerminalOutputFlow::new(TERMINAL_OUTPUT_CHUNK_BYTES));
+        let (events, mut receiver) = terminal_event_channel();
+        let output = vec![b'x'; TERMINAL_OUTPUT_CHUNK_BYTES + 1];
+        let sending = {
+            let flow = Arc::clone(&flow);
+            tokio::spawn(async move { send_terminal_output(&events, &flow, &output).await })
+        };
+
+        let first = receiver.recv().await.unwrap();
+        assert!(matches!(
+            first,
+            TerminalEvent::Output(ref data) if data.len() == TERMINAL_OUTPUT_CHUNK_BYTES
+        ));
+        tokio::task::yield_now().await;
+        assert!(!sending.is_finished());
+
+        assert_eq!(
+            flow.acknowledge(TERMINAL_OUTPUT_CHUNK_BYTES as u64),
+            TERMINAL_OUTPUT_CHUNK_BYTES
+        );
+        assert!(
+            timeout(Duration::from_secs(1), sending)
+                .await
+                .unwrap()
+                .unwrap()
+        );
+        assert!(matches!(
+            receiver.recv().await.unwrap(),
+            TerminalEvent::Output(data) if data == *b"x"
+        ));
+    }
+
+    #[test]
+    fn terminal_event_channel_has_a_fixed_capacity() {
+        let (events, _receiver) = terminal_event_channel();
+        for _ in 0..TERMINAL_EVENT_CAPACITY {
+            events
+                .try_send(TerminalEvent::StateChanged(ConnectionState::Connecting))
+                .unwrap();
+        }
+        assert!(matches!(
+            events.try_send(TerminalEvent::StateChanged(ConnectionState::Connecting)),
+            Err(mpsc::error::TrySendError::Full(_))
         ));
     }
 }

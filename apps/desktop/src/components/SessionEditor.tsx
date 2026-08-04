@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { ChevronDown, FolderOpen, KeyRound, Server, Trash2, X } from "lucide-react";
 import { api } from "../api";
+import { rollbackUncommittedCredentials } from "../credential-lifecycle";
 import {
   defaultTerminalProfile,
   type AuthenticationMethod,
@@ -194,6 +195,7 @@ export function SessionEditor({
     setSaving(true);
     setError(null);
     const createdCredentialRefs: string[] = [];
+    let sessionPersisted = false;
     try {
       const portText = port.trim();
       if (!/^\d+$/.test(portText)) throw new Error("请输入有效的 SSH 端口（默认 22）");
@@ -351,12 +353,13 @@ export function SessionEditor({
       const saved = session
         ? await api.updateSession(session.id, draft)
         : await api.createSession(draft);
+      sessionPersisted = true;
       await onSaved(saved);
     } catch (caught) {
-      await Promise.all(
-        createdCredentialRefs.map((credentialRef) =>
-          api.deleteCredential(credentialRef).catch(() => undefined),
-        ),
+      await rollbackUncommittedCredentials(
+        sessionPersisted,
+        createdCredentialRefs,
+        api.deleteCredential,
       );
       setError(String(caught));
     } finally {

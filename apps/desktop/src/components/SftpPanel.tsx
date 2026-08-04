@@ -17,10 +17,18 @@ import {
   X,
 } from "lucide-react";
 import { api } from "../api";
+import { hostKeyConfirmationMessage, hostKeyEndpointLabel } from "../host-key";
+import { connectSftpWithHostKeyApprovals } from "../sftp-connection";
+import {
+  indexTransfersForConnection,
+  isActiveTransferStatus,
+  isTransferOwnedByConnection,
+} from "../sftp-transfer-scope";
 import type { RemoteEntry, SavedSession, TransferEvent } from "../types";
 
 interface SftpPanelProps {
   session: SavedSession;
+  globalTransferConcurrency: number;
   onClose: () => void;
   onToast?: (message: string) => void;
 }
@@ -45,10 +53,8 @@ interface UploadSlotWaiter {
   resolve: (acquired: boolean) => void;
 }
 
-const MAX_CONCURRENT_UPLOADS = 2;
-const MAX_CONCURRENT_DOWNLOADS = 2;
-
-export function SftpPanel({ session, onClose, onToast }: SftpPanelProps) {
+export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast }: SftpPanelProps) {
+  const submissionConcurrency = Math.min(32, Math.max(1, Math.floor(globalTransferConcurrency)));
   const [connectionId, setConnectionId] = useState<string | null>(null);
   const [path, setPath] = useState(session.initialDirectory ?? ".");
   const [pathInput, setPathInput] = useState(path);
@@ -85,7 +91,7 @@ export function SftpPanel({ session, onClose, onToast }: SftpPanelProps) {
       const nextEntries = await api.sftpListDirectory(id, canonical);
       setPath(canonical);
       setPathInput(canonical);
-      setEntries(nextEntries.filter((entry) => !isUploadCheckpoint(entry.name)));
+      setEntries(nextEntries);
       setSelectedPaths(new Set());
       setAnchorPath(null);
     } catch (caught) {
@@ -99,11 +105,27 @@ export function SftpPanel({ session, onClose, onToast }: SftpPanelProps) {
     let disposed = false;
     let activeId: string | null = null;
 
-    const connect = async (trustUnknownHost: boolean) => {
+    const connect = async () => {
       setLoading(true);
       setError(null);
       try {
-        const id = await api.connectSftp(session.id, trustUnknownHost);
+        const id = await connectSftpWithHostKeyApprovals(
+          () => api.connectSftp(session.id),
+          async (key) => {
+            if (disposed) return false;
+            const endpointLabel = hostKeyEndpointLabel(key);
+            if (!window.confirm(hostKeyConfirmationMessage(key, "SFTP"))) {
+              setError(`SFTP ${endpointLabel} Host Key 未确认`);
+              return false;
+            }
+            await api.trustSessionHostKey(session.id, key);
+            return !disposed;
+          },
+        );
+        if (!id) {
+          if (!disposed) setLoading(false);
+          return;
+        }
         if (disposed) {
           await api.disconnectSftp(id).catch(() => undefined);
           return;
@@ -114,21 +136,12 @@ export function SftpPanel({ session, onClose, onToast }: SftpPanelProps) {
       } catch (caught) {
         if (disposed) return;
         const message = String(caught);
-        if (!trustUnknownHost && message.includes("SFTP Host Key 未确认")) {
-          const accepted = window.confirm(
-            `SFTP 首次连接需要确认服务器密钥。\n\n${message}\n\n是否信任并保存此服务器密钥？`,
-          );
-          if (accepted) {
-            await connect(true);
-            return;
-          }
-        }
         setError(`SFTP 连接失败：${message}`);
         setLoading(false);
       }
     };
 
-    void connect(false);
+    void connect();
     return () => {
       disposed = true;
       if (activeId) void api.releaseSftpConnection(activeId).catch(() => undefined);
@@ -142,11 +155,17 @@ export function SftpPanel({ session, onClose, onToast }: SftpPanelProps) {
   }, []);
 
   useEffect(() => {
+    if (!connectionId) {
+      setTransfers({});
+      return;
+    }
     let disposed = false;
     const refreshTransfers = async () => {
       try {
         const next = await api.listTransfers();
-        if (!disposed) setTransfers(Object.fromEntries(next.map((transfer) => [transfer.transferId, transfer])));
+        if (!disposed) {
+          setTransfers(indexTransfersForConnection(next, connectionId));
+        }
       } catch {
         // A disconnected panel must not surface background polling errors.
       }
@@ -157,7 +176,7 @@ export function SftpPanel({ session, onClose, onToast }: SftpPanelProps) {
       disposed = true;
       window.clearInterval(timer);
     };
-  }, []);
+  }, [connectionId]);
 
   useEffect(() => {
     let disposed = false;
@@ -204,7 +223,28 @@ export function SftpPanel({ session, onClose, onToast }: SftpPanelProps) {
   };
 
   const updateTransfer = (event: TransferEvent) => {
+    if (!isTransferOwnedByConnection(event, connectionId)) return;
     setTransfers((current) => ({ ...current, [event.transferId]: event }));
+  };
+
+  const controlTransfer = async (
+    transfer: TransferEvent,
+    action: "pause" | "resume" | "cancel",
+  ) => {
+    if (!isTransferOwnedByConnection(transfer, connectionId)) {
+      setError("该传输任务不属于当前 SFTP 连接");
+      return;
+    }
+    try {
+      const event = action === "pause"
+        ? await api.pauseTransfer(transfer.transferId)
+        : action === "resume"
+          ? await api.resumeTransfer(transfer.transferId)
+          : await api.cancelTransfer(transfer.transferId);
+      updateTransfer(event);
+    } catch (caught) {
+      setError(`更新传输状态失败：${String(caught)}`);
+    }
   };
 
   const waitForTransfer = async (
@@ -281,7 +321,7 @@ export function SftpPanel({ session, onClose, onToast }: SftpPanelProps) {
 
   const acquireUploadSlot = (cancelEpoch: number): Promise<boolean> => {
     if (uploadQueueCancelEpochRef.current !== cancelEpoch) return Promise.resolve(false);
-    if (activeUploadCountRef.current < MAX_CONCURRENT_UPLOADS) {
+    if (activeUploadCountRef.current < submissionConcurrency) {
       activeUploadCountRef.current += 1;
       return Promise.resolve(true);
     }
@@ -343,7 +383,7 @@ export function SftpPanel({ session, onClose, onToast }: SftpPanelProps) {
         }
       }
     };
-    await Promise.all(Array.from({ length: Math.min(MAX_CONCURRENT_UPLOADS, queuedTasks.length) }, () => worker()));
+    await Promise.all(Array.from({ length: Math.min(submissionConcurrency, queuedTasks.length) }, () => worker()));
     if (completed > 0) await load(connectionId, path);
     if (uploadQueueCancelEpochRef.current !== cancelEpoch) return;
     onToast?.(failed > 0 ? `上传完成 ${completed} 项，失败 ${failed} 项。` : `${completed} 个文件已上传。`);
@@ -397,7 +437,7 @@ export function SftpPanel({ session, onClose, onToast }: SftpPanelProps) {
         }
       }
     };
-    await Promise.all(Array.from({ length: Math.min(MAX_CONCURRENT_DOWNLOADS, tasks.length) }, () => worker()));
+    await Promise.all(Array.from({ length: Math.min(submissionConcurrency, tasks.length) }, () => worker()));
     if (failure) throw failure;
     return completed;
   };
@@ -502,7 +542,10 @@ export function SftpPanel({ session, onClose, onToast }: SftpPanelProps) {
   };
 
   const retryTransfer = async (transfer: TransferEvent) => {
-    if (!connectionId) return;
+    if (!isTransferOwnedByConnection(transfer, connectionId)) {
+      setError("该传输任务不属于当前 SFTP 连接，无法在此重试");
+      return;
+    }
     setTransfers((current) => {
       const next = { ...current };
       delete next[transfer.transferId];
@@ -526,6 +569,7 @@ export function SftpPanel({ session, onClose, onToast }: SftpPanelProps) {
   };
 
   const removeTransfer = async (transferId: string) => {
+    if (!connectionId || transfers[transferId]?.connectionId !== connectionId) return;
     await api.removeTransfer(transferId);
     setTransfers((current) => {
       const next = { ...current };
@@ -535,18 +579,24 @@ export function SftpPanel({ session, onClose, onToast }: SftpPanelProps) {
   };
 
   const clearFinishedTransfers = async () => {
-    const finished = transferItems.filter((transfer) => !["queued", "running", "paused"].includes(transfer.status));
+    if (!connectionId) return;
+    const finished = transferItems.filter((transfer) =>
+      isTransferOwnedByConnection(transfer, connectionId)
+      && !isActiveTransferStatus(transfer.status));
     await Promise.all(finished.map((transfer) => api.removeTransfer(transfer.transferId).catch(() => undefined)));
     setTransfers((current) => Object.fromEntries(
-      Object.entries(current).filter(([, transfer]) => ["queued", "running", "paused"].includes(transfer.status)),
+      Object.entries(current).filter(([, transfer]) => isActiveTransferStatus(transfer.status)),
     ));
   };
 
   const cancelActiveTransfers = async () => {
+    if (!connectionId) return;
     const pendingCount = pendingUploads.length;
     uploadQueueCancelEpochRef.current += 1;
     cancelWaitingUploadSlots();
-    const active = transferItems.filter((transfer) => ["queued", "running", "paused"].includes(transfer.status));
+    const active = transferItems.filter((transfer) =>
+      isTransferOwnedByConnection(transfer, connectionId)
+      && isActiveTransferStatus(transfer.status));
     const updates = await Promise.all(active.map((transfer) => api.cancelTransfer(transfer.transferId).catch(() => null)));
     setTransfers((current) => ({
       ...current,
@@ -722,8 +772,8 @@ export function SftpPanel({ session, onClose, onToast }: SftpPanelProps) {
               <div className="transfer-title transfer-title-row">
                 <span>传输任务{pendingUploads.length ? ` · 队列 ${pendingUploads.length}` : ""}</span>
                 <span className="transfer-list-actions">
-                  {(pendingUploads.length > 0 || transferItems.some((transfer) => ["queued", "running", "paused"].includes(transfer.status))) && <button onClick={() => void cancelActiveTransfers()}>取消全部</button>}
-                  {transferItems.some((transfer) => !["queued", "running", "paused"].includes(transfer.status)) && <button onClick={() => void clearFinishedTransfers()}>清理已结束</button>}
+                  {(pendingUploads.length > 0 || transferItems.some((transfer) => isActiveTransferStatus(transfer.status))) && <button onClick={() => void cancelActiveTransfers()}>取消全部</button>}
+                  {transferItems.some((transfer) => !isActiveTransferStatus(transfer.status)) && <button onClick={() => void clearFinishedTransfers()}>清理已结束</button>}
                 </span>
               </div>
               {pendingUploads.map((task) => (
@@ -744,14 +794,14 @@ export function SftpPanel({ session, onClose, onToast }: SftpPanelProps) {
                     <div className="transfer-actions">
                       {(transfer.status === "queued" || transfer.status === "running") && (
                         <>
-                          <button onClick={() => void api.pauseTransfer(transfer.transferId).then(updateTransfer)} title="暂停传输"><Pause size={12} /></button>
-                          <button onClick={() => void api.cancelTransfer(transfer.transferId).then(updateTransfer)} title="取消传输"><X size={12} /></button>
+                          <button onClick={() => void controlTransfer(transfer, "pause")} title="暂停传输"><Pause size={12} /></button>
+                          <button onClick={() => void controlTransfer(transfer, "cancel")} title="取消传输"><X size={12} /></button>
                         </>
                       )}
                       {transfer.status === "paused" && (
                         <>
-                          <button onClick={() => void api.resumeTransfer(transfer.transferId).then(updateTransfer)} title="继续传输"><Play size={12} /></button>
-                          <button onClick={() => void api.cancelTransfer(transfer.transferId).then(updateTransfer)} title="取消传输"><X size={12} /></button>
+                          <button onClick={() => void controlTransfer(transfer, "resume")} title="继续传输"><Play size={12} /></button>
+                          <button onClick={() => void controlTransfer(transfer, "cancel")} title="取消传输"><X size={12} /></button>
                         </>
                       )}
                       {(transfer.status === "failed" || transfer.status === "cancelled") && (
@@ -772,10 +822,6 @@ export function SftpPanel({ session, onClose, onToast }: SftpPanelProps) {
   );
 }
 
-function isUploadCheckpoint(name: string) {
-  return name.endsWith(".xsh-part") || name.endsWith(".xsh-part.meta") || name.endsWith(".xsh-part.meta.tmp");
-}
-
 function isValidRemoteName(value: string) {
   return Boolean(value) && value !== "." && value !== ".." && !/[\\/]/.test(value);
 }
@@ -791,6 +837,7 @@ function formatTransferStatus(status: TransferEvent["status"]) {
     queued: "等待中",
     running: "传输中",
     paused: "已暂停",
+    cancelling: "正在取消",
     completed: "已完成",
     cancelled: "已取消",
     failed: "失败",

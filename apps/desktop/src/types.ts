@@ -115,6 +115,28 @@ export type ConnectionState =
   | "failed"
   | { reconnecting: { attempt: number } };
 
+export type HostKeyRole = "target" | "proxyJump";
+
+export interface HostKeyApproval {
+  role: HostKeyRole;
+  host: string;
+  port: number;
+  keyType: string;
+  fingerprint: string;
+  publicKey: string;
+}
+
+export type SftpConnectResponse =
+  | { status: "connected"; connectionId: Uuid }
+  | { status: "hostKeyUnknown"; challenge: HostKeyApproval };
+
+export interface SftpTransferPolicy {
+  globalConcurrency: number;
+  perHostConcurrency: number;
+  uploadLimitBytesPerSecond: number;
+  downloadLimitBytesPerSecond: number;
+}
+
 export type TerminalEvent =
   | { type: "stateChanged"; payload: ConnectionState }
   | { type: "output"; payload: number[] }
@@ -127,13 +149,7 @@ export type TerminalEvent =
     }
   | {
       type: "hostKeyUnknown";
-      payload: {
-        host: string;
-        port: number;
-        keyType: string;
-        fingerprint: string;
-        publicKey: string;
-      };
+      payload: HostKeyApproval;
     }
   | {
       type: "hostKeyChanged";
@@ -165,12 +181,15 @@ export type TransferStatus =
   | "queued"
   | "running"
   | "paused"
+  | "cancelling"
   | "completed"
   | "cancelled"
   | "failed";
 
 export interface TransferEvent {
   transferId: Uuid;
+  connectionId: Uuid;
+  endpoint: string;
   direction: "upload" | "download";
   localPath: string;
   remotePath: string;

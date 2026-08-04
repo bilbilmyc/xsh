@@ -42,7 +42,7 @@ import type { TerminalCommandRequest } from "./components/TerminalPane";
 import { loadCommandLibrary, saveCommandLibrary, type CommandSnippet } from "./command-library";
 import { loadCommandHistory, recordCommandHistory, saveCommandHistory, type CommandHistoryEntry } from "./command-history";
 import { loadQuickCommandBar, saveQuickCommandBar, type QuickCommandItem } from "./quick-command-bar";
-import { loadPreferences, savePreferences, type AppPreferences } from "./preferences";
+import { loadPreferences, savePreferences, toSftpTransferPolicy, type AppPreferences } from "./preferences";
 import {
   loadWorkspaceSnapshot,
   saveWorkspaceSnapshot,
@@ -248,6 +248,16 @@ function App() {
     reused: number;
     omitted: number;
   } | null>(null);
+
+  useEffect(() => {
+    let disposed = false;
+    void api.configureSftpTransfers(toSftpTransferPolicy(preferences)).catch((caught) => {
+      if (!disposed) setToast(`应用 SFTP 传输设置失败：${String(caught)}`);
+    });
+    return () => {
+      disposed = true;
+    };
+  }, []);
   const workspaceRestoreStartedRef = useRef(false);
   const terminalStageRef = useRef<HTMLDivElement>(null);
   const tabsRef = useRef<TerminalTab[]>([]);
@@ -1188,8 +1198,11 @@ function App() {
   };
 
   const updatePreferences = (next: AppPreferences) => {
-    setPreferences(next);
-    savePreferences(next);
+    const normalized = savePreferences(next);
+    setPreferences(normalized);
+    void api.configureSftpTransfers(toSftpTransferPolicy(normalized)).catch((caught) => {
+      setToast(`应用 SFTP 传输设置失败：${String(caught)}`);
+    });
   };
 
   const exportSessions = async () => {
@@ -1545,7 +1558,13 @@ function App() {
 
         {sftpVisible && activeTab && (
           <Suspense fallback={<aside className="sftp-panel"><div className="panel-message">正在加载 SFTP…</div></aside>}>
-            <SftpPanel key={activeTab.session.id} session={activeTab.session} onClose={() => setSftpVisible(false)} onToast={setToast} />
+            <SftpPanel
+              key={activeTab.session.id}
+              session={activeTab.session}
+              globalTransferConcurrency={preferences.globalSftpTransferConcurrency}
+              onClose={() => setSftpVisible(false)}
+              onToast={setToast}
+            />
           </Suspense>
         )}
       </div>

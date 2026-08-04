@@ -7,6 +7,7 @@ import type {
   SshConfigEntry,
   SshAgentKey,
   SshDiagnosticReport,
+  HostKeyApproval,
   KnownHost,
   RemoteEntry,
   SavedSession,
@@ -16,6 +17,8 @@ import type {
   SshKeyDefaults,
   TerminalEvent,
   TransferEvent,
+  SftpConnectResponse,
+  SftpTransferPolicy,
   Uuid,
 } from "./types";
 
@@ -36,6 +39,8 @@ export const api = {
   listKnownHosts: () => invoke<KnownHost[]>("list_known_hosts"),
   deleteKnownHost: (host: string, port: number) =>
     invoke<void>("delete_known_host", { host, port }),
+  trustSessionHostKey: (sessionId: Uuid, approval: HostKeyApproval) =>
+    invoke<void>("trust_session_host_key", { sessionId, approval }),
 
   listSessions: () => invoke<SavedSession[]>("list_sessions"),
   listSshAgentKeys: () => invoke<SshAgentKey[]>("list_ssh_agent_keys"),
@@ -61,18 +66,18 @@ export const api = {
     sessionId: Uuid,
     columns: number,
     rows: number,
-    trustUnknownHost: boolean,
     onEvent: Channel<TerminalEvent>,
   ) =>
     invoke<Uuid>("connect_terminal", {
       sessionId,
       columns,
       rows,
-      trustUnknownHost,
       onEvent,
     }),
   terminalWrite: (connectionId: Uuid, data: number[]) =>
     invoke<void>("terminal_write", { connectionId, data }),
+  terminalAcknowledgeOutput: (connectionId: Uuid, consumedBytes: number) =>
+    invoke<void>("terminal_acknowledge_output", { connectionId, consumedBytes }),
   terminalRespondAuth: (connectionId: Uuid, challengeId: Uuid, responses: string[]) =>
     invoke<void>("terminal_respond_auth", { connectionId, challengeId, responses }),
   startLocalForward: (connectionId: Uuid, bindHost: string, bindPort: number, targetHost: string, targetPort: number) =>
@@ -91,8 +96,10 @@ export const api = {
   disconnectTerminal: (connectionId: Uuid) =>
     invoke<void>("disconnect_terminal", { connectionId }),
 
-  connectSftp: (sessionId: Uuid, trustUnknownHost = false) =>
-    invoke<Uuid>("connect_sftp", { sessionId, trustUnknownHost }),
+  connectSftp: (sessionId: Uuid) =>
+    invoke<SftpConnectResponse>("connect_sftp", { sessionId }),
+  configureSftpTransfers: (policy: SftpTransferPolicy) =>
+    invoke<SftpTransferPolicy>("configure_sftp_transfers", { policy }),
   disconnectSftp: (connectionId: Uuid) =>
     invoke<void>("disconnect_sftp", { connectionId }),
   releaseSftpConnection: (connectionId: Uuid) =>

@@ -244,6 +244,24 @@ pub struct AuthPrompt {
     pub echo: bool,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum HostKeyRole {
+    Target,
+    ProxyJump,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HostKeyApproval {
+    pub role: HostKeyRole,
+    pub host: String,
+    pub port: u16,
+    pub key_type: String,
+    pub fingerprint: String,
+    pub public_key: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", content = "payload", rename_all = "camelCase")]
 pub enum TerminalEvent {
@@ -253,15 +271,7 @@ pub enum TerminalEvent {
         challenge_id: Uuid,
         prompts: Vec<AuthPrompt>,
     },
-    HostKeyUnknown {
-        host: String,
-        port: u16,
-        #[serde(rename = "keyType", alias = "key_type")]
-        key_type: String,
-        fingerprint: String,
-        #[serde(rename = "publicKey", alias = "public_key")]
-        public_key: String,
-    },
+    HostKeyUnknown(HostKeyApproval),
     HostKeyChanged {
         host: String,
         port: u16,
@@ -309,15 +319,65 @@ pub enum TransferStatus {
     Queued,
     Running,
     Paused,
+    Cancelling,
     Completed,
     Cancelled,
     Failed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SftpTransferPolicy {
+    pub global_concurrency: u16,
+    pub per_host_concurrency: u16,
+    pub upload_limit_bytes_per_second: u64,
+    pub download_limit_bytes_per_second: u64,
+}
+
+impl SftpTransferPolicy {
+    pub const MAX_CONCURRENCY: u16 = 32;
+    pub const MIN_LIMIT_BYTES_PER_SECOND: u64 = 1024;
+    pub const MAX_LIMIT_BYTES_PER_SECOND: u64 = 1024 * 1024 * 1024;
+
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if !(1..=Self::MAX_CONCURRENCY).contains(&self.global_concurrency) {
+            return Err("SFTP global concurrency must be between 1 and 32");
+        }
+        if self.per_host_concurrency == 0 || self.per_host_concurrency > self.global_concurrency {
+            return Err("SFTP per-host concurrency must be between 1 and the global limit");
+        }
+        for limit in [
+            self.upload_limit_bytes_per_second,
+            self.download_limit_bytes_per_second,
+        ] {
+            if limit != 0
+                && !(Self::MIN_LIMIT_BYTES_PER_SECOND..=Self::MAX_LIMIT_BYTES_PER_SECOND)
+                    .contains(&limit)
+            {
+                return Err("SFTP bandwidth limits must be 0 or between 1 KiB/s and 1 GiB/s");
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Default for SftpTransferPolicy {
+    fn default() -> Self {
+        Self {
+            global_concurrency: 4,
+            per_host_concurrency: 2,
+            upload_limit_bytes_per_second: 0,
+            download_limit_bytes_per_second: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TransferEvent {
     pub transfer_id: TransferId,
+    pub connection_id: ConnectionId,
+    pub endpoint: String,
     pub direction: TransferDirection,
     pub local_path: PathBuf,
     pub remote_path: String,
@@ -389,16 +449,33 @@ mod tests {
 
     #[test]
     fn terminal_events_serialize_nested_fields_as_camel_case() {
-        let event = TerminalEvent::HostKeyUnknown {
+        let event = TerminalEvent::HostKeyUnknown(HostKeyApproval {
+            role: HostKeyRole::Target,
             host: "example.com".into(),
             port: 22,
             key_type: "ssh-ed25519".into(),
             fingerprint: "SHA256:test".into(),
             public_key: "ssh-ed25519 AAAA".into(),
-        };
+        });
         assert_eq!(
             serde_json::to_string(&event).unwrap(),
-            r#"{"type":"hostKeyUnknown","payload":{"host":"example.com","port":22,"keyType":"ssh-ed25519","fingerprint":"SHA256:test","publicKey":"ssh-ed25519 AAAA"}}"#
+            r#"{"type":"hostKeyUnknown","payload":{"role":"target","host":"example.com","port":22,"keyType":"ssh-ed25519","fingerprint":"SHA256:test","publicKey":"ssh-ed25519 AAAA"}}"#
+        );
+
+        let proxy_unknown: TerminalEvent = serde_json::from_str(
+            r#"{"type":"hostKeyUnknown","payload":{"role":"proxyJump","host":"jump.example.com","port":2222,"keyType":"ssh-ed25519","fingerprint":"SHA256:test","publicKey":"ssh-ed25519 AAAA"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            proxy_unknown,
+            TerminalEvent::HostKeyUnknown(HostKeyApproval {
+                role: HostKeyRole::ProxyJump,
+                host: "jump.example.com".into(),
+                port: 2222,
+                key_type: "ssh-ed25519".into(),
+                fingerprint: "SHA256:test".into(),
+                public_key: "ssh-ed25519 AAAA".into(),
+            })
         );
 
         let changed: TerminalEvent = serde_json::from_str(
@@ -422,5 +499,23 @@ mod tests {
         assert_eq!(profile.terminal_type, "xterm-256color");
         assert_eq!(profile.encoding, "utf-8");
         assert!(profile.scrollback_lines >= 1_000);
+    }
+
+    #[test]
+    fn sftp_transfer_policy_defaults_validate_and_use_camel_case() {
+        let policy: SftpTransferPolicy = serde_json::from_str("{}").unwrap();
+        assert_eq!(policy, SftpTransferPolicy::default());
+        assert!(policy.validate().is_ok());
+        assert_eq!(
+            serde_json::to_string(&policy).unwrap(),
+            r#"{"globalConcurrency":4,"perHostConcurrency":2,"uploadLimitBytesPerSecond":0,"downloadLimitBytesPerSecond":0}"#
+        );
+
+        let mut invalid = policy;
+        invalid.per_host_concurrency = invalid.global_concurrency + 1;
+        assert!(invalid.validate().is_err());
+        invalid = policy;
+        invalid.upload_limit_bytes_per_second = 1;
+        assert!(invalid.validate().is_err());
     }
 }

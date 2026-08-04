@@ -1,3 +1,4 @@
+#[cfg(test)]
 use chrono::Utc;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -14,25 +15,27 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{AppHandle, Manager, State, WindowEvent};
 use uuid::Uuid;
 use xsh_domain::{
-    AuthenticationMethod, ConnectionId, KnownHost, RemoteEntry, SavedSession, SessionBundle,
-    SessionDraft, SessionGroup, SessionGroupDraft, SessionId, TerminalEvent, TransferEvent,
-    TransferId,
+    AuthenticationMethod, ConnectionId, HostKeyApproval, HostKeyRole, KnownHost, RemoteEntry,
+    SavedSession, SessionBundle, SessionDraft, SessionGroup, SessionGroupDraft, SessionId,
+    SftpTransferPolicy, TerminalEvent, TransferEvent, TransferId,
 };
 use xsh_security::{
     BackupImportSummary, CredentialKind, CredentialRecord, CredentialStore, LocalCredentialStore,
     SESSION_EXPORT_MAGIC, WORKSPACE_EXPORT_MAGIC, decrypt_export_payload, encrypt_export_payload,
 };
-use xsh_sftp::{SftpConnectOptions, SftpManager};
+use xsh_sftp::{SftpConnectOptions, SftpManager, SftpManagerError};
 use xsh_ssh::config::{SshConfigEntry, resolve_proxy_jump};
 use xsh_ssh::{
     ConnectOptions, ForwardInfo, RuntimeAuthentication, SshAgentKey, SshDiagnosticReport,
     SshSessionManager, diagnose_connection, list_agent_keys, validate_dimensions,
+    validate_host_key_approval,
 };
 use xsh_storage::SessionRepository;
 
 struct AppState {
     repository: Arc<SessionRepository>,
     credentials: Arc<LocalCredentialStore>,
+    credential_lifecycle: tokio::sync::Mutex<()>,
     ssh: SshSessionManager,
     sftp: SftpManager,
 }
@@ -44,6 +47,18 @@ struct ImportSummary {
     sessions_created: usize,
     credentials_imported: usize,
     credentials_overwritten: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+enum SftpConnectResponse {
+    Connected {
+        #[serde(rename = "connectionId")]
+        connection_id: ConnectionId,
+    },
+    HostKeyUnknown {
+        challenge: HostKeyApproval,
+    },
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -126,6 +141,7 @@ fn update_group(
 
 #[tauri::command]
 async fn delete_group(state: State<'_, AppState>, id: Uuid) -> CommandResult<Vec<SessionId>> {
+    let _credential_lifecycle = state.credential_lifecycle.lock().await;
     let deleted_sessions = state.repository.delete_group(id).map_err(display_error)?;
     let deleted_ids = deleted_sessions.iter().map(|session| session.id).collect();
     for session in deleted_sessions {
@@ -146,6 +162,21 @@ fn delete_known_host(state: State<'_, AppState>, host: String, port: u16) -> Com
     state
         .repository
         .delete_known_host(&host, port)
+        .map_err(display_error)
+}
+
+#[tauri::command]
+fn trust_session_host_key(
+    state: State<'_, AppState>,
+    session_id: SessionId,
+    approval: HostKeyApproval,
+) -> CommandResult<()> {
+    let session = require_session(&state, session_id)?;
+    validate_session_host_key_endpoint(&session, &approval)?;
+    let known_host = validate_host_key_approval(&approval).map_err(display_error)?;
+    state
+        .repository
+        .save_known_host(known_host)
         .map_err(display_error)
 }
 
@@ -185,6 +216,7 @@ async fn create_session(
     state: State<'_, AppState>,
     draft: SessionDraft,
 ) -> CommandResult<SavedSession> {
+    let _credential_lifecycle = state.credential_lifecycle.lock().await;
     validate_session_draft(&state, &draft, None).await?;
     state
         .repository
@@ -198,6 +230,7 @@ async fn update_session(
     id: SessionId,
     draft: SessionDraft,
 ) -> CommandResult<SavedSession> {
+    let _credential_lifecycle = state.credential_lifecycle.lock().await;
     let previous = require_session(&state, id)?;
     validate_session_draft(&state, &draft, Some(&previous)).await?;
     let updated = state
@@ -217,6 +250,7 @@ async fn update_session(
 
 #[tauri::command]
 async fn delete_session(state: State<'_, AppState>, id: SessionId) -> CommandResult<()> {
+    let _credential_lifecycle = state.credential_lifecycle.lock().await;
     let session = require_session(&state, id)?;
     state.repository.delete_session(id).map_err(display_error)?;
     for credential_ref in session_credential_references(&session) {
@@ -248,6 +282,9 @@ async fn delete_credential(
     state: State<'_, AppState>,
     credential_ref: String,
 ) -> CommandResult<()> {
+    let _credential_lifecycle = state.credential_lifecycle.lock().await;
+    let sessions = state.repository.list_sessions().map_err(display_error)?;
+    ensure_credential_unreferenced(&sessions, &credential_ref)?;
     credential_delete(Arc::clone(&state.credentials), credential_ref).await
 }
 
@@ -268,7 +305,6 @@ async fn connect_terminal(
     session_id: SessionId,
     columns: u16,
     rows: u16,
-    trust_unknown_host: bool,
     on_event: Channel<TerminalEvent>,
 ) -> CommandResult<ConnectionId> {
     validate_dimensions(columns, rows).map_err(display_error)?;
@@ -299,35 +335,16 @@ async fn connect_terminal(
             startup_command: session.startup_command.clone(),
             known_host,
             proxy_jump_known_host,
-            trust_unknown_host,
         })
         .await;
     let connection_id = subscription.connection_id;
-    let repository = Arc::clone(&state.repository);
     let mut events = subscription.events;
+    let ssh = state.ssh.clone();
     tauri::async_runtime::spawn(async move {
         while let Some(event) = events.recv().await {
-            if trust_unknown_host
-                && let TerminalEvent::HostKeyUnknown {
-                    host,
-                    port,
-                    key_type,
-                    fingerprint,
-                    public_key,
-                } = &event
-            {
-                let now = Utc::now();
-                let _ = repository.save_known_host(KnownHost {
-                    host: host.clone(),
-                    port: *port,
-                    key_type: key_type.clone(),
-                    fingerprint: fingerprint.clone(),
-                    public_key: public_key.clone(),
-                    first_seen: now,
-                    last_seen: now,
-                });
-            }
             if on_event.send(event).is_err() {
+                events.close();
+                let _ = ssh.disconnect(connection_id).await;
                 break;
             }
         }
@@ -344,6 +361,19 @@ async fn terminal_write(
     state
         .ssh
         .send_input(connection_id, data)
+        .await
+        .map_err(display_error)
+}
+
+#[tauri::command]
+async fn terminal_acknowledge_output(
+    state: State<'_, AppState>,
+    connection_id: ConnectionId,
+    consumed_bytes: u64,
+) -> CommandResult<()> {
+    state
+        .ssh
+        .acknowledge_output(connection_id, consumed_bytes)
         .await
         .map_err(display_error)
 }
@@ -473,8 +503,7 @@ async fn disconnect_terminal(
 async fn connect_sftp(
     state: State<'_, AppState>,
     session_id: SessionId,
-    trust_unknown_host: bool,
-) -> CommandResult<ConnectionId> {
+) -> CommandResult<SftpConnectResponse> {
     let session = require_session(&state, session_id)?;
     let authentication = resolve_authentication(&state, &session).await?;
     let proxy_jump_authentication = resolve_proxy_jump_authentication(&state, &session).await?;
@@ -483,7 +512,7 @@ async fn connect_sftp(
         .find_known_host(&session.host, session.port)
         .map_err(display_error)?;
     let proxy_jump_known_host = find_proxy_jump_known_host(&state, session.proxy_jump.as_deref())?;
-    let result = state
+    match state
         .sftp
         .connect(SftpConnectOptions {
             host: session.host,
@@ -495,26 +524,17 @@ async fn connect_sftp(
             authentication,
             known_host,
             proxy_jump_known_host,
-            trust_unknown_host,
         })
         .await
-        .map_err(display_error)?;
-    for presented in result.trusted_host_keys {
-        let now = Utc::now();
-        state
-            .repository
-            .save_known_host(KnownHost {
-                host: presented.host,
-                port: presented.port,
-                key_type: presented.key_type,
-                fingerprint: presented.fingerprint,
-                public_key: presented.public_key,
-                first_seen: now,
-                last_seen: now,
-            })
-            .map_err(display_error)?;
+    {
+        Ok(result) => Ok(SftpConnectResponse::Connected {
+            connection_id: result.connection_id,
+        }),
+        Err(SftpManagerError::HostKeyUnknown(challenge)) => {
+            Ok(SftpConnectResponse::HostKeyUnknown { challenge })
+        }
+        Err(error) => Err(display_error(error)),
     }
-    Ok(result.connection_id)
 }
 
 #[tauri::command]
@@ -544,6 +564,18 @@ async fn release_sftp_connection(
 #[tauri::command]
 async fn list_transfers(state: State<'_, AppState>) -> CommandResult<Vec<TransferEvent>> {
     Ok(state.sftp.list_transfers().await)
+}
+
+#[tauri::command]
+fn configure_sftp_transfers(
+    state: State<'_, AppState>,
+    policy: SftpTransferPolicy,
+) -> CommandResult<SftpTransferPolicy> {
+    state
+        .sftp
+        .set_transfer_policy(policy)
+        .map_err(display_error)?;
+    state.sftp.transfer_policy().map_err(display_error)
 }
 
 #[tauri::command]
@@ -844,8 +876,9 @@ async fn import_credentials_backup(
         return Err("备份密码不能为空且不能超过 4096 个字符".into());
     }
     let bytes = read_export_file(&source_path).await?;
+    let _credential_lifecycle = state.credential_lifecycle.lock().await;
     let credentials = Arc::clone(&state.credentials);
-    run_credential_operation(move || {
+    run_credential_mutation(move || {
         credentials
             .import_backup(&bytes, &password)
             .map_err(display_error)
@@ -957,6 +990,7 @@ async fn import_sessions(
         return Err("会话导出文件中的登录凭据与会话配置不匹配".into());
     }
 
+    let _credential_lifecycle = state.credential_lifecycle.lock().await;
     let mut group_map = HashMap::new();
     for group in &bundle.groups {
         let created = state
@@ -988,7 +1022,7 @@ async fn import_sessions(
     }
 
     let credentials_store = Arc::clone(&state.credentials);
-    let credential_summary = run_credential_operation(move || {
+    let credential_summary = run_credential_mutation(move || {
         credentials_store
             .import_selected(&credentials)
             .map_err(display_error)
@@ -1133,6 +1167,39 @@ fn find_proxy_jump_known_host(
         .map(|value| value.flatten())
 }
 
+fn validate_session_host_key_endpoint(
+    session: &SavedSession,
+    approval: &HostKeyApproval,
+) -> CommandResult<()> {
+    let (expected_host, expected_port) = match approval.role {
+        HostKeyRole::Target => (session.host.as_str(), session.port),
+        HostKeyRole::ProxyJump => {
+            let proxy = session
+                .proxy_jump
+                .as_deref()
+                .ok_or_else(|| "该会话未配置 ProxyJump，不能确认此 Host Key".to_owned())?;
+            let proxy = resolve_proxy_jump(proxy)
+                .map_err(display_error)?
+                .ok_or_else(|| "该会话的 ProxyJump 配置为空，不能确认此 Host Key".to_owned())?;
+            if approval.host != proxy.host || approval.port != proxy.port {
+                return Err(format!(
+                    "Host Key 端点与会话 ProxyJump 不匹配：期望 {}:{}，收到 {}:{}",
+                    proxy.host, proxy.port, approval.host, approval.port
+                ));
+            }
+            return Ok(());
+        }
+    };
+
+    if approval.host != expected_host || approval.port != expected_port {
+        return Err(format!(
+            "Host Key 端点与会话目标不匹配：期望 {expected_host}:{expected_port}，收到 {}:{}",
+            approval.host, approval.port
+        ));
+    }
+    Ok(())
+}
+
 fn require_session(state: &AppState, session_id: SessionId) -> CommandResult<SavedSession> {
     state
         .repository
@@ -1155,12 +1222,22 @@ where
     .map_err(|error| format!("XSH 本地凭据库操作线程异常：{error}"))?
 }
 
+async fn run_credential_mutation<T, F>(operation: F) -> CommandResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> CommandResult<T> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(operation)
+        .await
+        .map_err(|error| format!("XSH 本地凭据库操作线程异常：{error}"))?
+}
+
 async fn credential_create(
     credentials: Arc<LocalCredentialStore>,
     kind: CredentialKind,
     secret: String,
 ) -> CommandResult<String> {
-    run_credential_operation(move || credentials.create(kind, &secret).map_err(display_error)).await
+    run_credential_mutation(move || credentials.create(kind, &secret).map_err(display_error)).await
 }
 
 async fn credential_get(
@@ -1174,7 +1251,7 @@ async fn credential_delete(
     credentials: Arc<LocalCredentialStore>,
     credential_ref: String,
 ) -> CommandResult<()> {
-    run_credential_operation(move || credentials.delete(&credential_ref).map_err(display_error))
+    run_credential_mutation(move || credentials.delete(&credential_ref).map_err(display_error))
         .await
 }
 
@@ -1252,13 +1329,39 @@ async fn cleanup_credential_if_unused(state: &State<'_, AppState>, credential_re
     let Ok(sessions) = state.repository.list_sessions() else {
         return;
     };
-    if !sessions.iter().any(|session| {
-        session_credential_references(session)
-            .iter()
-            .any(|reference| reference == credential_ref)
-    }) {
+    if !saved_sessions_reference_credential(&sessions, credential_ref) {
         let _ = credential_delete(Arc::clone(&state.credentials), credential_ref.to_owned()).await;
     }
+}
+
+fn saved_sessions_reference_credential(sessions: &[SavedSession], credential_ref: &str) -> bool {
+    sessions.iter().any(|session| {
+        authentication_pair_references_credential(
+            &session.authentication,
+            session.proxy_jump_authentication.as_ref(),
+            credential_ref,
+        )
+    })
+}
+
+fn ensure_credential_unreferenced(
+    sessions: &[SavedSession],
+    credential_ref: &str,
+) -> CommandResult<()> {
+    if saved_sessions_reference_credential(sessions, credential_ref) {
+        Err("该凭据仍被已保存会话引用；请先修改或删除相关会话，再删除凭据".into())
+    } else {
+        Ok(())
+    }
+}
+
+fn authentication_pair_references_credential(
+    authentication: &AuthenticationMethod,
+    proxy_jump_authentication: Option<&AuthenticationMethod>,
+    credential_ref: &str,
+) -> bool {
+    credential_reference(authentication) == Some(credential_ref)
+        || proxy_jump_authentication.and_then(credential_reference) == Some(credential_ref)
 }
 
 fn session_credential_references(session: &SavedSession) -> Vec<String> {
@@ -1463,6 +1566,7 @@ pub fn run() {
             app.manage(AppState {
                 repository: Arc::new(repository),
                 credentials: Arc::new(credentials),
+                credential_lifecycle: tokio::sync::Mutex::new(()),
                 ssh: SshSessionManager::new(),
                 sftp: SftpManager::new(),
             });
@@ -1509,6 +1613,7 @@ pub fn run() {
             delete_group,
             list_known_hosts,
             delete_known_host,
+            trust_session_host_key,
             list_sessions,
             list_ssh_agent_keys,
             get_ssh_key_defaults,
@@ -1521,6 +1626,7 @@ pub fn run() {
             diagnose_session,
             connect_terminal,
             terminal_write,
+            terminal_acknowledge_output,
             terminal_respond_auth,
             start_local_forward,
             start_dynamic_forward,
@@ -1533,6 +1639,7 @@ pub fn run() {
             disconnect_sftp,
             release_sftp_connection,
             list_transfers,
+            configure_sftp_transfers,
             pause_transfer,
             resume_transfer,
             remove_transfer,
@@ -1574,6 +1681,144 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn saved_session(
+        authentication: AuthenticationMethod,
+        proxy_jump_authentication: Option<AuthenticationMethod>,
+    ) -> SavedSession {
+        let now = Utc::now();
+        SavedSession {
+            id: Uuid::new_v4(),
+            group_id: None,
+            name: "credential-reference-test".into(),
+            host: "example.com".into(),
+            port: 22,
+            username: "tester".into(),
+            proxy_jump: None,
+            proxy_jump_username: None,
+            proxy_jump_authentication,
+            authentication,
+            terminal: Default::default(),
+            initial_directory: None,
+            startup_command: None,
+            keepalive_seconds: 30,
+            auto_reconnect: false,
+            environment: None,
+            color: None,
+            notes: None,
+            tags: Vec::new(),
+            favorite: false,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn credential_reference_check_covers_primary_and_proxy_authentication() {
+        let primary_ref = "xsh-local/password/primary";
+        let proxy_ref = "xsh-local/key-passphrase/proxy";
+        let session = saved_session(
+            AuthenticationMethod::Password {
+                credential_ref: Some(primary_ref.into()),
+            },
+            Some(AuthenticationMethod::PrivateKey {
+                private_key_path: "~/.ssh/proxy".into(),
+                passphrase_ref: Some(proxy_ref.into()),
+            }),
+        );
+
+        assert!(saved_sessions_reference_credential(
+            std::slice::from_ref(&session),
+            primary_ref
+        ));
+        assert!(saved_sessions_reference_credential(
+            std::slice::from_ref(&session),
+            proxy_ref
+        ));
+        assert!(!saved_sessions_reference_credential(
+            std::slice::from_ref(&session),
+            "xsh-local/password/unrelated"
+        ));
+        assert!(
+            ensure_credential_unreferenced(std::slice::from_ref(&session), primary_ref).is_err()
+        );
+        assert!(
+            ensure_credential_unreferenced(
+                std::slice::from_ref(&session),
+                "xsh-local/password/unrelated"
+            )
+            .is_ok()
+        );
+    }
+
+    fn host_key_approval(role: HostKeyRole, host: &str, port: u16) -> HostKeyApproval {
+        HostKeyApproval {
+            role,
+            host: host.into(),
+            port,
+            key_type: "ssh-ed25519".into(),
+            fingerprint: "SHA256:test".into(),
+            public_key: "ssh-ed25519 AAAA".into(),
+        }
+    }
+
+    #[test]
+    fn host_key_approval_endpoint_must_match_its_session_role() {
+        let mut session = saved_session(
+            AuthenticationMethod::Agent {
+                identity_fingerprint: None,
+            },
+            None,
+        );
+        session.proxy_jump = Some("jump-user@jump.example.com:2222".into());
+
+        assert!(
+            validate_session_host_key_endpoint(
+                &session,
+                &host_key_approval(HostKeyRole::Target, "example.com", 22)
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_session_host_key_endpoint(
+                &session,
+                &host_key_approval(HostKeyRole::ProxyJump, "jump.example.com", 2222)
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_session_host_key_endpoint(
+                &session,
+                &host_key_approval(HostKeyRole::Target, "jump.example.com", 2222)
+            )
+            .is_err()
+        );
+        assert!(
+            validate_session_host_key_endpoint(
+                &session,
+                &host_key_approval(HostKeyRole::ProxyJump, "example.com", 22)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn sftp_connect_response_serializes_as_a_discriminated_union() {
+        let connection_id = Uuid::new_v4();
+        let connected = serde_json::to_value(SftpConnectResponse::Connected { connection_id })
+            .expect("serialize connected response");
+        assert_eq!(connected["status"], "connected");
+        assert_eq!(connected["connectionId"], connection_id.to_string());
+
+        let challenge = host_key_approval(HostKeyRole::ProxyJump, "jump.example.com", 2222);
+        let unknown = serde_json::to_value(SftpConnectResponse::HostKeyUnknown {
+            challenge: challenge.clone(),
+        })
+        .expect("serialize challenge response");
+        assert_eq!(unknown["status"], "hostKeyUnknown");
+        assert_eq!(unknown["challenge"]["role"], "proxyJump");
+        assert_eq!(unknown["challenge"]["host"], challenge.host);
+    }
 
     #[test]
     fn local_path_validation_requires_absolute_non_symlink_paths() {

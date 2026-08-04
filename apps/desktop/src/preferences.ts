@@ -1,3 +1,5 @@
+import type { SftpTransferPolicy } from "./types";
+
 export type AppTheme = "light" | "midnight" | "graphite" | "dusk";
 export type AccentColor = "cyan" | "blue" | "green" | "orange" | "purple";
 export type RightClickAction = "paste" | "menu";
@@ -20,6 +22,10 @@ export interface AppPreferences {
   copyOnSelect: boolean;
   confirmMultiLinePaste: boolean;
   terminalShortcutMode: TerminalShortcutMode;
+  globalSftpTransferConcurrency: number;
+  perHostSftpTransferConcurrency: number;
+  sftpUploadBandwidthLimitBps: number;
+  sftpDownloadBandwidthLimitBps: number;
 }
 
 const STORAGE_KEY = "xsh.preferences.v1";
@@ -28,6 +34,9 @@ const UI_FONT_MIN = 12;
 const UI_FONT_MAX = 16;
 const TERMINAL_FONT_MIN = 12;
 const TERMINAL_FONT_MAX = 22;
+const SFTP_MAX_CONCURRENCY = 32;
+const SFTP_MIN_LIMIT_BYTES_PER_SECOND = 1024;
+const SFTP_MAX_LIMIT_BYTES_PER_SECOND = 1024 * 1024 * 1024;
 const LEGACY_DEFAULT_TERMINAL_FONT_FAMILY = '"SFMono-Regular", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace';
 const LEGACY_MONACO_DEFAULT_TERMINAL_FONT_FAMILY = '"Monaco", "SFMono-Regular", Menlo, Consolas, monospace';
 const LEGACY_DEFAULT_TERMINAL_LINE_HEIGHT = 1.22;
@@ -50,6 +59,10 @@ export const defaultPreferences: AppPreferences = {
   copyOnSelect: true,
   confirmMultiLinePaste: false,
   terminalShortcutMode: "platform-safe",
+  globalSftpTransferConcurrency: 4,
+  perHostSftpTransferConcurrency: 2,
+  sftpUploadBandwidthLimitBps: 0,
+  sftpDownloadBandwidthLimitBps: 0,
 };
 
 export function loadPreferences(): AppPreferences {
@@ -91,10 +104,11 @@ export function loadPreferences(): AppPreferences {
   }
 }
 
-export function savePreferences(preferences: AppPreferences) {
+export function savePreferences(preferences: AppPreferences): AppPreferences {
   const normalized = normalizePreferences(preferences);
   localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
   applyPreferences(normalized);
+  return normalized;
 }
 
 export function applyPreferences(preferences: AppPreferences) {
@@ -106,7 +120,19 @@ export function applyPreferences(preferences: AppPreferences) {
   root.style.setProperty("--ui-font-adjust", `${preferences.uiFontSize - UI_FONT_BASELINE}px`);
 }
 
-function normalizePreferences(preferences: AppPreferences): AppPreferences {
+export function normalizePreferences(preferences: AppPreferences): AppPreferences {
+  const globalConcurrency = clampInteger(
+    Number(preferences.globalSftpTransferConcurrency),
+    1,
+    SFTP_MAX_CONCURRENCY,
+    defaultPreferences.globalSftpTransferConcurrency,
+  );
+  const perHostConcurrency = clampInteger(
+    Number(preferences.perHostSftpTransferConcurrency),
+    1,
+    globalConcurrency,
+    Math.min(defaultPreferences.perHostSftpTransferConcurrency, globalConcurrency),
+  );
   return {
     ...preferences,
     uiFontSize: clamp(Number(preferences.uiFontSize), UI_FONT_MIN, UI_FONT_MAX, defaultPreferences.uiFontSize),
@@ -123,7 +149,35 @@ function normalizePreferences(preferences: AppPreferences): AppPreferences {
     copyOnSelect: preferences.copyOnSelect === true,
     confirmMultiLinePaste: preferences.confirmMultiLinePaste === true,
     terminalShortcutMode: preferences.terminalShortcutMode === "remote-first" ? "remote-first" : "platform-safe",
+    globalSftpTransferConcurrency: globalConcurrency,
+    perHostSftpTransferConcurrency: perHostConcurrency,
+    sftpUploadBandwidthLimitBps: normalizeBandwidthLimit(preferences.sftpUploadBandwidthLimitBps),
+    sftpDownloadBandwidthLimitBps: normalizeBandwidthLimit(preferences.sftpDownloadBandwidthLimitBps),
   };
+}
+
+export function toSftpTransferPolicy(preferences: AppPreferences): SftpTransferPolicy {
+  const normalized = normalizePreferences(preferences);
+  return {
+    globalConcurrency: normalized.globalSftpTransferConcurrency,
+    perHostConcurrency: normalized.perHostSftpTransferConcurrency,
+    uploadLimitBytesPerSecond: normalized.sftpUploadBandwidthLimitBps,
+    downloadLimitBytesPerSecond: normalized.sftpDownloadBandwidthLimitBps,
+  };
+}
+
+function normalizeBandwidthLimit(value: number): number {
+  const rounded = Math.round(Number(value));
+  if (!Number.isFinite(rounded) || rounded <= 0) return 0;
+  return Math.min(
+    SFTP_MAX_LIMIT_BYTES_PER_SECOND,
+    Math.max(SFTP_MIN_LIMIT_BYTES_PER_SECOND, rounded),
+  );
+}
+
+function clampInteger(value: number, min: number, max: number, fallback: number): number {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(value)));
 }
 
 function clamp(value: number, min: number, max: number, fallback: number) {

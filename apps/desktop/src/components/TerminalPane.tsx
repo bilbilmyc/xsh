@@ -10,6 +10,9 @@ import { ContextMenu } from "./ContextMenu";
 import type { AppPreferences } from "../preferences";
 import type { SavedSession, TerminalEvent } from "../types";
 import { normalizeTerminalCommand } from "../terminal-command";
+import { hostKeyConfirmationMessage } from "../host-key";
+import { BoundedSessionLogBuffer } from "../session-log-buffer";
+import { CumulativeTerminalOutputAcknowledger } from "../terminal-output-ack";
 import "@xterm/xterm/css/xterm.css";
 
 export interface TerminalCommandRequest {
@@ -30,6 +33,13 @@ interface TerminalPaneProps {
   onCommandResult: (result: { id: string; ok: boolean; error?: string }) => void;
   onEditSession?: (session: SavedSession) => void;
   onDiagnose?: (session: SavedSession) => void;
+}
+
+type OutputAcknowledge = (bytes: number) => void;
+
+interface PendingTerminalOutput {
+  data: Uint8Array;
+  acknowledge: OutputAcknowledge;
 }
 
 export function TerminalPane({
@@ -63,7 +73,7 @@ export function TerminalPane({
   const [authChallenge, setAuthChallenge] = useState<{ challengeId: string; prompts: Array<{ prompt: string; echo: boolean }> } | null>(null);
   const [authResponses, setAuthResponses] = useState<string[]>([]);
   const searchAddonRef = useRef<SearchAddon | null>(null);
-  const logRef = useRef<string[]>([]);
+  const [sessionLog] = useState(() => new BoundedSessionLogBuffer());
   const preferencesRef = useRef(preferences);
   preferencesRef.current = preferences;
   const sessionFontEnabled = preferences.useSessionTerminalFont;
@@ -96,7 +106,7 @@ export function TerminalPane({
     let wakeCheckTimer: number | undefined;
     let selectionCopyTimer: number | undefined;
     let outputFlushFrame: number | undefined;
-    let pendingOutput: Uint8Array[] = [];
+    let pendingOutput: PendingTerminalOutput[] = [];
     let pendingOutputHead = 0;
     let pendingOutputBytes = 0;
     const outputFrameBudgetBytes = 512 * 1024;
@@ -118,13 +128,13 @@ export function TerminalPane({
     let lastWakeCheckAt = Date.now();
     setConnectionError(null);
     setConnectionNotice(null);
-    logRef.current = [[
+    sessionLog.reset([
       "XSH Session Log",
       `Session: ${session.name}`,
       `Host: ${session.username}@${session.host}:${session.port}`,
       `Started: ${new Date().toISOString()}`,
       "",
-    ].join("\n")];
+    ].join("\n"));
 
     const outputDecoder = createTextDecoder(session.terminal.encoding);
     const terminal = new Terminal({
@@ -206,6 +216,14 @@ export function TerminalPane({
       pendingOutput = pendingOutput.slice(pendingOutputHead);
       pendingOutputHead = 0;
     };
+    const writeOutput = (
+      data: Uint8Array,
+      acknowledgements: Map<OutputAcknowledge, number>,
+    ) => {
+      terminal.write(data, () => {
+        for (const [acknowledge, bytes] of acknowledgements) acknowledge(bytes);
+      });
+    };
     const flushOutput = (drainAll = false) => {
       outputFlushFrame = undefined;
       if (disposed) return;
@@ -218,29 +236,34 @@ export function TerminalPane({
       }
 
       const firstChunk = pendingOutput[pendingOutputHead];
-      if (firstChunk && firstChunk.length <= bytesToWrite && pendingOutputHead === pendingOutput.length - 1) {
-        terminal.write(firstChunk);
+      if (firstChunk && firstChunk.data.length <= bytesToWrite && pendingOutputHead === pendingOutput.length - 1) {
+        writeOutput(firstChunk.data, new Map([[firstChunk.acknowledge, firstChunk.data.length]]));
         pendingOutputHead += 1;
-        pendingOutputBytes -= firstChunk.length;
-        bytesToWrite = firstChunk.length;
+        pendingOutputBytes -= firstChunk.data.length;
+        bytesToWrite = firstChunk.data.length;
       } else {
         const merged = new Uint8Array(bytesToWrite);
+        const acknowledgements = new Map<OutputAcknowledge, number>();
         let offset = 0;
         while (offset < bytesToWrite) {
           const chunk = pendingOutput[pendingOutputHead];
           if (!chunk) break;
-          const chunkBytes = Math.min(chunk.length, bytesToWrite - offset);
-          merged.set(chunk.subarray(0, chunkBytes), offset);
+          const chunkBytes = Math.min(chunk.data.length, bytesToWrite - offset);
+          merged.set(chunk.data.subarray(0, chunkBytes), offset);
+          acknowledgements.set(
+            chunk.acknowledge,
+            (acknowledgements.get(chunk.acknowledge) ?? 0) + chunkBytes,
+          );
           offset += chunkBytes;
           pendingOutputBytes -= chunkBytes;
-          if (chunkBytes === chunk.length) {
+          if (chunkBytes === chunk.data.length) {
             pendingOutputHead += 1;
           } else {
-            pendingOutput[pendingOutputHead] = chunk.subarray(chunkBytes);
+            chunk.data = chunk.data.subarray(chunkBytes);
           }
         }
         bytesToWrite = offset;
-        if (bytesToWrite > 0) terminal.write(merged.subarray(0, bytesToWrite));
+        if (bytesToWrite > 0) writeOutput(merged.subarray(0, bytesToWrite), acknowledgements);
       }
 
       compactPendingOutput();
@@ -260,10 +283,10 @@ export function TerminalPane({
       while (!disposed && pendingOutputBytes > 0) flushOutput(true);
       reportOutputStats(true);
     };
-    const queueOutput = (payload: number[]) => {
+    const queueOutput = (payload: number[], acknowledge: OutputAcknowledge) => {
       const chunk = Uint8Array.from(payload);
       if (chunk.length === 0) return;
-      pendingOutput.push(chunk);
+      pendingOutput.push({ data: chunk, acknowledge });
       pendingOutputBytes += chunk.length;
       outputBytesSinceSample += chunk.length;
       outputChunksSinceSample += 1;
@@ -567,12 +590,12 @@ export function TerminalPane({
       terminal.writeln(`\r\n\x1b[90m连接中断，${Math.ceil(delay / 1_000)} 秒后重连…\x1b[0m`);
       reconnectTimer = window.setTimeout(() => {
         reconnectTimer = undefined;
-        void connect(false);
+        void connect();
       }, delay);
       return true;
     };
 
-    const connect = async (trustUnknownHost: boolean) => {
+    const connect = async () => {
       if (!connectionEnabledRef.current) {
         setConnectionNotice("等待连接资源…");
         reportState("queued");
@@ -597,13 +620,22 @@ export function TerminalPane({
       }
 
       const channel = new Channel<TerminalEvent>();
+      const outputAcknowledger = new CumulativeTerminalOutputAcknowledger();
+      let connectionEnded = false;
+      const acknowledgeOutput: OutputAcknowledge = (bytes) => {
+        if (disposed || generation !== connectGeneration) {
+          outputAcknowledger.stop();
+          return;
+        }
+        outputAcknowledger.consume(bytes);
+      };
       channel.onmessage = (event) => {
         if (disposed || generation !== connectGeneration) return;
         switch (event.type) {
           case "output": {
             const output = outputDecoder.decode(new Uint8Array(event.payload), { stream: true });
-            logRef.current.push(output);
-            queueOutput(event.payload);
+            sessionLog.append(output);
+            queueOutput(event.payload, acknowledgeOutput);
             break;
           }
           case "authChallenge":
@@ -619,6 +651,8 @@ export function TerminalPane({
               connectPendingForNetwork = false;
               setConnectionNotice(null);
             } else if (state === "disconnected") {
+              connectionEnded = true;
+              outputAcknowledger.stop();
               connectionIdRef.current = null;
               onConnectionChange?.(null);
               if (scheduleReconnect()) break;
@@ -628,12 +662,18 @@ export function TerminalPane({
           }
           case "hostKeyUnknown": {
             const key = event.payload;
-            if (!trustUnknownHost) {
-              reconnectAllowed = false;
-              const accepted = window.confirm(
-                `首次连接 ${key.host}:${key.port}\n\n${key.keyType}\n${key.fingerprint}\n\n是否信任并保存此服务器密钥？`,
-              );
-              if (accepted) void connect(true);
+            reconnectAllowed = false;
+            const accepted = window.confirm(hostKeyConfirmationMessage(key, "SSH"));
+            if (accepted) {
+              void api.trustSessionHostKey(session.id, key)
+                .then(() => {
+                  if (!disposed && generation === connectGeneration) void connect();
+                })
+                .catch((error) => {
+                  if (disposed || generation !== connectGeneration) return;
+                  setConnectionError(`Host Key 保存失败：${String(error)}`);
+                  reportState("failed");
+                });
             }
             break;
           }
@@ -665,13 +705,20 @@ export function TerminalPane({
           session.id,
           Math.max(terminal.cols, 1),
           Math.max(terminal.rows, 1),
-          trustUnknownHost,
           channel,
         );
-        if (disposed || generation !== connectGeneration) {
+        if (disposed || generation !== connectGeneration || connectionEnded) {
+          outputAcknowledger.stop();
           await api.disconnectTerminal(id).catch(() => undefined);
           return;
         }
+        outputAcknowledger.setSender(async (consumedBytes) => {
+          if (disposed || generation !== connectGeneration) {
+            outputAcknowledger.stop();
+            return;
+          }
+          await api.terminalAcknowledgeOutput(id, consumedBytes);
+        });
         connectionIdRef.current = id;
         onConnectionChange?.(id);
         setConnectionError(null);
@@ -700,7 +747,7 @@ export function TerminalPane({
       fitTerminal();
       if (connectPendingForNetwork && reconnectAllowed) {
         terminal.writeln("\r\n\x1b[90m网络已恢复，正在重新连接…\x1b[0m");
-        void connect(false);
+        void connect();
       } else {
         showTransientNotice("网络已恢复");
       }
@@ -715,13 +762,13 @@ export function TerminalPane({
       showTransientNotice("设备已唤醒，正在检查 SSH 连接…", 2_500);
       const connectionId = connectionIdRef.current;
       if (!connectionId && reconnectAllowed && (connectPendingForNetwork || (wasConnected && session.autoReconnect))) {
-        void connect(false);
+        void connect();
         return;
       }
       if (connectionId) {
         void api.terminalResize(connectionId, Math.max(terminal.cols, 1), Math.max(terminal.rows, 1))
           .catch(() => {
-            if (!disposed && session.autoReconnect && reconnectAllowed) void connect(false);
+            if (!disposed && session.autoReconnect && reconnectAllowed) void connect();
           });
       }
     };
@@ -735,7 +782,7 @@ export function TerminalPane({
       }
       if (navigator.onLine !== false && !networkOnline) handleOnline();
       else if (networkOnline && !connectionIdRef.current && reconnectAllowed && (connectPendingForNetwork || (wasConnected && session.autoReconnect))) {
-        void connect(false);
+        void connect();
       }
     };
 
@@ -752,9 +799,9 @@ export function TerminalPane({
     reconnectRef.current = () => {
       setConnectionError(null);
       connectPendingForNetwork = true;
-      void connect(false);
+      void connect();
     };
-    if (connectionEnabledRef.current) void connect(false);
+    if (connectionEnabledRef.current) void connect();
     else {
       setConnectionNotice("等待连接资源…");
       reportState("queued");
@@ -870,7 +917,7 @@ export function TerminalPane({
     });
     if (!targetPath) return;
     try {
-      await api.writeTextFile(targetPath, logRef.current.join(""));
+      await api.writeTextFile(targetPath, sessionLog.toString());
     } catch (error) {
       setConnectionError(`日志保存失败：${String(error)}`);
     }

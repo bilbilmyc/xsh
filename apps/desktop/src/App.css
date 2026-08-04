@@ -2137,12 +2137,20 @@ kbd {
   color: #8a96a0;
 }
 
+.transfer-status.cancelling {
+  color: #d7b66b;
+}
+
 .progress-track > .completed {
   background: #4da879;
 }
 
 .progress-track > .failed {
   background: #b64d57;
+}
+
+.progress-track > .cancelling {
+  background: #c79b45;
 }
 
 .progress-track > .cancelled {
@@ -2504,6 +2512,58 @@ body {
 .range-field output { color: var(--accent-strong); font: 600 12px "SFMono-Regular", Consolas, monospace; }
 .range-field input[type="range"] { height: 32px; padding: 0; border: 0; box-shadow: none; accent-color: var(--accent); background: transparent; }
 
+.transfer-concurrency-grid { align-items: start; }
+.transfer-number-field input { font-family: var(--mono-font); font-variant-numeric: tabular-nums; }
+.transfer-limit-list { border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.transfer-limit-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(190px, 0.72fr);
+  align-items: center;
+  gap: 14px;
+  padding: 13px 2px;
+}
+.transfer-limit-row + .transfer-limit-row { border-top: 1px solid var(--line-soft); }
+.transfer-limit-copy { min-width: 0; display: grid; gap: 3px; }
+.transfer-limit-copy strong { color: var(--text-strong); font-size: var(--font-md); font-weight: var(--weight-emphasis); }
+.transfer-limit-copy small { color: var(--muted); font-size: var(--font-xs); line-height: 1.45; }
+.transfer-limit-switch { position: relative; display: inline-flex; cursor: pointer; }
+.transfer-limit-switch input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.transfer-limit-switch span {
+  width: 38px;
+  height: 22px;
+  display: block;
+  padding: 2px;
+  border: 1px solid #3a4b59;
+  border-radius: 11px;
+  background: #26343f;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+.transfer-limit-switch span::after {
+  content: "";
+  width: 16px;
+  height: 16px;
+  display: block;
+  border-radius: 50%;
+  background: #a9b5be;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.28);
+  transition: transform 120ms ease, background 120ms ease;
+}
+.transfer-limit-switch input:checked + span { border-color: var(--accent); background: var(--accent-bg); }
+.transfer-limit-switch input:checked + span::after { transform: translateX(16px); background: var(--accent-strong); }
+.transfer-limit-switch input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
+.transfer-limit-control { min-width: 0; display: grid; grid-template-columns: minmax(82px, 1fr) 86px; gap: 7px; }
+.settings-modal .transfer-limit-control input,
+.settings-modal .transfer-limit-control select {
+  min-width: 0;
+  height: 36px;
+  padding: 0 9px;
+  font-size: var(--font-md);
+  font-variant-numeric: tabular-nums;
+}
+.settings-modal .transfer-limit-control input { font-family: var(--mono-font); }
+.transfer-limit-control :disabled { cursor: not-allowed; opacity: 0.46; }
+
 .font-preview,
 .terminal-font-preview {
   margin-top: 14px;
@@ -2527,6 +2587,25 @@ body {
   .settings-layout { grid-template-columns: 135px minmax(0, 1fr); }
   .theme-grid { grid-template-columns: 1fr; }
   .settings-form-grid { grid-template-columns: 1fr; }
+  .transfer-limit-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .transfer-limit-control { grid-column: 1 / -1; }
+}
+
+@media (max-width: 560px) {
+  .modal-backdrop { padding: 8px; }
+  .settings-modal-wide { width: 100%; height: 100%; }
+  .settings-layout { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
+  .settings-nav {
+    flex-direction: row;
+    padding: 8px;
+    overflow-x: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .settings-nav button { flex: none; min-height: 36px; padding: 0 10px; }
+  .settings-page { padding: 16px; }
+  .settings-heading { align-items: flex-start; flex-direction: column; gap: 4px; }
+  .settings-modal .settings-heading span { max-width: none; text-align: left; }
 }
 
 /* V2 command center: a compact operations console rather than a generic form dialog. */
@@ -4982,6 +5061,24 @@ body.resizing-terminal-split .split-divider.horizontal * { cursor: row-resize !i
 :root[data-theme="light"] .settings-modal select:hover,
 :root[data-theme="light"] .settings-modal textarea:hover {
   border-color: #8bb9c8;
+}
+
+:root[data-theme="light"] .settings-modal .transfer-limit-switch span {
+  border-color: #b9cbd3;
+  background: #dbe5e9;
+}
+
+:root[data-theme="light"] .settings-modal .transfer-limit-switch span::after {
+  background: #6f8792;
+}
+
+:root[data-theme="light"] .settings-modal .transfer-limit-switch input:checked + span {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+
+:root[data-theme="light"] .settings-modal .transfer-limit-switch input:checked + span::after {
+  background: var(--accent-strong);
 }
 
 :root[data-theme="light"] .settings-modal .form-section {
