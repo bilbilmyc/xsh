@@ -79,6 +79,32 @@ impl Default for TerminalProfile {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ForwardKind {
+    Local,
+    Remote,
+    Dynamic,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ForwardProfile {
+    /// Stable within a session so the UI can edit and reconcile profiles
+    /// independently of the runtime SSH forward id.
+    pub id: Uuid,
+    pub name: String,
+    pub kind: ForwardKind,
+    pub bind_host: String,
+    pub bind_port: u16,
+    #[serde(default)]
+    pub target_host: Option<String>,
+    #[serde(default)]
+    pub target_port: Option<u16>,
+    #[serde(default)]
+    pub auto_start: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SavedSession {
@@ -100,6 +126,8 @@ pub struct SavedSession {
     pub proxy_jump_authentication: Option<AuthenticationMethod>,
     pub authentication: AuthenticationMethod,
     pub terminal: TerminalProfile,
+    #[serde(default)]
+    pub forward_profiles: Vec<ForwardProfile>,
     pub initial_directory: Option<String>,
     /// Optional command sent once after the interactive shell is ready.
     #[serde(default)]
@@ -137,6 +165,8 @@ pub struct SessionDraft {
     pub authentication: AuthenticationMethod,
     #[serde(default)]
     pub terminal: TerminalProfile,
+    #[serde(default)]
+    pub forward_profiles: Vec<ForwardProfile>,
     pub initial_directory: Option<String>,
     /// Optional command sent once after the interactive shell is ready.
     #[serde(default)]
@@ -534,6 +564,51 @@ mod tests {
         assert_eq!(profile.terminal_type, "xterm-256color");
         assert_eq!(profile.encoding, "utf-8");
         assert!(profile.scrollback_lines >= 1_000);
+    }
+
+    #[test]
+    fn forward_profiles_use_camel_case_and_round_trip() {
+        let profile = ForwardProfile {
+            id: Uuid::from_u128(7),
+            name: "Local API".into(),
+            kind: ForwardKind::Local,
+            bind_host: "127.0.0.1".into(),
+            bind_port: 18_080,
+            target_host: Some("127.0.0.1".into()),
+            target_port: Some(8_080),
+            auto_start: true,
+        };
+        let json = serde_json::to_value(&profile).unwrap();
+        assert_eq!(json["kind"], "local");
+        assert_eq!(json["bindHost"], "127.0.0.1");
+        assert_eq!(json["autoStart"], true);
+        assert_eq!(
+            serde_json::from_value::<ForwardProfile>(json).unwrap(),
+            profile
+        );
+    }
+
+    #[test]
+    fn legacy_session_payload_defaults_forward_profiles_to_empty() {
+        let draft: SessionDraft = serde_json::from_str(
+            r#"{
+                "groupId": null,
+                "name": "legacy",
+                "host": "example.com",
+                "port": 22,
+                "username": "ops",
+                "authentication": {"type": "agent", "identityFingerprint": null},
+                "initialDirectory": null,
+                "keepaliveSeconds": 30,
+                "autoReconnect": true,
+                "environment": null,
+                "color": null,
+                "notes": null
+            }"#,
+        )
+        .unwrap();
+        assert!(draft.forward_profiles.is_empty());
+        assert_eq!(draft.terminal, TerminalProfile::default());
     }
 
     #[test]

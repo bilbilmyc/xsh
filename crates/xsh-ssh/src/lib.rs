@@ -22,8 +22,8 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use uuid::Uuid;
 use xsh_domain::{
-    AuthPrompt, ConnectionId, ConnectionState, HostKeyApproval, HostKeyRole, KnownHost, SessionId,
-    TerminalEvent, TerminalProfile,
+    AuthPrompt, ConnectionId, ConnectionState, ForwardKind, ForwardProfile, HostKeyApproval,
+    HostKeyRole, KnownHost, SessionId, TerminalEvent, TerminalProfile,
 };
 use zeroize::Zeroizing;
 
@@ -155,6 +155,7 @@ pub struct ForwardInfo {
     pub bind_port: u16,
     pub target_host: Option<String>,
     pub target_port: Option<u16>,
+    pub profile_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -222,6 +223,7 @@ struct RemoteForwardTarget {
     bind_port: u16,
     local_host: String,
     local_port: u16,
+    profile_id: Option<Uuid>,
 }
 
 /// Check the network path needed for an SSH session without opening an SSH
@@ -412,6 +414,10 @@ enum SessionCommand {
         bind_port: u16,
         local_host: String,
         local_port: u16,
+        reply: oneshot::Sender<anyhow::Result<ForwardInfo>>,
+    },
+    StartForwardProfile {
+        profile: ForwardProfile,
         reply: oneshot::Sender<anyhow::Result<ForwardInfo>>,
     },
     StopForward {
@@ -613,6 +619,27 @@ impl SshSessionManager {
                 local_port,
                 reply,
             },
+        )
+        .await
+        .map_err(|error| anyhow!(error))?;
+        receiver
+            .await
+            .map_err(|_| anyhow!("SSH 转发管理器已关闭"))?
+    }
+
+    /// Start a persisted forward using its stable profile id as the runtime id.
+    /// Repeating this call for the same connection/profile is idempotent: the
+    /// existing runtime is returned by the session command loop.
+    pub async fn start_forward_profile(
+        &self,
+        connection_id: ConnectionId,
+        profile: ForwardProfile,
+    ) -> anyhow::Result<ForwardInfo> {
+        validate_forward_profile(&profile)?;
+        let (reply, receiver) = oneshot::channel();
+        self.send(
+            connection_id,
+            SessionCommand::StartForwardProfile { profile, reply },
         )
         .await
         .map_err(|error| anyhow!(error))?;
@@ -1230,6 +1257,149 @@ async fn run_terminal_connection(
                     }
                     Some(SessionCommand::Input(_)) => {}
                     Some(SessionCommand::AuthResponse { .. }) => {}
+                    Some(SessionCommand::StartForwardProfile { profile, reply }) => {
+                        let forward_id = profile.id;
+                        let existing = if let Some(runtime) = local_forwards.get(&forward_id) {
+                            Some(runtime.info().clone())
+                        } else {
+                            remote_forwards
+                                .lock()
+                                .await
+                                .get(&forward_id)
+                                .map(|target| remote_forward_info(forward_id, target))
+                        };
+                        let reconciliation =
+                            forward_profile_reconciliation(existing.as_ref(), &profile);
+                        let result = async {
+                            match reconciliation {
+                                ForwardProfileReconciliation::Reuse => {
+                                    Ok(existing.expect("reconciliation requires a runtime"))
+                                }
+                                ForwardProfileReconciliation::Start
+                                | ForwardProfileReconciliation::Restart => {
+                                    if matches!(reconciliation, ForwardProfileReconciliation::Restart) {
+                                        if let Some(runtime) = local_forwards.remove(&forward_id) {
+                                            runtime.abort();
+                                        } else if let Some(target) = remote_forwards
+                                            .lock()
+                                            .await
+                                            .get(&forward_id)
+                                            .cloned()
+                                        {
+                                            session
+                                                .lock()
+                                                .await
+                                                .cancel_tcpip_forward(
+                                                    target.bind_host.clone(),
+                                                    target.bind_port.into(),
+                                                )
+                                                .await
+                                                .map_err(|error| anyhow!("停止远程转发失败：{error}"))?;
+                                            remote_forwards.lock().await.remove(&forward_id);
+                                        }
+                                    }
+
+                                    match profile.kind {
+                                        ForwardKind::Local => {
+                                            let (listener, mut info) = start_local_listener(
+                                                forward_id,
+                                                profile.bind_host,
+                                                profile.bind_port,
+                                                profile
+                                                    .target_host
+                                                    .expect("validated local target host"),
+                                                profile
+                                                    .target_port
+                                                    .expect("validated local target port"),
+                                            )
+                                            .await?;
+                                            info.profile_id = Some(forward_id);
+                                            let task = spawn_forward_acceptor(
+                                                listener,
+                                                info.forward_id,
+                                                accepted_tx.clone(),
+                                            );
+                                            local_forwards.insert(
+                                                info.forward_id,
+                                                ForwardRuntime::Local {
+                                                    task,
+                                                    info: info.clone(),
+                                                    target_host: info
+                                                        .target_host
+                                                        .clone()
+                                                        .unwrap_or_default(),
+                                                    target_port: info.target_port.unwrap_or_default(),
+                                                },
+                                            );
+                                            Ok(info)
+                                        }
+                                        ForwardKind::Remote => {
+                                            let bind_host = profile.bind_host;
+                                            let local_host = profile
+                                                .target_host
+                                                .expect("validated remote target host");
+                                            let local_port = profile
+                                                .target_port
+                                                .expect("validated remote target port");
+                                            let info = session
+                                                .lock()
+                                                .await
+                                                .tcpip_forward(
+                                                    bind_host.clone(),
+                                                    profile.bind_port.into(),
+                                                )
+                                                .await
+                                                .map(|port| ForwardInfo {
+                                                    forward_id,
+                                                    kind: "remote".into(),
+                                                    bind_host: bind_host.clone(),
+                                                    bind_port: port as u16,
+                                                    target_host: Some(local_host.clone()),
+                                                    target_port: Some(local_port),
+                                                    profile_id: Some(forward_id),
+                                                })
+                                                .map_err(|error| anyhow!("远程端口转发启动失败：{error}"))?;
+                                            remote_forwards.lock().await.insert(
+                                                info.forward_id,
+                                                RemoteForwardTarget {
+                                                    bind_host: info.bind_host.clone(),
+                                                    bind_port: info.bind_port,
+                                                    local_host,
+                                                    local_port,
+                                                    profile_id: Some(forward_id),
+                                                },
+                                            );
+                                            Ok(info)
+                                        }
+                                        ForwardKind::Dynamic => {
+                                            let (listener, mut info) = start_dynamic_listener(
+                                                forward_id,
+                                                profile.bind_host,
+                                                profile.bind_port,
+                                            )
+                                            .await?;
+                                            info.profile_id = Some(forward_id);
+                                            let task = spawn_forward_acceptor(
+                                                listener,
+                                                info.forward_id,
+                                                accepted_tx.clone(),
+                                            );
+                                            local_forwards.insert(
+                                                info.forward_id,
+                                                ForwardRuntime::Dynamic {
+                                                    task,
+                                                    info: info.clone(),
+                                                },
+                                            );
+                                            Ok(info)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        .await;
+                        let _ = reply.send(result);
+                    }
                     Some(SessionCommand::StartLocalForward { forward_id, bind_host, bind_port, target_host, target_port, reply }) => {
                         let result = start_local_listener(forward_id, bind_host, bind_port, target_host, target_port).await;
                         match result {
@@ -1269,6 +1439,7 @@ async fn run_terminal_connection(
                                 bind_port: port as u16,
                                 target_host: Some(local_host.clone()),
                                 target_port: Some(local_port),
+                                profile_id: None,
                             })
                             .map_err(|error| anyhow!("远程端口转发启动失败：{error}"));
                         if let Ok(info) = &result {
@@ -1277,6 +1448,7 @@ async fn run_terminal_connection(
                                 bind_port: info.bind_port,
                                 local_host,
                                 local_port,
+                                profile_id: None,
                             });
                         }
                         let _ = reply.send(result);
@@ -1291,7 +1463,8 @@ async fn run_terminal_connection(
                             if result.is_ok() { remote_forwards.lock().await.remove(&forward_id); }
                             result
                         } else {
-                            Err(anyhow!("转发不存在"))
+                            // Repeated cleanup is expected during reconnects and profile edits.
+                            Ok(())
                         };
                         let _ = reply.send(result);
                     }
@@ -1300,13 +1473,8 @@ async fn run_terminal_connection(
                             .values()
                             .map(|runtime| runtime.info().clone())
                             .collect::<Vec<_>>();
-                        forwards.extend(remote_forwards.lock().await.iter().map(|(forward_id, target)| ForwardInfo {
-                            forward_id: *forward_id,
-                            kind: "remote".into(),
-                            bind_host: target.bind_host.clone(),
-                            bind_port: target.bind_port,
-                            target_host: Some(target.local_host.clone()),
-                            target_port: Some(target.local_port),
+                        forwards.extend(remote_forwards.lock().await.iter().map(|(forward_id, target)| {
+                            remote_forward_info(*forward_id, target)
                         }));
                         let _ = reply.send(Ok(forwards));
                     }
@@ -1389,6 +1557,18 @@ impl ForwardRuntime {
     }
 }
 
+fn remote_forward_info(forward_id: Uuid, target: &RemoteForwardTarget) -> ForwardInfo {
+    ForwardInfo {
+        forward_id,
+        kind: "remote".into(),
+        bind_host: target.bind_host.clone(),
+        bind_port: target.bind_port,
+        target_host: Some(target.local_host.clone()),
+        target_port: Some(target.local_port),
+        profile_id: target.profile_id,
+    }
+}
+
 fn spawn_forward_acceptor(
     listener: TcpListener,
     forward_id: Uuid,
@@ -1430,6 +1610,7 @@ async fn start_local_listener(
             bind_port: actual_port,
             target_host: Some(target_host),
             target_port: Some(target_port),
+            profile_id: None,
         },
     ))
 }
@@ -1453,6 +1634,7 @@ async fn start_dynamic_listener(
             bind_port: actual_port,
             target_host: None,
             target_port: None,
+            profile_id: None,
         },
     ))
 }
@@ -1466,6 +1648,70 @@ fn validate_forward_endpoint(
         bail!("端口转发参数无效");
     }
     Ok(())
+}
+
+fn validate_forward_profile(profile: &ForwardProfile) -> anyhow::Result<()> {
+    if profile.id.is_nil() {
+        bail!("端口转发配置 ID 无效");
+    }
+    if profile.name.trim().is_empty() {
+        bail!("端口转发配置名称无效");
+    }
+    if profile.bind_host.trim().is_empty() {
+        bail!("端口转发监听地址无效");
+    }
+    match profile.kind {
+        ForwardKind::Local | ForwardKind::Remote => {
+            let target_host = profile
+                .target_host
+                .as_deref()
+                .filter(|host| !host.trim().is_empty())
+                .ok_or_else(|| anyhow!("端口转发目标地址无效"))?;
+            let target_port = profile
+                .target_port
+                .filter(|port| *port > 0)
+                .ok_or_else(|| anyhow!("端口转发目标端口无效"))?;
+            if matches!(profile.kind, ForwardKind::Local) {
+                validate_forward_endpoint(&profile.bind_host, target_host, target_port)?;
+            }
+        }
+        ForwardKind::Dynamic => {}
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForwardProfileReconciliation {
+    Start,
+    Reuse,
+    Restart,
+}
+
+fn forward_profile_reconciliation(
+    existing: Option<&ForwardInfo>,
+    profile: &ForwardProfile,
+) -> ForwardProfileReconciliation {
+    match existing {
+        None => ForwardProfileReconciliation::Start,
+        Some(info) if forward_info_matches_profile(info, profile) => {
+            ForwardProfileReconciliation::Reuse
+        }
+        Some(_) => ForwardProfileReconciliation::Restart,
+    }
+}
+
+fn forward_info_matches_profile(info: &ForwardInfo, profile: &ForwardProfile) -> bool {
+    let expected_kind = match profile.kind {
+        ForwardKind::Local => "local",
+        ForwardKind::Remote => "remote",
+        ForwardKind::Dynamic => "dynamic",
+    };
+    info.profile_id == Some(profile.id)
+        && info.kind == expected_kind
+        && info.bind_host == profile.bind_host
+        && (profile.bind_port == 0 || info.bind_port == profile.bind_port)
+        && info.target_host.as_deref() == profile.target_host.as_deref()
+        && info.target_port == profile.target_port
 }
 
 async fn proxy_channel_with_tcp(
@@ -1834,6 +2080,96 @@ mod tests {
         assert!(validate_forward_endpoint("", "127.0.0.1", 22).is_err());
         assert!(validate_forward_endpoint("127.0.0.1", "", 22).is_err());
         assert!(validate_forward_endpoint("127.0.0.1", "127.0.0.1", 0).is_err());
+    }
+
+    #[test]
+    fn persisted_forward_profiles_validate_and_match_runtime_info() {
+        let profile = ForwardProfile {
+            id: Uuid::from_u128(1),
+            name: "api tunnel".into(),
+            kind: ForwardKind::Local,
+            bind_host: "127.0.0.1".into(),
+            bind_port: 0,
+            target_host: Some("10.0.0.5".into()),
+            target_port: Some(8080),
+            auto_start: true,
+        };
+        assert!(validate_forward_profile(&profile).is_ok());
+        let runtime = ForwardInfo {
+            forward_id: profile.id,
+            kind: "local".into(),
+            bind_host: profile.bind_host.clone(),
+            bind_port: 41_231,
+            target_host: profile.target_host.clone(),
+            target_port: profile.target_port,
+            profile_id: Some(profile.id),
+        };
+        assert!(forward_info_matches_profile(&runtime, &profile));
+
+        let mut changed = profile.clone();
+        changed.target_port = Some(8081);
+        assert!(!forward_info_matches_profile(&runtime, &changed));
+    }
+
+    #[test]
+    fn persisted_forward_profile_reconciliation_reuses_or_restarts_deterministically() {
+        let profile = ForwardProfile {
+            id: Uuid::from_u128(3),
+            name: "api tunnel".into(),
+            kind: ForwardKind::Local,
+            bind_host: "127.0.0.1".into(),
+            bind_port: 0,
+            target_host: Some("10.0.0.5".into()),
+            target_port: Some(8080),
+            auto_start: true,
+        };
+        let runtime = ForwardInfo {
+            forward_id: profile.id,
+            kind: "local".into(),
+            bind_host: profile.bind_host.clone(),
+            bind_port: 41_231,
+            target_host: profile.target_host.clone(),
+            target_port: profile.target_port,
+            profile_id: Some(profile.id),
+        };
+
+        assert_eq!(
+            forward_profile_reconciliation(None, &profile),
+            ForwardProfileReconciliation::Start
+        );
+        assert_eq!(
+            forward_profile_reconciliation(Some(&runtime), &profile),
+            ForwardProfileReconciliation::Reuse
+        );
+
+        let mut changed = profile;
+        changed.target_port = Some(8081);
+        assert_eq!(
+            forward_profile_reconciliation(Some(&runtime), &changed),
+            ForwardProfileReconciliation::Restart
+        );
+    }
+
+    #[test]
+    fn persisted_forward_profiles_reject_missing_required_fields() {
+        let mut profile = ForwardProfile {
+            id: Uuid::from_u128(2),
+            name: "invalid".into(),
+            kind: ForwardKind::Remote,
+            bind_host: "127.0.0.1".into(),
+            bind_port: 0,
+            target_host: None,
+            target_port: None,
+            auto_start: false,
+        };
+        assert!(validate_forward_profile(&profile).is_err());
+        profile.kind = ForwardKind::Dynamic;
+        assert!(validate_forward_profile(&profile).is_ok());
+        profile.name = "   ".into();
+        assert!(validate_forward_profile(&profile).is_err());
+        profile.name = "valid".into();
+        profile.id = Uuid::nil();
+        assert!(validate_forward_profile(&profile).is_err());
     }
 
     #[test]

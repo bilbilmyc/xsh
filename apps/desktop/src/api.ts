@@ -3,6 +3,7 @@ import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import type {
   BackupImportSummary,
   ForwardInfo,
+  ForwardProfile,
   ImportSummary,
   SshConfigEntry,
   SshAgentKey,
@@ -87,6 +88,8 @@ export const api = {
     invoke<ForwardInfo>("start_dynamic_forward", { connectionId, bindHost, bindPort }),
   startRemoteForward: (connectionId: Uuid, bindHost: string, bindPort: number, localHost: string, localPort: number) =>
     invoke<ForwardInfo>("start_remote_forward", { connectionId, bindHost, bindPort, localHost, localPort }),
+  startForwardProfile: (connectionId: Uuid, profile: ForwardProfile) =>
+    invoke<ForwardInfo>("start_forward_profile", { connectionId, profile }),
   stopForward: (connectionId: Uuid, forwardId: Uuid) =>
     invoke<void>("stop_forward", { connectionId, forwardId }),
   listForwards: (connectionId: Uuid) =>

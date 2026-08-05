@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     notes TEXT,
     favorite INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    forward_profiles_json TEXT NOT NULL DEFAULT '[]'
 );
 
 CREATE TABLE IF NOT EXISTS session_tags (

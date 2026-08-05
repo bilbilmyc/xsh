@@ -3380,11 +3380,31 @@ body.resizing-terminal-split .split-divider.horizontal * { cursor: row-resize !i
 
 .forward-form-actions {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .forward-form-actions .primary-button {
   min-width: 112px;
+}
+
+.forward-profile-options {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  padding: 2px 0;
+}
+
+.forward-profile-options .check-row {
+  color: #91a3b4;
+  font-size: 11px;
+}
+
+.forward-profile-options .check-row input:disabled {
+  opacity: 0.5;
 }
 
 .forward-running-card {
@@ -3423,6 +3443,42 @@ body.resizing-terminal-split .split-divider.horizontal * { cursor: row-resize !i
   color: #72879a;
   font: 11.5px/1.45 var(--mono-font);
   overflow-wrap: anywhere;
+}
+
+.forward-item-copy small {
+  color: #668091;
+  font-size: 10.5px;
+}
+
+.forward-item-actions {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.forward-item-actions button {
+  width: 27px;
+  height: 27px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  cursor: pointer;
+  color: #7f98a9;
+  background: transparent;
+}
+
+.forward-item-actions button:hover {
+  border-color: rgba(57, 184, 214, 0.28);
+  color: #9be2ef;
+  background: rgba(57, 184, 214, 0.1);
+}
+
+.forward-item-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .forward-stop-button {
@@ -3501,6 +3557,14 @@ body.resizing-terminal-split .split-divider.horizontal * { cursor: row-resize !i
 
   .forward-route-preview small {
     grid-column: 1;
+  }
+
+  .forward-item {
+    align-items: flex-start;
+  }
+
+  .forward-item-actions {
+    margin-top: -2px;
   }
 }
 
@@ -4896,6 +4960,45 @@ body.resizing-terminal-split .split-divider.horizontal * { cursor: row-resize !i
 :root[data-theme="light"] .forward-form-grid input {
   color: var(--text-strong);
   background: #ffffff;
+}
+
+:root[data-theme="light"] .port-forward-body {
+  background: #f2f7f9;
+}
+
+:root[data-theme="light"] .forward-config-card,
+:root[data-theme="light"] .forward-running-card {
+  border-color: #d2e0e6;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(36, 65, 78, 0.04);
+}
+
+:root[data-theme="light"] .forward-section-heading strong,
+:root[data-theme="light"] .forward-list-heading strong,
+:root[data-theme="light"] .forward-item-copy strong {
+  color: #203847;
+}
+
+:root[data-theme="light"] .forward-section-heading > div > span,
+:root[data-theme="light"] .forward-list-heading > div > span,
+:root[data-theme="light"] .forward-profile-options .check-row,
+:root[data-theme="light"] .forward-item-copy small {
+  color: #718692;
+}
+
+:root[data-theme="light"] .forward-item {
+  border-color: #d5e2e8;
+  background: #f8fbfc;
+}
+
+:root[data-theme="light"] .forward-item-actions button {
+  color: #55717e;
+}
+
+:root[data-theme="light"] .forward-item-actions button:hover {
+  border-color: var(--control-border-hover);
+  color: var(--control-text-strong);
+  background: var(--control-bg-hover);
 }
 
 :root[data-theme="light"] .auth-challenge-card strong,

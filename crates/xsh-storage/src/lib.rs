@@ -5,8 +5,8 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 use uuid::Uuid;
 use xsh_domain::{
-    AuthenticationMethod, GroupId, KnownHost, SavedSession, SessionBundle, SessionDraft,
-    SessionGroup, SessionGroupDraft, SessionId, TerminalProfile,
+    AuthenticationMethod, ForwardProfile, GroupId, KnownHost, SavedSession, SessionBundle,
+    SessionDraft, SessionGroup, SessionGroupDraft, SessionId, TerminalProfile,
 };
 
 const INITIAL_MIGRATION: &str = include_str!("../migrations/0001_initial.sql");
@@ -47,7 +47,7 @@ impl SessionRepository {
 
     fn from_connection(connection: Connection) -> Result<Self> {
         connection.execute_batch(INITIAL_MIGRATION)?;
-        ensure_proxy_jump_columns(&connection)?;
+        ensure_session_columns(&connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
@@ -136,7 +136,7 @@ impl SessionRepository {
                  SELECT id, group_id, name, host, port, username, proxy_jump, proxy_jump_username,
                  proxy_jump_authentication_json, authentication_json, terminal_json, initial_directory, startup_command,
                  keepalive_seconds, auto_reconnect,
-                 environment, color, notes, favorite, created_at, updated_at
+                 environment, color, notes, favorite, created_at, updated_at, forward_profiles_json
                  FROM sessions
                  WHERE group_id IN (SELECT id FROM descendants)
                  ORDER BY favorite DESC, name COLLATE NOCASE ASC",
@@ -191,7 +191,7 @@ impl SessionRepository {
             "SELECT id, group_id, name, host, port, username, proxy_jump, proxy_jump_username,
              proxy_jump_authentication_json, authentication_json, terminal_json, initial_directory, startup_command,
              keepalive_seconds, auto_reconnect,
-             environment, color, notes, favorite, created_at, updated_at
+             environment, color, notes, favorite, created_at, updated_at, forward_profiles_json
              FROM sessions ORDER BY favorite DESC, name COLLATE NOCASE ASC",
         )?;
         let raw = statement
@@ -216,7 +216,7 @@ impl SessionRepository {
                 "SELECT id, group_id, name, host, port, username, proxy_jump, proxy_jump_username,
                  proxy_jump_authentication_json, authentication_json, terminal_json, initial_directory, startup_command,
                  keepalive_seconds, auto_reconnect,
-                 environment, color, notes, favorite, created_at, updated_at
+                 environment, color, notes, favorite, created_at, updated_at, forward_profiles_json
                  FROM sessions WHERE id = ?1",
                 params![id.to_string()],
                 map_session_row,
@@ -240,6 +240,7 @@ impl SessionRepository {
             proxy_jump_authentication: draft.proxy_jump_authentication,
             authentication: draft.authentication,
             terminal: draft.terminal,
+            forward_profiles: draft.forward_profiles,
             initial_directory: draft.initial_directory,
             startup_command: draft.startup_command,
             keepalive_seconds: draft.keepalive_seconds,
@@ -276,6 +277,7 @@ impl SessionRepository {
             proxy_jump_authentication: draft.proxy_jump_authentication,
             authentication: draft.authentication,
             terminal: draft.terminal,
+            forward_profiles: draft.forward_profiles,
             initial_directory: draft.initial_directory,
             startup_command: draft.startup_command,
             keepalive_seconds: draft.keepalive_seconds,
@@ -296,7 +298,7 @@ impl SessionRepository {
              proxy_jump_authentication_json = ?9, authentication_json = ?10, terminal_json = ?11,
              initial_directory = ?12, startup_command = ?13, keepalive_seconds = ?14, auto_reconnect = ?15,
              environment = ?16, color = ?17, notes = ?18, favorite = ?19,
-             updated_at = ?20 WHERE id = ?1",
+             updated_at = ?20, forward_profiles_json = ?21 WHERE id = ?1",
             session_params(&session),
         )?;
         if changed == 0 {
@@ -468,6 +470,11 @@ fn map_session_row(row: &Row<'_>) -> rusqlite::Result<SavedSession> {
         tags: Vec::new(),
         created_at: parse_datetime(row.get::<_, String>(19)?)?,
         updated_at: parse_datetime(row.get::<_, String>(20)?)?,
+        forward_profiles: row
+            .get::<_, Option<String>>(21)?
+            .map(|value| serde_json::from_str::<Vec<ForwardProfile>>(&value).map_err(to_sql_error))
+            .transpose()?
+            .unwrap_or_default(),
     })
 }
 
@@ -475,9 +482,10 @@ fn insert_session(connection: &Connection, session: &SavedSession) -> Result<()>
     connection.execute(
         "INSERT INTO sessions
          (id, group_id, name, host, port, username, proxy_jump, proxy_jump_username,
-          proxy_jump_authentication_json, authentication_json, terminal_json, initial_directory, startup_command,
-          keepalive_seconds, auto_reconnect, environment, color, notes, favorite, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+         proxy_jump_authentication_json, authentication_json, terminal_json, initial_directory, startup_command,
+          keepalive_seconds, auto_reconnect, environment, color, notes, favorite, created_at, updated_at,
+          forward_profiles_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
         params![
             session.id.to_string(),
             session.group_id.map(|id| id.to_string()),
@@ -504,12 +512,13 @@ fn insert_session(connection: &Connection, session: &SavedSession) -> Result<()>
             session.favorite,
             session.created_at.to_rfc3339(),
             session.updated_at.to_rfc3339(),
+            serde_json::to_string(&session.forward_profiles)?,
         ],
     )?;
     Ok(())
 }
 
-fn session_params(session: &SavedSession) -> [rusqlite::types::Value; 20] {
+fn session_params(session: &SavedSession) -> [rusqlite::types::Value; 21] {
     use rusqlite::types::Value;
     [
         Value::Text(session.id.to_string()),
@@ -567,10 +576,14 @@ fn session_params(session: &SavedSession) -> [rusqlite::types::Value; 20] {
             .unwrap_or(Value::Null),
         Value::Integer(i64::from(session.favorite)),
         Value::Text(session.updated_at.to_rfc3339()),
+        Value::Text(
+            serde_json::to_string(&session.forward_profiles)
+                .expect("serializable forward profiles"),
+        ),
     ]
 }
 
-fn ensure_proxy_jump_columns(connection: &Connection) -> Result<()> {
+fn ensure_session_columns(connection: &Connection) -> Result<()> {
     let columns = connection
         .prepare("PRAGMA table_info(sessions)")?
         .query_map([], |row| row.get::<_, String>(1))?
@@ -591,6 +604,10 @@ fn ensure_proxy_jump_columns(connection: &Connection) -> Result<()> {
         (
             "startup_command",
             "ALTER TABLE sessions ADD COLUMN startup_command TEXT",
+        ),
+        (
+            "forward_profiles_json",
+            "ALTER TABLE sessions ADD COLUMN forward_profiles_json TEXT NOT NULL DEFAULT '[]'",
         ),
     ] {
         if !columns.iter().any(|column| column == name) {
@@ -671,6 +688,7 @@ mod tests {
                 credential_ref: Some("session/test".into()),
             },
             terminal: TerminalProfile::default(),
+            forward_profiles: Vec::new(),
             initial_directory: Some("/srv/app".into()),
             startup_command: Some("uname -a".into()),
             keepalive_seconds: 30,
@@ -726,6 +744,110 @@ mod tests {
 
         repository.delete_session(created.id).unwrap();
         assert!(repository.get_session(created.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn forward_profiles_round_trip_through_crud_and_export() {
+        let repository = SessionRepository::in_memory().unwrap();
+        let profile = ForwardProfile {
+            id: Uuid::from_u128(1),
+            name: "API tunnel".into(),
+            kind: xsh_domain::ForwardKind::Local,
+            bind_host: "127.0.0.1".into(),
+            bind_port: 18_080,
+            target_host: Some("127.0.0.1".into()),
+            target_port: Some(8_080),
+            auto_start: true,
+        };
+        let mut session_draft = draft(None);
+        session_draft.forward_profiles = vec![profile.clone()];
+
+        let created = repository.create_session(session_draft).unwrap();
+        assert_eq!(created.forward_profiles, vec![profile.clone()]);
+        assert_eq!(
+            repository
+                .get_session(created.id)
+                .unwrap()
+                .unwrap()
+                .forward_profiles,
+            vec![profile.clone()]
+        );
+
+        let mut updated_draft = draft(None);
+        updated_draft.name = "Updated API".into();
+        updated_draft.forward_profiles = vec![ForwardProfile {
+            kind: xsh_domain::ForwardKind::Dynamic,
+            name: "SOCKS".into(),
+            bind_host: "127.0.0.1".into(),
+            bind_port: 10_800,
+            target_host: None,
+            target_port: None,
+            auto_start: false,
+            ..profile.clone()
+        }];
+        let updated = repository
+            .update_session(created.id, updated_draft)
+            .unwrap();
+        assert_eq!(
+            repository
+                .list_sessions()
+                .unwrap()
+                .into_iter()
+                .find(|session| session.id == created.id)
+                .unwrap()
+                .forward_profiles,
+            updated.forward_profiles
+        );
+
+        let bundle = repository.export_bundle(false).unwrap();
+        assert_eq!(
+            bundle.sessions[0].forward_profiles,
+            updated.forward_profiles
+        );
+    }
+
+    #[test]
+    fn legacy_sessions_without_forward_profiles_get_an_empty_list() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE sessions (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    group_id TEXT,
+                    name TEXT NOT NULL,
+                    host TEXT NOT NULL,
+                    port INTEGER NOT NULL,
+                    username TEXT NOT NULL,
+                    proxy_jump TEXT,
+                    proxy_jump_username TEXT,
+                    proxy_jump_authentication_json TEXT,
+                    authentication_json TEXT NOT NULL,
+                    terminal_json TEXT NOT NULL,
+                    initial_directory TEXT,
+                    startup_command TEXT,
+                    keepalive_seconds INTEGER NOT NULL DEFAULT 30,
+                    auto_reconnect INTEGER NOT NULL DEFAULT 0,
+                    environment TEXT,
+                    color TEXT,
+                    notes TEXT,
+                    favorite INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );",
+            )
+            .unwrap();
+
+        let repository = SessionRepository::from_connection(connection).unwrap();
+        let session = repository.create_session(draft(None)).unwrap();
+        assert!(session.forward_profiles.is_empty());
+        assert!(
+            repository
+                .get_session(session.id)
+                .unwrap()
+                .unwrap()
+                .forward_profiles
+                .is_empty()
+        );
     }
 
     #[test]

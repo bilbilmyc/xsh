@@ -6,7 +6,7 @@
 - SQLite 会话目录与 XSH AES-256-GCM 自建凭据库
 - 密码、OpenSSH Key、SSH Agent、keyboard-interactive 认证
 - TOFU Known Hosts、SHA-256 指纹和 Host Key 变化阻断
-- `~/.ssh/config` 导入、连接诊断、错误分类、脱敏诊断摘要、ProxyJump 和端口转发
+- `~/.ssh/config` 导入、连接诊断、错误分类、脱敏诊断摘要、ProxyJump 和端口转发；端口转发支持按会话保存 profile、自动启动和重连恢复
 - 多标签常驻 SSH、标签锁定与关闭保护、自定义标签颜色、左右/上下分屏、启动恢复、命名工作区、密码加密工作区导入/导出和命令广播
 - 自动重连、Keepalive、日志、搜索、字体缩放和可配置剪贴板行为
 - 命令中心、命令历史、最近连接、快捷命令分组/搜索/快捷键

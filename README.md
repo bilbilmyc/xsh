@@ -32,7 +32,7 @@ XSH 面向需要长期管理多台服务器的开发者和运维人员：用会�
 - 密码、OpenSSH 私钥、加密私钥、SSH Agent 和 keyboard-interactive 认证
 - SHA-256 Host Key 指纹、TOFU 信任流程和 Host Key 变化阻断
 - ProxyJump
-- 本地、远程和动态端口转发
+- 本地、远程和动态端口转发；支持按会话保存隧道配置、自动启动和 SSH 重连恢复
 - 支持 UTF-8 / CJK、256 色和 True Color
 
 ### SFTP

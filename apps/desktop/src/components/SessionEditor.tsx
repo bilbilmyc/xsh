@@ -349,6 +349,7 @@ export function SessionEditor({
           .map((tag) => tag.trim())
           .filter(Boolean),
         favorite,
+        forwardProfiles: session?.forwardProfiles ?? [],
       };
       const saved = session
         ? await api.updateSession(session.id, draft)

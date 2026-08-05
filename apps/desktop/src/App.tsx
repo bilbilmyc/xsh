@@ -50,7 +50,7 @@ import {
   type WorkspacePaneLayout,
   type WorkspaceSnapshot,
 } from "./workspace-state";
-import { defaultTerminalProfile, type SavedSession, type SessionDraft, type SessionGroup, type SessionGroupDraft, type SshConfigEntry, type SshDiagnosticReport } from "./types";
+import { defaultTerminalProfile, type ForwardProfile, type SavedSession, type SessionDraft, type SessionGroup, type SessionGroupDraft, type SshConfigEntry, type SshDiagnosticReport } from "./types";
 import "./App.css";
 
 const TerminalPane = lazy(() =>
@@ -269,6 +269,7 @@ function App() {
   activeTabIdRef.current = activeTabId;
   secondaryTabIdRef.current = secondaryTabId;
   paneLayoutRef.current = paneLayout;
+
 
   const initialConnectionState = (currentTabs: TerminalTab[]) =>
     currentTabs.filter((tab) => isConnectionInFlight(tab.state)).length < MAX_CONCURRENT_CONNECTIONS
@@ -973,8 +974,16 @@ function App() {
     notes: session.notes,
     tags: session.tags,
     favorite: session.favorite,
+    forwardProfiles: session.forwardProfiles ?? [],
     ...overrides,
   });
+
+  const updateForwardProfiles = async (session: SavedSession, forwardProfiles: ForwardProfile[]) => {
+    const saved = await api.updateSession(session.id, sessionDraft(session, { forwardProfiles }));
+    setSessions((current) => current.map((candidate) => candidate.id === saved.id ? saved : candidate));
+    setTabs((current) => current.map((tab) => tab.session.id === saved.id ? { ...tab, session: saved } : tab));
+    setToast(`会话“${saved.name}”的隧道配置已保存。`);
+  };
 
   const moveSessionToGroup = async (session: SavedSession, groupId: string | null) => {
     if (session.groupId === groupId) return;
@@ -1178,6 +1187,7 @@ function App() {
         notes: existing?.notes ?? null,
         tags: Array.from(new Set([...(existing?.tags ?? []), "ssh-config"])),
         favorite: existing?.favorite ?? false,
+        forwardProfiles: existing?.forwardProfiles ?? [],
       };
 
       if (existing) {
@@ -1641,9 +1651,10 @@ function App() {
       {portForwardVisible && activeTab && connectionIds[activeTab.id] && (
         <PortForwardModal
           connectionId={connectionIds[activeTab.id]!}
-          sessionName={activeTab.session.name}
+          session={activeTab.session}
           onClose={() => setPortForwardVisible(false)}
           onToast={setToast}
+          onUpdateSession={updateForwardProfiles}
         />
       )}
 

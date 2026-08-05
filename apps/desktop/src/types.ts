@@ -72,6 +72,7 @@ export interface SavedSession {
   notes: string | null;
   tags: string[];
   favorite: boolean;
+  forwardProfiles: ForwardProfile[];
   createdAt: string;
   updatedAt: string;
 }
@@ -96,6 +97,7 @@ export interface SessionDraft {
   notes: string | null;
   tags: string[];
   favorite: boolean;
+  forwardProfiles: ForwardProfile[];
 }
 
 export interface SessionGroupDraft {
@@ -258,11 +260,25 @@ export type EndpointDiagnosticIssue =
 
 export interface ForwardInfo {
   forwardId: Uuid;
-  kind: "local" | "remote" | "dynamic";
+  kind: ForwardKind;
   bindHost: string;
   bindPort: number;
   targetHost: string | null;
   targetPort: number | null;
+  profileId: Uuid | null;
+}
+
+export type ForwardKind = "local" | "remote" | "dynamic";
+
+export interface ForwardProfile {
+  id: Uuid;
+  name: string;
+  kind: ForwardKind;
+  bindHost: string;
+  bindPort: number;
+  targetHost: string | null;
+  targetPort: number | null;
+  autoStart: boolean;
 }
 
 export interface SshDiagnosticReport {

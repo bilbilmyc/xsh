@@ -15,9 +15,10 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{AppHandle, Manager, State, WindowEvent};
 use uuid::Uuid;
 use xsh_domain::{
-    AuthenticationMethod, ConnectionId, HostKeyApproval, HostKeyRole, KnownHost, RemoteEntry,
-    SavedSession, SessionBundle, SessionDraft, SessionGroup, SessionGroupDraft, SessionId,
-    SftpTransferPolicy, TerminalEvent, TransferEvent, TransferId, TransferListSnapshot,
+    AuthenticationMethod, ConnectionId, ConnectionState, ForwardProfile, HostKeyApproval,
+    HostKeyRole, KnownHost, RemoteEntry, SavedSession, SessionBundle, SessionDraft, SessionGroup,
+    SessionGroupDraft, SessionId, SftpTransferPolicy, TerminalEvent, TransferEvent, TransferId,
+    TransferListSnapshot,
 };
 use xsh_security::{
     BackupImportSummary, CredentialKind, CredentialRecord, CredentialStore, LocalCredentialStore,
@@ -316,6 +317,12 @@ async fn connect_terminal(
         .find_known_host(&session.host, session.port)
         .map_err(display_error)?;
     let proxy_jump_known_host = find_proxy_jump_known_host(&state, session.proxy_jump.as_deref())?;
+    let auto_start_profiles = session
+        .forward_profiles
+        .iter()
+        .filter(|profile| profile.auto_start)
+        .cloned()
+        .collect::<Vec<_>>();
     let subscription = state
         .ssh
         .connect(ConnectOptions {
@@ -342,10 +349,26 @@ async fn connect_terminal(
     let ssh = state.ssh.clone();
     tauri::async_runtime::spawn(async move {
         while let Some(event) = events.recv().await {
+            let connected = matches!(
+                &event,
+                TerminalEvent::StateChanged(ConnectionState::Connected)
+            );
             if on_event.send(event).is_err() {
                 events.close();
                 let _ = ssh.disconnect(connection_id).await;
                 break;
+            }
+            if connected && !auto_start_profiles.is_empty() {
+                let ssh = ssh.clone();
+                let profiles = auto_start_profiles.clone();
+                tauri::async_runtime::spawn(async move {
+                    for profile in profiles {
+                        if let Err(error) = ssh.start_forward_profile(connection_id, profile).await
+                        {
+                            tracing::warn!(%error, %connection_id, "自动启动持久化端口转发失败");
+                        }
+                    }
+                });
             }
         }
     });
@@ -443,6 +466,19 @@ async fn start_remote_forward(
     state
         .ssh
         .start_remote_forward(connection_id, bind_host, bind_port, local_host, local_port)
+        .await
+        .map_err(display_error)
+}
+
+#[tauri::command]
+async fn start_forward_profile(
+    state: State<'_, AppState>,
+    connection_id: ConnectionId,
+    profile: ForwardProfile,
+) -> CommandResult<ForwardInfo> {
+    state
+        .ssh
+        .start_forward_profile(connection_id, profile)
         .await
         .map_err(display_error)
 }
@@ -1043,6 +1079,7 @@ async fn import_sessions(
                 proxy_jump_authentication: session.proxy_jump_authentication.clone(),
                 authentication: session.authentication.clone(),
                 terminal: session.terminal.clone(),
+                forward_profiles: session.forward_profiles.clone(),
                 initial_directory: session.initial_directory.clone(),
                 startup_command: session.startup_command.clone(),
                 keepalive_seconds: session.keepalive_seconds,
@@ -1631,6 +1668,7 @@ pub fn run() {
             start_local_forward,
             start_dynamic_forward,
             start_remote_forward,
+            start_forward_profile,
             stop_forward,
             list_forwards,
             terminal_resize,
@@ -1699,6 +1737,7 @@ mod tests {
             proxy_jump_authentication,
             authentication,
             terminal: Default::default(),
+            forward_profiles: Vec::new(),
             initial_directory: None,
             startup_command: None,
             keepalive_seconds: 30,
