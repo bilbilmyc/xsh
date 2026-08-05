@@ -17,7 +17,7 @@ use uuid::Uuid;
 use xsh_domain::{
     AuthenticationMethod, ConnectionId, HostKeyApproval, HostKeyRole, KnownHost, RemoteEntry,
     SavedSession, SessionBundle, SessionDraft, SessionGroup, SessionGroupDraft, SessionId,
-    SftpTransferPolicy, TerminalEvent, TransferEvent, TransferId,
+    SftpTransferPolicy, TerminalEvent, TransferEvent, TransferId, TransferListSnapshot,
 };
 use xsh_security::{
     BackupImportSummary, CredentialKind, CredentialRecord, CredentialStore, LocalCredentialStore,
@@ -562,7 +562,7 @@ async fn release_sftp_connection(
 }
 
 #[tauri::command]
-async fn list_transfers(state: State<'_, AppState>) -> CommandResult<Vec<TransferEvent>> {
+async fn list_transfers(state: State<'_, AppState>) -> CommandResult<TransferListSnapshot> {
     Ok(state.sftp.list_transfers().await)
 }
 

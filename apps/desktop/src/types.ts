@@ -186,6 +186,12 @@ export type TransferStatus =
   | "cancelled"
   | "failed";
 
+export type TransferWaitingReason =
+  | "globalConcurrency"
+  | "perHostConcurrency"
+  | "queueOrder"
+  | "userPaused";
+
 export interface TransferEvent {
   transferId: Uuid;
   connectionId: Uuid;
@@ -198,6 +204,25 @@ export interface TransferEvent {
   totalBytes: number | null;
   speedBytesPerSecond: number | null;
   error: string | null;
+  submissionSequence: number;
+  queuePosition: number | null;
+  waitingReason: TransferWaitingReason | null;
+}
+
+export interface TransferRuntimeSummary {
+  occupiedSlots: number;
+  globalLimit: number;
+  running: number;
+  queued: number;
+  paused: number;
+  cancelling: number;
+  aggregateUploadBytesPerSecond: number;
+  aggregateDownloadBytesPerSecond: number;
+}
+
+export interface TransferListSnapshot {
+  transfers: TransferEvent[];
+  summary: TransferRuntimeSummary;
 }
 
 export interface KnownHost {

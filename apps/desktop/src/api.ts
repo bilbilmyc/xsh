@@ -17,6 +17,7 @@ import type {
   SshKeyDefaults,
   TerminalEvent,
   TransferEvent,
+  TransferListSnapshot,
   SftpConnectResponse,
   SftpTransferPolicy,
   Uuid,
@@ -104,7 +105,7 @@ export const api = {
     invoke<void>("disconnect_sftp", { connectionId }),
   releaseSftpConnection: (connectionId: Uuid) =>
     invoke<void>("release_sftp_connection", { connectionId }),
-  listTransfers: () => invoke<TransferEvent[]>("list_transfers"),
+  listTransfers: () => invoke<TransferListSnapshot>("list_transfers"),
   pauseTransfer: (transferId: Uuid) => invoke<TransferEvent>("pause_transfer", { transferId }),
   resumeTransfer: (transferId: Uuid) => invoke<TransferEvent>("resume_transfer", { transferId }),
   removeTransfer: (transferId: Uuid) => invoke<void>("remove_transfer", { transferId }),

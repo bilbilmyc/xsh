@@ -2,20 +2,39 @@ import { useEffect, useMemo, useState } from "react";
 import { Pause, Play, RefreshCw, Trash2, X } from "lucide-react";
 import { api } from "../api";
 import { isActiveTransferStatus } from "../sftp-transfer-scope";
-import type { TransferEvent } from "../types";
+import { formatTransferWaitingState, sortTransfersForDisplay } from "../transfer-queue";
+import type { TransferEvent, TransferListSnapshot } from "../types";
 
 interface TransferManagerModalProps {
   onClose: () => void;
   onToast?: (message: string) => void;
 }
 
+const emptySnapshot: TransferListSnapshot = {
+  transfers: [],
+  summary: {
+    occupiedSlots: 0,
+    globalLimit: 0,
+    running: 0,
+    queued: 0,
+    paused: 0,
+    cancelling: 0,
+    aggregateUploadBytesPerSecond: 0,
+    aggregateDownloadBytesPerSecond: 0,
+  },
+};
+
 export function TransferManagerModal({ onClose, onToast }: TransferManagerModalProps) {
-  const [transfers, setTransfers] = useState<TransferEvent[]>([]);
+  const [snapshot, setSnapshot] = useState<TransferListSnapshot>(emptySnapshot);
   const [error, setError] = useState<string | null>(null);
+  const transfers = useMemo(
+    () => sortTransfersForDisplay(snapshot.transfers),
+    [snapshot.transfers],
+  );
 
   const refresh = async () => {
     try {
-      setTransfers(await api.listTransfers());
+      setSnapshot(await api.listTransfers());
       setError(null);
     } catch (caught) {
       setError(`读取传输任务失败：${String(caught)}`);
@@ -28,7 +47,7 @@ export function TransferManagerModal({ onClose, onToast }: TransferManagerModalP
       try {
         const next = await api.listTransfers();
         if (!disposed) {
-          setTransfers(next);
+          setSnapshot(next);
           setError(null);
         }
       } catch (caught) {
@@ -43,19 +62,17 @@ export function TransferManagerModal({ onClose, onToast }: TransferManagerModalP
     };
   }, []);
 
-  const counts = useMemo(() => ({
-    running: transfers.filter((transfer) => transfer.status === "running").length,
-    queued: transfers.filter((transfer) => transfer.status === "queued").length,
-    paused: transfers.filter((transfer) => transfer.status === "paused").length,
-    cancelling: transfers.filter((transfer) => transfer.status === "cancelling").length,
-  }), [transfers]);
-  const activeCount = counts.running + counts.queued + counts.paused + counts.cancelling;
+  const { summary } = snapshot;
+  const activeCount = summary.running + summary.queued + summary.paused + summary.cancelling;
 
   const update = (event: TransferEvent) => {
-    setTransfers((current) => {
-      const next = current.filter((transfer) => transfer.transferId !== event.transferId);
-      return [...next, event];
-    });
+    setSnapshot((current) => ({
+      ...current,
+      transfers: [
+        ...current.transfers.filter((transfer) => transfer.transferId !== event.transferId),
+        event,
+      ],
+    }));
   };
 
   const control = async (transfer: TransferEvent, action: "pause" | "resume" | "cancel") => {
@@ -95,7 +112,7 @@ export function TransferManagerModal({ onClose, onToast }: TransferManagerModalP
           <div>
             <h2>传输管理</h2>
             <p>{activeCount > 0
-              ? `运行 ${counts.running} · 等待 ${counts.queued} · 暂停 ${counts.paused} · 取消中 ${counts.cancelling}`
+              ? `运行 ${summary.running}/${summary.globalLimit} · 等待 ${summary.queued} · 暂停 ${summary.paused} · 取消中 ${summary.cancelling} · ↑ ${formatBytes(summary.aggregateUploadBytesPerSecond)}/s · ↓ ${formatBytes(summary.aggregateDownloadBytesPerSecond)}/s`
               : "没有活动传输任务"}</p>
           </div>
           <div className="transfer-manager-header-actions">
@@ -111,12 +128,13 @@ export function TransferManagerModal({ onClose, onToast }: TransferManagerModalP
           ) : transfers.map((transfer) => {
             const percent = transfer.totalBytes ? Math.min(100, Math.round((transfer.transferredBytes / transfer.totalBytes) * 100)) : 0;
             const active = isActiveTransferStatus(transfer.status);
+            const waiting = formatTransferWaitingState(transfer);
             return (
               <article className="transfer-manager-item" key={transfer.transferId}>
                 <div className="transfer-manager-copy">
                   <strong>{transfer.direction === "upload" ? "上传" : "下载"} · {transfer.remotePath.split("/").pop()}</strong>
                   <span title={`${transfer.endpoint} · ${transfer.localPath}`}>{transfer.endpoint} · {transfer.localPath}</span>
-                  <small>{formatStatus(transfer.status)} · {percent}% · {formatBytes(transfer.transferredBytes)}{transfer.totalBytes ? ` / ${formatBytes(transfer.totalBytes)}` : ""}{transfer.status === "running" && transfer.speedBytesPerSecond !== null ? ` · ${formatBytes(transfer.speedBytesPerSecond)}/s` : ""}</small>
+                  <small>{formatStatus(transfer.status)}{waiting ? ` · ${waiting}` : ""} · {percent}% · {formatBytes(transfer.transferredBytes)}{transfer.totalBytes ? ` / ${formatBytes(transfer.totalBytes)}` : ""}{transfer.status === "running" && transfer.speedBytesPerSecond !== null ? ` · ${formatBytes(transfer.speedBytesPerSecond)}/s` : ""}</small>
                   {transfer.error && <small className="transfer-error">{transfer.error}</small>}
                 </div>
                 <div className="progress-track"><div className={transfer.status} style={{ width: `${percent}%` }} /></div>

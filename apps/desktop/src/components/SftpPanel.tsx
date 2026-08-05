@@ -24,6 +24,7 @@ import {
   isActiveTransferStatus,
   isTransferOwnedByConnection,
 } from "../sftp-transfer-scope";
+import { formatTransferWaitingState, sortTransfersForDisplay } from "../transfer-queue";
 import type { RemoteEntry, SavedSession, TransferEvent } from "../types";
 
 interface SftpPanelProps {
@@ -73,10 +74,10 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
   const uploadSlotWaitersRef = useRef<UploadSlotWaiter[]>([]);
   const enqueueUploadsRef = useRef<(paths: string[]) => Promise<void>>(async () => undefined);
 
-  const transferItems = useMemo(() => Object.values(transfers).sort((left, right) => {
-    const rank = (status: TransferEvent["status"]) => status === "running" ? 0 : status === "queued" ? 1 : status === "failed" ? 2 : 3;
-    return rank(left.status) - rank(right.status);
-  }), [transfers]);
+  const transferItems = useMemo(
+    () => sortTransfersForDisplay(Object.values(transfers)),
+    [transfers],
+  );
   const selectedEntries = useMemo(
     () => entries.filter((entry) => selectedPaths.has(entry.path)),
     [entries, selectedPaths],
@@ -164,7 +165,7 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
       try {
         const next = await api.listTransfers();
         if (!disposed) {
-          setTransfers(indexTransfersForConnection(next, connectionId));
+          setTransfers(indexTransfersForConnection(next.transfers, connectionId));
         }
       } catch {
         // A disconnected panel must not surface background polling errors.
@@ -770,23 +771,24 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
           {(transferItems.length > 0 || pendingUploads.length > 0) && (
             <>
               <div className="transfer-title transfer-title-row">
-                <span>传输任务{pendingUploads.length ? ` · 队列 ${pendingUploads.length}` : ""}</span>
+                <span>传输任务{pendingUploads.length ? ` · 待提交 ${pendingUploads.length}` : ""}</span>
                 <span className="transfer-list-actions">
                   {(pendingUploads.length > 0 || transferItems.some((transfer) => isActiveTransferStatus(transfer.status))) && <button onClick={() => void cancelActiveTransfers()}>取消全部</button>}
                   {transferItems.some((transfer) => !isActiveTransferStatus(transfer.status)) && <button onClick={() => void clearFinishedTransfers()}>清理已结束</button>}
                 </span>
               </div>
               {pendingUploads.map((task) => (
-                <div className="pending-upload" key={task.id} title={task.localPath}>等待上传 · {task.localPath.split(/[\/]/).pop()}</div>
+                <div className="pending-upload" key={task.id} title={task.localPath}>待提交 · {task.localPath.split(/[\/]/).pop()}</div>
               ))}
               {transferItems.map((transfer) => {
                 const percent = transfer.totalBytes ? Math.min(100, Math.round((transfer.transferredBytes / transfer.totalBytes) * 100)) : 0;
+                const waiting = formatTransferWaitingState(transfer);
                 return (
                   <div className="transfer-item" key={transfer.transferId}>
                     <div className="transfer-copy">
                       <span>{transfer.direction === "upload" ? "上传" : "下载"} · {transfer.remotePath.split("/").pop()}</span>
                       <small className={`transfer-status ${transfer.status}`} title={transfer.error ?? undefined}>
-                        {formatTransferStatus(transfer.status)} · {percent}% · {formatBytes(transfer.transferredBytes)}{transfer.totalBytes ? ` / ${formatBytes(transfer.totalBytes)}` : ""}{transfer.speedBytesPerSecond !== null && transfer.status === "running" ? ` · ${formatSpeed(transfer.speedBytesPerSecond)}` : ""}
+                        {formatTransferStatus(transfer.status)}{waiting ? ` · ${waiting}` : ""} · {percent}% · {formatBytes(transfer.transferredBytes)}{transfer.totalBytes ? ` / ${formatBytes(transfer.totalBytes)}` : ""}{transfer.speedBytesPerSecond !== null && transfer.status === "running" ? ` · ${formatSpeed(transfer.speedBytesPerSecond)}` : ""}
                       </small>
                       {transfer.error && <small className="transfer-error" title={transfer.error}>{transfer.error}</small>}
                     </div>

@@ -5310,6 +5310,10 @@ body.resizing-terminal-split .split-divider.horizontal * { cursor: row-resize !i
 }
 .transfer-manager-backdrop { z-index: 150; }
 .transfer-manager-modal { width: min(860px, calc(100vw - 32px)); max-height: min(720px, calc(100vh - 36px)); }
+.transfer-manager-modal .modal-header { height: auto; min-height: 57px; padding-top: 9px; padding-bottom: 9px; }
+.transfer-manager-modal .modal-header > div:first-child { min-width: 0; display: grid; gap: 3px; }
+.transfer-manager-modal .modal-header h2 { margin: 0; color: var(--text); font-size: 15px; line-height: 1.15; }
+.transfer-manager-modal .modal-header p { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.35; overflow-wrap: anywhere; }
 .transfer-manager-header-actions, .transfer-manager-actions { display: flex; align-items: center; gap: 6px; }
 .transfer-manager-body { min-height: 220px; max-height: min(530px, calc(100vh - 220px)); overflow: auto; padding: 14px 18px; display: grid; align-content: start; gap: 10px; }
 .transfer-manager-item { display: grid; grid-template-columns: minmax(0, 1fr) 88px; gap: 8px 14px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-hover); }
@@ -5321,6 +5325,11 @@ body.resizing-terminal-split .split-divider.horizontal * { cursor: row-resize !i
 .transfer-manager-actions { justify-content: end; align-self: start; }
 .transfer-manager-actions button { width: 28px; height: 28px; display: grid; place-items: center; border: 1px solid transparent; border-radius: 6px; color: var(--muted); background: transparent; }
 .transfer-manager-actions button:hover { color: var(--accent-strong); border-color: var(--line); background: var(--accent-bg); }
-@media (max-width: 640px) { .transfer-manager-item { grid-template-columns: 1fr; } .transfer-manager-actions { justify-content: start; } .transfer-manager-header-actions .secondary-button { display: none; } }
+@media (max-width: 640px) {
+  .transfer-manager-modal .modal-header { height: auto; min-height: 64px; align-items: flex-start; gap: 8px; padding-top: 10px; padding-bottom: 10px; }
+  .transfer-manager-item { grid-template-columns: 1fr; }
+  .transfer-manager-actions { justify-content: start; }
+  .transfer-manager-header-actions .secondary-button { display: none; }
+}
 .transfer-status.paused { color: #d7b66b; }
 .progress-track > .paused { background: #c79b45; }

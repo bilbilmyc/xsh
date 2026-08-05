@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::SeekFrom;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
@@ -21,7 +21,8 @@ use tokio::sync::{Mutex, Notify, mpsc, watch};
 use uuid::Uuid;
 use xsh_domain::{
     ConnectionId, HostKeyApproval, HostKeyRole, KnownHost, RemoteEntry, RemoteFileType,
-    SftpTransferPolicy, TransferDirection, TransferEvent, TransferId, TransferStatus,
+    SftpTransferPolicy, TransferDirection, TransferEvent, TransferId, TransferListSnapshot,
+    TransferRuntimeSummary, TransferStatus, TransferWaitingReason,
 };
 use xsh_ssh::RuntimeAuthentication;
 use xsh_ssh::config::resolve_proxy_jump;
@@ -124,6 +125,7 @@ struct TerminalTransferContext {
     transfer_id: TransferId,
     connection_id: ConnectionId,
     endpoint: String,
+    submission_sequence: u64,
     direction: TransferDirection,
     local_path: PathBuf,
     remote_path: String,
@@ -150,6 +152,9 @@ impl TerminalTransferContext {
             total_bytes: Some(self.total_bytes),
             speed_bytes_per_second,
             error,
+            submission_sequence: self.submission_sequence,
+            queue_position: None,
+            waiting_reason: None,
         }
     }
 }
@@ -189,6 +194,20 @@ struct TransferSchedulerState {
 struct AdmissionWaiter {
     transfer_id: TransferId,
     host_key: String,
+    submission_sequence: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TransferQueueObservation {
+    queue_position: u32,
+    waiting_reason: TransferWaitingReason,
+}
+
+#[derive(Debug, Clone)]
+struct TransferSchedulerRuntimeSnapshot {
+    occupied_slots: u16,
+    global_limit: u16,
+    queue: HashMap<TransferId, TransferQueueObservation>,
 }
 
 #[derive(Debug)]
@@ -237,7 +256,9 @@ enum ResumeVerificationOutcome {
 struct AdmissionWaitRegistration {
     inner: Arc<TransferSchedulerInner>,
     transfer_id: TransferId,
+    submission_sequence: u64,
     armed: bool,
+    requeue_at_tail: bool,
 }
 
 struct BandwidthWaitRegistration {
@@ -265,6 +286,7 @@ struct TransferRunGate {
     scheduler: TransferScheduler,
     transfer_id: TransferId,
     host_key: String,
+    submission_sequence: u64,
     permit: Option<AdmissionPermit>,
     status_snapshot: Option<Arc<StdMutex<TransferEvent>>>,
     status_events: Option<mpsc::Sender<TransferEvent>>,
@@ -346,6 +368,89 @@ impl TransferScheduler {
             .map_err(|_| anyhow::anyhow!("SFTP transfer scheduler state is unavailable"))
     }
 
+    fn runtime_snapshot(&self) -> anyhow::Result<TransferSchedulerRuntimeSnapshot> {
+        let state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("SFTP transfer scheduler state is unavailable"))?;
+        let global_limit = state.policy.global_concurrency;
+        let global_full = state.active_global >= usize::from(global_limit);
+        let queue = state
+            .admission_queue
+            .iter()
+            .enumerate()
+            .map(|(index, waiter)| {
+                let host_full = state
+                    .active_by_host
+                    .get(&waiter.host_key)
+                    .copied()
+                    .unwrap_or(0)
+                    >= usize::from(state.policy.per_host_concurrency);
+                let waiting_reason = if global_full {
+                    TransferWaitingReason::GlobalConcurrency
+                } else if host_full {
+                    TransferWaitingReason::PerHostConcurrency
+                } else {
+                    TransferWaitingReason::QueueOrder
+                };
+                (
+                    waiter.transfer_id,
+                    TransferQueueObservation {
+                        queue_position: u32::try_from(index.saturating_add(1)).unwrap_or(u32::MAX),
+                        waiting_reason,
+                    },
+                )
+            })
+            .collect();
+        Ok(TransferSchedulerRuntimeSnapshot {
+            occupied_slots: u16::try_from(state.active_global).unwrap_or(u16::MAX),
+            global_limit,
+            queue,
+        })
+    }
+
+    fn enqueue_admission(
+        &self,
+        transfer_id: TransferId,
+        submission_sequence: u64,
+        host_key: &str,
+    ) -> anyhow::Result<()> {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("SFTP transfer scheduler state is unavailable"))?;
+        if state
+            .admission_queue
+            .iter()
+            .any(|waiter| waiter.transfer_id == transfer_id)
+        {
+            bail!("SFTP transfer is already queued for admission");
+        }
+        let waiter = AdmissionWaiter {
+            transfer_id,
+            host_key: host_key.to_owned(),
+            submission_sequence,
+        };
+        if submission_sequence == 0 {
+            state.admission_queue.push_back(waiter);
+        } else {
+            let position = state
+                .admission_queue
+                .iter()
+                .position(|candidate| {
+                    candidate.submission_sequence != 0
+                        && candidate.submission_sequence > submission_sequence
+                })
+                .unwrap_or(state.admission_queue.len());
+            state.admission_queue.insert(position, waiter);
+        }
+        drop(state);
+        self.inner.admission_notify.notify_waiters();
+        Ok(())
+    }
+
     fn set_policy(&self, policy: SftpTransferPolicy) -> anyhow::Result<()> {
         policy.validate().map_err(anyhow::Error::msg)?;
         let mut state = self
@@ -375,19 +480,37 @@ impl TransferScheduler {
         }
     }
 
+    #[cfg(test)]
     async fn acquire_admission(
         &self,
         transfer_id: TransferId,
         host_key: &str,
         control: &mut watch::Receiver<TransferControl>,
     ) -> anyhow::Result<Option<AdmissionPermit>> {
-        let mut registration = AdmissionWaitRegistration::new(Arc::clone(&self.inner), transfer_id);
+        self.acquire_admission_with_sequence(transfer_id, host_key, control, 0)
+            .await
+    }
+
+    async fn acquire_admission_with_sequence(
+        &self,
+        transfer_id: TransferId,
+        host_key: &str,
+        control: &mut watch::Receiver<TransferControl>,
+        submission_sequence: u64,
+    ) -> anyhow::Result<Option<AdmissionPermit>> {
+        let mut registration = AdmissionWaitRegistration::new(
+            Arc::clone(&self.inner),
+            transfer_id,
+            submission_sequence,
+        );
+        registration.claim_existing()?;
         loop {
             let current_control = *control.borrow_and_update();
             match current_control {
                 TransferControl::Cancelled => return Ok(None),
                 TransferControl::Paused => {
                     registration.remove()?;
+                    registration.requeue_at_tail = true;
                     control
                         .changed()
                         .await
@@ -404,11 +527,27 @@ impl TransferScheduler {
                         anyhow::anyhow!("SFTP transfer scheduler state is unavailable")
                     })?;
                 if !registration.armed {
-                    state.admission_queue.push_back(AdmissionWaiter {
+                    let waiter = AdmissionWaiter {
                         transfer_id,
                         host_key: host_key.to_owned(),
-                    });
+                        submission_sequence: registration.submission_sequence,
+                    };
+                    if registration.requeue_at_tail || registration.submission_sequence == 0 {
+                        state.admission_queue.push_back(waiter);
+                    } else {
+                        let position = state
+                            .admission_queue
+                            .iter()
+                            .position(|candidate| {
+                                candidate.submission_sequence != 0
+                                    && candidate.submission_sequence
+                                        > registration.submission_sequence
+                            })
+                            .unwrap_or(state.admission_queue.len());
+                        state.admission_queue.insert(position, waiter);
+                    }
                     registration.armed = true;
+                    registration.requeue_at_tail = false;
                 }
                 let global_available =
                     state.active_global < usize::from(state.policy.global_concurrency);
@@ -594,12 +733,31 @@ fn bandwidth_state_mut(
 }
 
 impl AdmissionWaitRegistration {
-    fn new(inner: Arc<TransferSchedulerInner>, transfer_id: TransferId) -> Self {
+    fn new(
+        inner: Arc<TransferSchedulerInner>,
+        transfer_id: TransferId,
+        submission_sequence: u64,
+    ) -> Self {
         Self {
             inner,
             transfer_id,
+            submission_sequence,
             armed: false,
+            requeue_at_tail: false,
         }
+    }
+
+    fn claim_existing(&mut self) -> anyhow::Result<()> {
+        let state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("SFTP transfer scheduler state is unavailable"))?;
+        self.armed = state
+            .admission_queue
+            .iter()
+            .any(|waiter| waiter.transfer_id == self.transfer_id);
+        Ok(())
     }
 
     fn remove(&mut self) -> anyhow::Result<()> {
@@ -750,10 +908,15 @@ impl TransferRunGate {
             scheduler,
             transfer_id,
             host_key,
+            submission_sequence: 0,
             permit: None,
             status_snapshot: None,
             status_events: None,
         }
+    }
+
+    fn set_submission_sequence(&mut self, submission_sequence: u64) {
+        self.submission_sequence = submission_sequence;
     }
 
     fn attach_status_reporter(
@@ -792,7 +955,12 @@ impl TransferRunGate {
                 TransferControl::Running => {
                     let permit = self
                         .scheduler
-                        .acquire_admission(self.transfer_id, &self.host_key, control)
+                        .acquire_admission_with_sequence(
+                            self.transfer_id,
+                            &self.host_key,
+                            control,
+                            self.submission_sequence,
+                        )
                         .await?;
                     let Some(permit) = permit else {
                         return Ok(Some(TransferStatus::Cancelled));
@@ -816,6 +984,8 @@ impl TransferRunGate {
             }
             current.status = TransferStatus::Running;
             current.speed_bytes_per_second = None;
+            current.queue_position = None;
+            current.waiting_reason = None;
             current.clone()
         };
         let _ = events.try_send(event);
@@ -1297,6 +1467,7 @@ struct SftpManagerInner {
     released_connections: Mutex<HashSet<ConnectionId>>,
     active_destinations: StdMutex<HashSet<TransferArtifact>>,
     scheduler: TransferScheduler,
+    next_submission_sequence: AtomicU64,
 }
 
 #[derive(Clone, Default)]
@@ -1321,6 +1492,13 @@ impl SftpManager {
             .scheduler
             .set_policy(policy)
             .map_err(SftpManagerError::Operation)
+    }
+
+    fn next_submission_sequence(&self) -> u64 {
+        self.inner
+            .next_submission_sequence
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1)
     }
 
     pub async fn connect(
@@ -1520,20 +1698,33 @@ impl SftpManager {
         self.close_connection(connection_id).await
     }
 
-    pub async fn list_transfers(&self) -> Vec<TransferEvent> {
-        let transfers = self.inner.transfers.lock().await;
-        let mut snapshots = transfers
-            .values()
-            .filter_map(|transfer| {
-                transfer
-                    .snapshot
-                    .lock()
-                    .ok()
-                    .map(|snapshot| snapshot.clone())
-            })
-            .collect::<Vec<_>>();
-        snapshots.sort_by_key(|transfer| transfer.transfer_id);
-        snapshots
+    pub async fn list_transfers(&self) -> TransferListSnapshot {
+        let transfers = {
+            let transfers = self.inner.transfers.lock().await;
+            transfers
+                .values()
+                .filter_map(|transfer| {
+                    transfer
+                        .snapshot
+                        .lock()
+                        .ok()
+                        .map(|snapshot| snapshot.clone())
+                })
+                .collect::<Vec<_>>()
+        };
+        let scheduler = self
+            .inner
+            .scheduler
+            .runtime_snapshot()
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "could not read the SFTP scheduler runtime snapshot");
+                TransferSchedulerRuntimeSnapshot {
+                    occupied_slots: 0,
+                    global_limit: SftpTransferPolicy::default().global_concurrency,
+                    queue: HashMap::new(),
+                }
+            });
+        build_transfer_list_snapshot(transfers, scheduler)
     }
 
     pub async fn pause_transfer(
@@ -1620,6 +1811,9 @@ impl SftpManager {
                 snapshot.speed_bytes_per_second = Some(0);
             }
         }
+        snapshot.queue_position = None;
+        snapshot.waiting_reason = (snapshot.status == TransferStatus::Paused)
+            .then_some(TransferWaitingReason::UserPaused);
         let event = snapshot.clone();
         transfer
             .control
@@ -1805,6 +1999,7 @@ impl SftpManager {
         remote_path: String,
         overwrite: bool,
     ) -> Result<TransferSubscription, SftpManagerError> {
+        let submission_sequence = self.next_submission_sequence();
         let (session, source_identity, scheduler_host_key) =
             self.transfer_connection(connection_id).await?;
         let local_metadata = tokio::fs::metadata(&local_path)
@@ -1816,12 +2011,17 @@ impl SftpManager {
         let destination = TransferDestination::remote(source_identity, remote_path.clone());
         let destination_lease = self.reserve_destination(destination)?;
         let transfer_id = Uuid::new_v4();
+        self.inner
+            .scheduler
+            .enqueue_admission(transfer_id, submission_sequence, &scheduler_host_key)
+            .map_err(SftpManagerError::Operation)?;
         let (event_tx, event_rx) = mpsc::channel(TRANSFER_EVENT_CAPACITY);
         let (control_tx, control_rx) = watch::channel(TransferControl::Running);
         let context = TerminalTransferContext {
             transfer_id,
             connection_id,
             endpoint: scheduler_host_key.clone(),
+            submission_sequence,
             direction: TransferDirection::Upload,
             local_path: local_path.clone(),
             remote_path: remote_path.clone(),
@@ -1859,6 +2059,7 @@ impl SftpManager {
                 transfer_id,
                 scheduler_host_key,
             );
+            run_gate.set_submission_sequence(context.submission_sequence);
             run_gate.attach_status_reporter(Arc::clone(&snapshot), event_tx.clone());
             let mut latest_transferred = 0;
             let mut reporter = TransferProgressReporter::new(
@@ -1911,6 +2112,7 @@ impl SftpManager {
         local_path: PathBuf,
         overwrite: bool,
     ) -> Result<TransferSubscription, SftpManagerError> {
+        let submission_sequence = self.next_submission_sequence();
         let (session, source_identity, scheduler_host_key) =
             self.transfer_connection(connection_id).await?;
         let remote_metadata = session
@@ -1922,12 +2124,17 @@ impl SftpManager {
         let destination = TransferDestination::local(&local_path);
         let destination_lease = self.reserve_destination(destination)?;
         let transfer_id = Uuid::new_v4();
+        self.inner
+            .scheduler
+            .enqueue_admission(transfer_id, submission_sequence, &scheduler_host_key)
+            .map_err(SftpManagerError::Operation)?;
         let (event_tx, event_rx) = mpsc::channel(TRANSFER_EVENT_CAPACITY);
         let (control_tx, control_rx) = watch::channel(TransferControl::Running);
         let context = TerminalTransferContext {
             transfer_id,
             connection_id,
             endpoint: scheduler_host_key.clone(),
+            submission_sequence,
             direction: TransferDirection::Download,
             local_path: local_path.clone(),
             remote_path: remote_path.clone(),
@@ -1965,6 +2172,7 @@ impl SftpManager {
                 transfer_id,
                 scheduler_host_key,
             );
+            run_gate.set_submission_sequence(context.submission_sequence);
             run_gate.attach_status_reporter(Arc::clone(&snapshot), event_tx.clone());
             let mut latest_transferred = 0;
             let mut reporter = TransferProgressReporter::new(
@@ -2104,6 +2312,72 @@ impl SftpManager {
             artifacts,
         })
     }
+}
+
+fn build_transfer_list_snapshot(
+    mut transfers: Vec<TransferEvent>,
+    runtime: TransferSchedulerRuntimeSnapshot,
+) -> TransferListSnapshot {
+    let mut summary = TransferRuntimeSummary {
+        occupied_slots: runtime.occupied_slots,
+        global_limit: runtime.global_limit,
+        ..TransferRuntimeSummary::default()
+    };
+
+    for transfer in &mut transfers {
+        match &transfer.status {
+            TransferStatus::Queued => {
+                summary.queued = summary.queued.saturating_add(1);
+                if let Some(observation) = runtime.queue.get(&transfer.transfer_id) {
+                    transfer.queue_position = Some(observation.queue_position);
+                    transfer.waiting_reason = Some(observation.waiting_reason);
+                } else {
+                    transfer.queue_position = None;
+                    transfer.waiting_reason = None;
+                }
+            }
+            TransferStatus::Running => {
+                summary.running = summary.running.saturating_add(1);
+                transfer.queue_position = None;
+                transfer.waiting_reason = None;
+                if let Some(speed) = transfer.speed_bytes_per_second {
+                    match transfer.direction {
+                        TransferDirection::Upload => {
+                            summary.aggregate_upload_bytes_per_second = summary
+                                .aggregate_upload_bytes_per_second
+                                .saturating_add(speed);
+                        }
+                        TransferDirection::Download => {
+                            summary.aggregate_download_bytes_per_second = summary
+                                .aggregate_download_bytes_per_second
+                                .saturating_add(speed);
+                        }
+                    }
+                }
+            }
+            TransferStatus::Paused => {
+                summary.paused = summary.paused.saturating_add(1);
+                transfer.queue_position = None;
+                transfer.waiting_reason = Some(TransferWaitingReason::UserPaused);
+            }
+            TransferStatus::Cancelling => {
+                summary.cancelling = summary.cancelling.saturating_add(1);
+                transfer.queue_position = None;
+                transfer.waiting_reason = None;
+            }
+            TransferStatus::Completed | TransferStatus::Cancelled | TransferStatus::Failed => {
+                transfer.queue_position = None;
+                transfer.waiting_reason = None;
+            }
+        }
+    }
+
+    transfers.sort_by(|left, right| {
+        left.submission_sequence
+            .cmp(&right.submission_sequence)
+            .then_with(|| left.transfer_id.cmp(&right.transfer_id))
+    });
+    TransferListSnapshot { transfers, summary }
 }
 
 async fn wait_for_transfer_bandwidth(
@@ -3268,6 +3542,204 @@ mod tests {
         assert!(error.to_string().contains("target handshake failed"));
     }
 
+    fn test_transfer_event(
+        transfer_id: TransferId,
+        sequence: u64,
+        status: TransferStatus,
+        direction: TransferDirection,
+        speed: Option<u64>,
+    ) -> TransferEvent {
+        TerminalTransferContext {
+            transfer_id,
+            connection_id: Uuid::new_v4(),
+            endpoint: "files.example.com:22".into(),
+            submission_sequence: sequence,
+            direction,
+            local_path: PathBuf::from("C:/tmp/archive.tar"),
+            remote_path: "/tmp/archive.tar".into(),
+            total_bytes: 2_048,
+        }
+        .event(status, 512, speed, None)
+    }
+
+    #[test]
+    fn transfer_list_snapshot_sorts_by_submission_and_aggregates_directional_speed() {
+        let running_upload = Uuid::from_u128(1);
+        let queued_download = Uuid::from_u128(2);
+        let paused_upload = Uuid::from_u128(3);
+        let mut queue = HashMap::new();
+        queue.insert(
+            queued_download,
+            TransferQueueObservation {
+                queue_position: 1,
+                waiting_reason: TransferWaitingReason::PerHostConcurrency,
+            },
+        );
+        let snapshot = build_transfer_list_snapshot(
+            vec![
+                test_transfer_event(
+                    queued_download,
+                    2,
+                    TransferStatus::Queued,
+                    TransferDirection::Download,
+                    None,
+                ),
+                test_transfer_event(
+                    paused_upload,
+                    3,
+                    TransferStatus::Paused,
+                    TransferDirection::Upload,
+                    Some(0),
+                ),
+                test_transfer_event(
+                    running_upload,
+                    1,
+                    TransferStatus::Running,
+                    TransferDirection::Upload,
+                    Some(u64::MAX),
+                ),
+            ],
+            TransferSchedulerRuntimeSnapshot {
+                occupied_slots: 1,
+                global_limit: 2,
+                queue,
+            },
+        );
+
+        assert_eq!(
+            snapshot
+                .transfers
+                .iter()
+                .map(|transfer| transfer.submission_sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        let queued = &snapshot.transfers[1];
+        assert_eq!(queued.queue_position, Some(1));
+        assert_eq!(
+            queued.waiting_reason,
+            Some(TransferWaitingReason::PerHostConcurrency)
+        );
+        assert_eq!(
+            snapshot.transfers[2].waiting_reason,
+            Some(TransferWaitingReason::UserPaused)
+        );
+        assert_eq!(snapshot.summary.occupied_slots, 1);
+        assert_eq!(snapshot.summary.global_limit, 2);
+        assert_eq!(snapshot.summary.running, 1);
+        assert_eq!(snapshot.summary.queued, 1);
+        assert_eq!(snapshot.summary.paused, 1);
+        assert_eq!(snapshot.summary.aggregate_upload_bytes_per_second, u64::MAX);
+        assert_eq!(snapshot.summary.aggregate_download_bytes_per_second, 0);
+    }
+
+    #[test]
+    fn scheduler_runtime_snapshot_explains_global_and_per_host_waiters() {
+        let scheduler = TransferScheduler::default();
+        scheduler
+            .set_policy(SftpTransferPolicy {
+                global_concurrency: 2,
+                per_host_concurrency: 1,
+                ..SftpTransferPolicy::default()
+            })
+            .unwrap();
+        let host_a_waiter = Uuid::from_u128(11);
+        let host_c_waiter = Uuid::from_u128(12);
+        {
+            let mut state = scheduler.inner.state.lock().unwrap();
+            state.active_global = 2;
+            state.active_by_host.insert("host-a:22".into(), 1);
+            state.active_by_host.insert("host-b:22".into(), 1);
+            state.admission_queue.push_back(AdmissionWaiter {
+                transfer_id: host_a_waiter,
+                host_key: "host-a:22".into(),
+                submission_sequence: 0,
+            });
+            state.admission_queue.push_back(AdmissionWaiter {
+                transfer_id: host_c_waiter,
+                host_key: "host-c:22".into(),
+                submission_sequence: 0,
+            });
+        }
+
+        let full = scheduler.runtime_snapshot().unwrap();
+        assert_eq!(full.queue[&host_a_waiter].queue_position, 1);
+        assert_eq!(
+            full.queue[&host_a_waiter].waiting_reason,
+            TransferWaitingReason::GlobalConcurrency
+        );
+        assert_eq!(
+            full.queue[&host_c_waiter].waiting_reason,
+            TransferWaitingReason::GlobalConcurrency
+        );
+
+        {
+            let mut state = scheduler.inner.state.lock().unwrap();
+            state.active_global = 1;
+        }
+        let host_limited = scheduler.runtime_snapshot().unwrap();
+        assert_eq!(
+            host_limited.queue[&host_a_waiter].waiting_reason,
+            TransferWaitingReason::PerHostConcurrency
+        );
+        assert_eq!(
+            host_limited.queue[&host_c_waiter].waiting_reason,
+            TransferWaitingReason::QueueOrder
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_registered_admission_is_released_when_worker_is_cancelled_before_start() {
+        let scheduler = TransferScheduler::default();
+        let transfer_id = Uuid::from_u128(21);
+        let earlier_transfer_id = Uuid::from_u128(22);
+        scheduler
+            .enqueue_admission(transfer_id, 2, "host-a:22")
+            .unwrap();
+        scheduler
+            .enqueue_admission(earlier_transfer_id, 1, "host-a:22")
+            .unwrap();
+        assert_eq!(
+            scheduler.runtime_snapshot().unwrap().queue[&earlier_transfer_id].queue_position,
+            1
+        );
+        assert_eq!(
+            scheduler.runtime_snapshot().unwrap().queue[&transfer_id].queue_position,
+            2
+        );
+
+        let (control, mut receiver) = watch::channel(TransferControl::Cancelled);
+        let result = scheduler
+            .acquire_admission(transfer_id, "host-a:22", &mut receiver)
+            .await
+            .unwrap();
+        assert!(result.is_none());
+        drop(control);
+        assert_eq!(
+            scheduler.runtime_snapshot().unwrap().queue[&earlier_transfer_id].queue_position,
+            1
+        );
+
+        let (earlier_control, mut earlier_receiver) = watch::channel(TransferControl::Cancelled);
+        assert!(
+            scheduler
+                .acquire_admission(earlier_transfer_id, "host-a:22", &mut earlier_receiver,)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        drop(earlier_control);
+        assert!(scheduler.runtime_snapshot().unwrap().queue.is_empty());
+    }
+
+    #[test]
+    fn submission_sequence_is_monotonic_and_one_based() {
+        let manager = SftpManager::new();
+        assert_eq!(manager.next_submission_sequence(), 1);
+        assert_eq!(manager.next_submission_sequence(), 2);
+        assert_eq!(manager.next_submission_sequence(), 3);
+    }
+
     fn resume_metadata(remote_path: &str, total_bytes: u64) -> DownloadResumeMetadata {
         DownloadResumeMetadata {
             version: DOWNLOAD_RESUME_METADATA_VERSION,
@@ -3285,6 +3757,7 @@ mod tests {
             transfer_id: Uuid::new_v4(),
             connection_id: Uuid::new_v4(),
             endpoint: "files.example.com:22".into(),
+            submission_sequence: 0,
             direction: TransferDirection::Upload,
             local_path: PathBuf::from("C:/tmp/archive.tar"),
             remote_path: "/tmp/archive.tar".into(),
@@ -3312,6 +3785,7 @@ mod tests {
             transfer_id: Uuid::new_v4(),
             connection_id: Uuid::new_v4(),
             endpoint: "files.example.com:22".into(),
+            submission_sequence: 0,
             direction: TransferDirection::Upload,
             local_path: PathBuf::from("C:/tmp/archive.tar"),
             remote_path: "/tmp/archive.tar".into(),
@@ -3347,6 +3821,7 @@ mod tests {
             transfer_id: Uuid::new_v4(),
             connection_id: Uuid::new_v4(),
             endpoint: "files.example.com:22".into(),
+            submission_sequence: 0,
             direction: TransferDirection::Download,
             local_path: PathBuf::from("C:/tmp/archive.tar"),
             remote_path: "/tmp/archive.tar".into(),
@@ -3528,6 +4003,7 @@ mod tests {
             transfer_id,
             connection_id,
             endpoint: "files.example.com:22".into(),
+            submission_sequence: 0,
             direction: TransferDirection::Download,
             local_path: PathBuf::from("C:/tmp/archive.tar"),
             remote_path: "/tmp/archive.tar".into(),
@@ -4000,6 +4476,7 @@ mod tests {
             transfer_id,
             connection_id,
             endpoint: "files.example.com:22".into(),
+            submission_sequence: 0,
             direction: TransferDirection::Upload,
             local_path: PathBuf::from("C:/tmp/archive.tar"),
             remote_path: "/tmp/archive.tar".into(),
@@ -4025,10 +4502,16 @@ mod tests {
         let paused = manager.pause_transfer(transfer_id).await.unwrap();
         assert_eq!(paused.status, TransferStatus::Paused);
         assert_eq!(paused.speed_bytes_per_second, Some(0));
+        assert_eq!(paused.queue_position, None);
         assert_eq!(
-            manager.resume_transfer(transfer_id).await.unwrap().status,
-            TransferStatus::Queued
+            paused.waiting_reason,
+            Some(TransferWaitingReason::UserPaused)
         );
+        let resumed = manager.resume_transfer(transfer_id).await.unwrap();
+        assert_eq!(resumed.status, TransferStatus::Queued);
+        assert_eq!(resumed.speed_bytes_per_second, None);
+        assert_eq!(resumed.queue_position, None);
+        assert_eq!(resumed.waiting_reason, None);
         assert_eq!(
             manager.cancel_transfer(transfer_id).await.unwrap().status,
             TransferStatus::Cancelling

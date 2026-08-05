@@ -326,6 +326,15 @@ pub enum TransferStatus {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TransferWaitingReason {
+    GlobalConcurrency,
+    PerHostConcurrency,
+    QueueOrder,
+    UserPaused,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct SftpTransferPolicy {
     pub global_concurrency: u16,
@@ -386,6 +395,32 @@ pub struct TransferEvent {
     pub total_bytes: Option<u64>,
     pub speed_bytes_per_second: Option<u64>,
     pub error: Option<String>,
+    #[serde(default)]
+    pub submission_sequence: u64,
+    #[serde(default)]
+    pub queue_position: Option<u32>,
+    #[serde(default)]
+    pub waiting_reason: Option<TransferWaitingReason>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct TransferRuntimeSummary {
+    pub occupied_slots: u16,
+    pub global_limit: u16,
+    pub running: u32,
+    pub queued: u32,
+    pub paused: u32,
+    pub cancelling: u32,
+    pub aggregate_upload_bytes_per_second: u64,
+    pub aggregate_download_bytes_per_second: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct TransferListSnapshot {
+    pub transfers: Vec<TransferEvent>,
+    pub summary: TransferRuntimeSummary,
 }
 
 #[cfg(test)]
@@ -517,5 +552,61 @@ mod tests {
         invalid = policy;
         invalid.upload_limit_bytes_per_second = 1;
         assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn transfer_waiting_reasons_serialize_as_camel_case() {
+        let reasons = [
+            TransferWaitingReason::GlobalConcurrency,
+            TransferWaitingReason::PerHostConcurrency,
+            TransferWaitingReason::QueueOrder,
+            TransferWaitingReason::UserPaused,
+        ];
+
+        assert_eq!(
+            serde_json::to_string(&reasons).unwrap(),
+            r#"["globalConcurrency","perHostConcurrency","queueOrder","userPaused"]"#
+        );
+    }
+
+    #[test]
+    fn transfer_event_new_queue_fields_default_for_legacy_payloads() {
+        let event: TransferEvent = serde_json::from_str(
+            r#"{
+                "transferId":"00000000-0000-0000-0000-000000000001",
+                "connectionId":"00000000-0000-0000-0000-000000000002",
+                "endpoint":"example.com:22",
+                "direction":"download",
+                "localPath":"download.bin",
+                "remotePath":"/tmp/download.bin",
+                "status":"queued",
+                "transferredBytes":0,
+                "totalBytes":1024,
+                "speedBytesPerSecond":null,
+                "error":null
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(event.submission_sequence, 0);
+        assert_eq!(event.queue_position, None);
+        assert_eq!(event.waiting_reason, None);
+
+        let serialized = serde_json::to_value(event).unwrap();
+        assert_eq!(serialized["submissionSequence"], 0);
+        assert_eq!(serialized["queuePosition"], serde_json::Value::Null);
+        assert_eq!(serialized["waitingReason"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn transfer_snapshot_defaults_and_serializes_as_camel_case() {
+        let snapshot: TransferListSnapshot = serde_json::from_str("{}").unwrap();
+        assert_eq!(snapshot, TransferListSnapshot::default());
+        assert!(snapshot.transfers.is_empty());
+        assert_eq!(snapshot.summary, TransferRuntimeSummary::default());
+        assert_eq!(
+            serde_json::to_string(&snapshot).unwrap(),
+            r#"{"transfers":[],"summary":{"occupiedSlots":0,"globalLimit":0,"running":0,"queued":0,"paused":0,"cancelling":0,"aggregateUploadBytesPerSecond":0,"aggregateDownloadBytesPerSecond":0}}"#
+        );
     }
 }
