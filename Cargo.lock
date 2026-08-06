@@ -1085,7 +1085,7 @@ dependencies = [
 
 [[package]]
 name = "desktop"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "chrono",
  "serde",
@@ -1095,6 +1095,7 @@ dependencies = [
  "tauri-plugin-clipboard-manager",
  "tauri-plugin-dialog",
  "tokio",
+ "tracing",
  "uuid",
  "xsh-domain",
  "xsh-security",
@@ -6804,7 +6805,7 @@ checksum = "ea6fc2961e4ef194dcbfe56bb845534d0dc8098940c7e5c012a258bfec6701bd"
 
 [[package]]
 name = "xsh-domain"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "chrono",
  "serde",
@@ -6815,7 +6816,7 @@ dependencies = [
 
 [[package]]
 name = "xsh-security"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",
@@ -6831,7 +6832,7 @@ dependencies = [
 
 [[package]]
 name = "xsh-sftp"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "anyhow",
  "russh",
@@ -6849,7 +6850,7 @@ dependencies = [
 
 [[package]]
 name = "xsh-ssh"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6866,7 +6867,7 @@ dependencies = [
 
 [[package]]
 name = "xsh-storage"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "chrono",
  "rusqlite",

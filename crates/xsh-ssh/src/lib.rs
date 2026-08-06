@@ -2087,6 +2087,7 @@ mod tests {
         let profile = ForwardProfile {
             id: Uuid::from_u128(1),
             name: "api tunnel".into(),
+            group: Some("APIs".into()),
             kind: ForwardKind::Local,
             bind_host: "127.0.0.1".into(),
             bind_port: 0,
@@ -2116,6 +2117,7 @@ mod tests {
         let profile = ForwardProfile {
             id: Uuid::from_u128(3),
             name: "api tunnel".into(),
+            group: Some("APIs".into()),
             kind: ForwardKind::Local,
             bind_host: "127.0.0.1".into(),
             bind_port: 0,
@@ -2155,6 +2157,7 @@ mod tests {
         let mut profile = ForwardProfile {
             id: Uuid::from_u128(2),
             name: "invalid".into(),
+            group: None,
             kind: ForwardKind::Remote,
             bind_host: "127.0.0.1".into(),
             bind_port: 0,

@@ -3,7 +3,7 @@ export function normalizeTerminalCommand(text: string): string {
   // Keep command text readable in the editor and decode common terminal
   // escapes only when sending. For example, `ls\\r-t` sends `ls`, Enter,
   // then `-t`. Real newlines have the same Enter semantics.
-  const decoded = text.replace(/\\\\([rnt\\\\])/g, (_, escape: string) => {
+  const decoded = text.replace(/\\([rnt\\])/g, (_, escape: string) => {
     if (escape === "r") return "\r";
     if (escape === "n") return "\n";
     if (escape === "t") return "\t";
@@ -11,4 +11,15 @@ export function normalizeTerminalCommand(text: string): string {
   });
   const normalized = decoded.replace(/\r?\n/g, "\r");
   return normalized.endsWith("\r") ? normalized : `${normalized}\r`;
+}
+
+/** Decode a saved key mapping without appending a carriage return. */
+export function decodeTerminalKeyMapping(text: string): string {
+  return text.replace(/\\([rnte\\])/g, (_, escape: string) => {
+    if (escape === "r") return "\r";
+    if (escape === "n") return "\n";
+    if (escape === "t") return "\t";
+    if (escape === "e") return "\x1b";
+    return "\\";
+  });
 }

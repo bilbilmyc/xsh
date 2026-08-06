@@ -18,6 +18,10 @@ pub struct SshConfigEntry {
     pub port: u16,
     pub username: String,
     pub identity_file: Option<PathBuf>,
+    /// OpenSSH accepts more than one IdentityFile and tries them in order.
+    /// XSH imports the first one as the session default but exposes every
+    /// resolved path so the user can choose a different identity later.
+    pub identity_files: Vec<PathBuf>,
     pub proxy_jump: Option<String>,
     pub source_path: PathBuf,
 }
@@ -27,7 +31,7 @@ struct HostOptions {
     hostname: Option<String>,
     port: Option<u16>,
     username: Option<String>,
-    identity_file: Option<PathBuf>,
+    identity_files: Vec<PathBuf>,
     proxy_jump: Option<String>,
 }
 
@@ -49,8 +53,7 @@ impl SshConfigEntry {
         if !path.exists() {
             return Ok(Vec::new());
         }
-        let text = fs::read_to_string(&path)
-            .with_context(|| format!("failed to read SSH config {}", path.display()))?;
+        let text = read_config_with_includes(&path, &mut HashSet::new())?;
         let blocks = parse_blocks(&text)?;
         resolve_entries(&blocks, &path)
     }
@@ -221,7 +224,9 @@ fn apply_option(options: &mut HostOptions, key: &str, raw_value: &str) -> Result
         }
         "identityfile" => {
             let path = expand_path(&value);
-            options.identity_file.get_or_insert(path);
+            if !options.identity_files.contains(&path) {
+                options.identity_files.push(path);
+            }
         }
         "proxyjump" => {
             options.proxy_jump.get_or_insert(value);
@@ -271,7 +276,8 @@ fn resolve_entries(blocks: &[HostBlock], source_path: &Path) -> Result<Vec<SshCo
             hostname,
             port,
             username,
-            identity_file: options.identity_file,
+            identity_file: options.identity_files.first().cloned(),
+            identity_files: options.identity_files,
             proxy_jump: options.proxy_jump,
             source_path: source_path.to_path_buf(),
         });
@@ -289,8 +295,10 @@ fn merge_options(target: &mut HostOptions, source: &HostOptions) {
     if target.username.is_none() {
         target.username = source.username.clone();
     }
-    if target.identity_file.is_none() {
-        target.identity_file = source.identity_file.clone();
+    for identity_file in &source.identity_files {
+        if !target.identity_files.contains(identity_file) {
+            target.identity_files.push(identity_file.clone());
+        }
     }
     if target.proxy_jump.is_none() {
         target.proxy_jump = source.proxy_jump.clone();
@@ -330,7 +338,12 @@ fn tokenize(value: &str) -> Vec<String> {
     let mut escaped = false;
     for ch in value.chars() {
         if escaped {
-            current.push(ch);
+            if ch.is_whitespace() || ch == '\\' || ch == '\'' || ch == '"' {
+                current.push(ch);
+            } else {
+                current.push('\\');
+                current.push(ch);
+            }
             escaped = false;
             continue;
         }
@@ -361,6 +374,80 @@ fn tokenize(value: &str) -> Vec<String> {
         tokens.push(current);
     }
     tokens
+}
+
+fn read_config_with_includes(path: &Path, active_paths: &mut HashSet<PathBuf>) -> Result<String> {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if !active_paths.insert(canonical.clone()) {
+        return Err(anyhow!(
+            "SSH config Include contains a cycle at {}",
+            path.display()
+        ));
+    }
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("failed to read SSH config {}", path.display()))?;
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut expanded = String::new();
+    for raw_line in text.lines() {
+        let line = raw_line.trim_start_matches('\u{feff}').trim();
+        if let Some((key, value)) = split_directive(line)
+            && key.eq_ignore_ascii_case("include")
+        {
+            for include in resolve_include_paths(value, parent)? {
+                expanded.push_str(&read_config_with_includes(&include, active_paths)?);
+                if !expanded.ends_with('\n') {
+                    expanded.push('\n');
+                }
+            }
+        } else {
+            expanded.push_str(raw_line);
+            expanded.push('\n');
+        }
+    }
+    active_paths.remove(&canonical);
+    Ok(expanded)
+}
+
+fn resolve_include_paths(value: &str, base_directory: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    for raw_pattern in tokenize(value) {
+        let path = expand_path(&raw_pattern);
+        let pattern = if path.is_absolute() {
+            path
+        } else {
+            base_directory.join(path)
+        };
+        let parent = pattern.parent().unwrap_or_else(|| Path::new("."));
+        let file_pattern = pattern
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        if !has_pattern_syntax(file_pattern) {
+            if pattern.is_file() {
+                paths.push(pattern);
+            }
+            continue;
+        }
+        let mut matches = fs::read_dir(parent)
+            .with_context(|| {
+                format!(
+                    "failed to read SSH config include directory {}",
+                    parent.display()
+                )
+            })?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|candidate| candidate.is_file())
+            .filter(|candidate| {
+                candidate
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| wildcard_match(file_pattern, name))
+            })
+            .collect::<Vec<_>>();
+        matches.sort();
+        paths.extend(matches);
+    }
+    Ok(paths)
 }
 
 fn has_pattern_syntax(value: &str) -> bool {
@@ -499,6 +586,32 @@ mod tests {
         let _ = fs::remove_file(path);
     }
 
+    #[test]
+    fn resolves_relative_include_wildcards_and_multiple_identity_files() {
+        let directory = temp_config_directory();
+        let includes = directory.join("conf.d");
+        fs::create_dir_all(&includes).unwrap();
+        let config = directory.join("config");
+        fs::write(
+            &config,
+            "Include conf.d/*.conf\nHost app\n HostName app.example\n IdentityFile ~/.ssh/id_app\n",
+        )
+        .unwrap();
+        fs::write(
+            includes.join("00-defaults.conf"),
+            "Host *\n User deploy\n IdentityFile ~/.ssh/id_default\n",
+        )
+        .unwrap();
+
+        let entries = SshConfigEntry::read_from(&config).unwrap();
+        let app = entries.iter().find(|entry| entry.alias == "app").unwrap();
+        assert_eq!(app.hostname, "app.example");
+        assert_eq!(app.username, "deploy");
+        assert_eq!(app.identity_files.len(), 2);
+        assert_eq!(app.identity_file.as_ref(), app.identity_files.first());
+        let _ = fs::remove_dir_all(directory);
+    }
+
     fn temp_config_path() -> PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let timestamp = SystemTime::now()
@@ -508,6 +621,19 @@ mod tests {
         let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!(
             "xsh-ssh-config-{}-{timestamp}-{counter}",
+            std::process::id()
+        ))
+    }
+
+    fn temp_config_directory() -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(10_000);
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "xsh-ssh-config-directory-{}-{timestamp}-{counter}",
             std::process::id()
         ))
     }

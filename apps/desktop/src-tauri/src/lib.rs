@@ -43,6 +43,31 @@ struct AppState {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct LocalPortDiagnostic {
+    status: String,
+    detail: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ForwardHealth {
+    forward_id: Uuid,
+    status: String,
+    detail: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalSyncEntry {
+    relative_path: String,
+    absolute_path: PathBuf,
+    is_directory: bool,
+    size: u64,
+    modified_at_unix: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ImportSummary {
     groups_created: usize,
     sessions_created: usize,
@@ -509,6 +534,72 @@ async fn list_forwards(
 }
 
 #[tauri::command]
+fn diagnose_local_port(bind_host: String, bind_port: u16) -> CommandResult<LocalPortDiagnostic> {
+    let bind_host = bind_host.trim().to_owned();
+    if bind_host.is_empty() {
+        return Err("监听地址不能为空".into());
+    }
+    if bind_port == 0 {
+        return Ok(LocalPortDiagnostic {
+            status: "available".into(),
+            detail: "端口 0 会由系统自动分配".into(),
+        });
+    }
+    match std::net::TcpListener::bind((bind_host.as_str(), bind_port)) {
+        Ok(listener) => {
+            drop(listener);
+            Ok(LocalPortDiagnostic {
+                status: "available".into(),
+                detail: format!("{bind_host}:{bind_port} 当前可监听"),
+            })
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => Ok(LocalPortDiagnostic {
+            status: "occupied".into(),
+            detail: format!("{bind_host}:{bind_port} 已被本机其他程序占用"),
+        }),
+        Err(error) => Ok(LocalPortDiagnostic {
+            status: "unavailable".into(),
+            detail: format!("无法监听 {bind_host}:{bind_port}：{error}"),
+        }),
+    }
+}
+
+#[tauri::command]
+async fn get_forward_health(
+    state: State<'_, AppState>,
+    connection_id: ConnectionId,
+    forward_id: Uuid,
+) -> CommandResult<ForwardHealth> {
+    let forward = state
+        .ssh
+        .list_forwards(connection_id)
+        .await
+        .map_err(display_error)?
+        .into_iter()
+        .find(|forward| forward.forward_id == forward_id);
+    let Some(forward) = forward else {
+        return Ok(ForwardHealth {
+            forward_id,
+            status: "stopped".into(),
+            detail: "当前 SSH 连接中未注册此隧道".into(),
+        });
+    };
+    let (status, detail) = if forward.kind == "remote" {
+        (
+            "unknown",
+            "远程监听已向 SSH 服务器申请；客户端无法离线探测远端目标服务".into(),
+        )
+    } else {
+        ("running", "本地监听已在当前 SSH 连接中注册".into())
+    };
+    Ok(ForwardHealth {
+        forward_id,
+        status: status.into(),
+        detail,
+    })
+}
+
+#[tauri::command]
 async fn terminal_resize(
     state: State<'_, AppState>,
     connection_id: ConnectionId,
@@ -671,6 +762,26 @@ async fn sftp_list_directory(
         .list_directory(connection_id, path)
         .await
         .map_err(display_error)
+}
+
+#[tauri::command]
+fn list_local_sync_entries(
+    root_path: PathBuf,
+    exclude_patterns: Vec<String>,
+) -> CommandResult<Vec<LocalSyncEntry>> {
+    let root = root_path.canonicalize().map_err(display_error)?;
+    if !root.is_dir() {
+        return Err("同步本地目录不存在或不是文件夹".into());
+    }
+    let patterns = exclude_patterns
+        .into_iter()
+        .map(|pattern| pattern.trim().replace('\\', "/"))
+        .filter(|pattern| !pattern.is_empty() && !pattern.starts_with('#'))
+        .collect::<Vec<_>>();
+    let mut entries = Vec::new();
+    collect_local_sync_entries(&root, &root, &patterns, &mut entries)?;
+    entries.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    Ok(entries)
 }
 
 #[tauri::command]
@@ -1518,6 +1629,87 @@ fn validate_startup_command(command: Option<&str>) -> CommandResult<()> {
     Ok(())
 }
 
+fn collect_local_sync_entries(
+    root: &std::path::Path,
+    directory: &std::path::Path,
+    exclude_patterns: &[String],
+    entries: &mut Vec<LocalSyncEntry>,
+) -> CommandResult<()> {
+    for entry in std::fs::read_dir(directory).map_err(display_error)? {
+        let entry = entry.map_err(display_error)?;
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path).map_err(display_error)?;
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        let relative_path = path
+            .strip_prefix(root)
+            .map_err(display_error)?
+            .to_string_lossy()
+            .replace('\\', "/");
+        if exclude_patterns
+            .iter()
+            .any(|pattern| sync_glob_match(pattern, &relative_path))
+        {
+            continue;
+        }
+        let is_directory = metadata.is_dir();
+        let modified_at_unix = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs());
+        entries.push(LocalSyncEntry {
+            relative_path,
+            absolute_path: path.clone(),
+            is_directory,
+            size: metadata.len(),
+            modified_at_unix,
+        });
+        if is_directory {
+            collect_local_sync_entries(root, &path, exclude_patterns, entries)?;
+        }
+    }
+    Ok(())
+}
+
+fn sync_glob_match(pattern: &str, value: &str) -> bool {
+    let pattern = pattern.trim();
+    if pattern.is_empty() {
+        return false;
+    }
+    if let Some(directory) = pattern.strip_suffix("/**")
+        && value == directory
+    {
+        return true;
+    }
+    let (pattern, value): (Vec<char>, Vec<char>) =
+        (pattern.chars().collect(), value.chars().collect());
+    let mut matches = vec![vec![false; value.len() + 1]; pattern.len() + 1];
+    matches[0][0] = true;
+    for index in 1..=pattern.len() {
+        if pattern[index - 1] == '*' {
+            matches[index][0] = matches[index - 1][0];
+        }
+    }
+    for pattern_index in 1..=pattern.len() {
+        for value_index in 1..=value.len() {
+            matches[pattern_index][value_index] = match pattern[pattern_index - 1] {
+                '*' => {
+                    matches[pattern_index - 1][value_index]
+                        || matches[pattern_index][value_index - 1]
+                }
+                '?' => matches[pattern_index - 1][value_index - 1],
+                character => {
+                    matches[pattern_index - 1][value_index - 1]
+                        && character == value[value_index - 1]
+                }
+            };
+        }
+    }
+    matches[pattern.len()][value.len()]
+}
+
 async fn validate_authentication_reference(
     state: &AppState,
     authentication: &AuthenticationMethod,
@@ -1671,6 +1863,8 @@ pub fn run() {
             start_forward_profile,
             stop_forward,
             list_forwards,
+            diagnose_local_port,
+            get_forward_health,
             terminal_resize,
             disconnect_terminal,
             connect_sftp,
@@ -1683,6 +1877,7 @@ pub fn run() {
             remove_transfer,
             sftp_canonicalize,
             sftp_list_directory,
+            list_local_sync_entries,
             sftp_stat,
             prepare_remote_edit_path,
             create_local_directory,

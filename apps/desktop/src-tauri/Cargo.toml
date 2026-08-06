@@ -21,6 +21,7 @@ tauri = { version = "2.11.5", features = ["tray-icon"] }
 tauri-plugin-clipboard-manager = "2.3.2"
 tauri-plugin-dialog = "2.6.0"
 tokio.workspace = true
+tracing.workspace = true
 uuid.workspace = true
 xsh-domain = { path = "../../../crates/xsh-domain" }
 xsh-security = { path = "../../../crates/xsh-security" }

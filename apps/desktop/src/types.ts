@@ -27,6 +27,27 @@ export interface TerminalProfile {
   fontFamily: string | null;
   fontSize: number;
   theme: string;
+  triggers: TerminalTrigger[];
+  keyMappings: TerminalKeyMapping[];
+}
+
+export type TerminalTriggerMatchMode = "keyword" | "regex";
+
+export interface TerminalTrigger {
+  id: Uuid;
+  label: string;
+  pattern: string;
+  matchMode: TerminalTriggerMatchMode;
+  caseSensitive: boolean;
+  cooldownSeconds: number;
+  enabled: boolean;
+}
+
+export interface TerminalKeyMapping {
+  id: Uuid;
+  shortcut: string;
+  text: string;
+  enabled: boolean;
 }
 
 export interface SshConfigEntry {
@@ -35,6 +56,7 @@ export interface SshConfigEntry {
   port: number;
   username: string;
   identityFile: string | null;
+  identityFiles: string[];
   proxyJump: string | null;
   sourcePath: string;
 }
@@ -178,6 +200,14 @@ export interface RemoteEntry {
   group: string | null;
 }
 
+export interface LocalSyncEntry {
+  relativePath: string;
+  absolutePath: string;
+  isDirectory: boolean;
+  size: number;
+  modifiedAtUnix: number | null;
+}
+
 
 export type TransferStatus =
   | "queued"
@@ -268,11 +298,23 @@ export interface ForwardInfo {
   profileId: Uuid | null;
 }
 
+export interface LocalPortDiagnostic {
+  status: "available" | "occupied" | "unavailable";
+  detail: string;
+}
+
+export interface ForwardHealth {
+  forwardId: Uuid;
+  status: "running" | "unknown" | "stopped";
+  detail: string;
+}
+
 export type ForwardKind = "local" | "remote" | "dynamic";
 
 export interface ForwardProfile {
   id: Uuid;
   name: string;
+  group: string | null;
   kind: ForwardKind;
   bindHost: string;
   bindPort: number;
@@ -307,4 +349,6 @@ export const defaultTerminalProfile = (): TerminalProfile => ({
   fontFamily: null,
   fontSize: 14,
   theme: "xsh-dark",
+  triggers: [],
+  keyMappings: [],
 });

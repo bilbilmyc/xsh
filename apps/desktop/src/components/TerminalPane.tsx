@@ -9,7 +9,8 @@ import { api } from "../api";
 import { ContextMenu } from "./ContextMenu";
 import type { AppPreferences } from "../preferences";
 import type { SavedSession, TerminalEvent } from "../types";
-import { normalizeTerminalCommand } from "../terminal-command";
+import { decodeTerminalKeyMapping, normalizeTerminalCommand } from "../terminal-command";
+import { matchesTerminalShortcut, TerminalTriggerMatcher } from "../terminal-trigger";
 import { hostKeyConfirmationMessage } from "../host-key";
 import { BoundedSessionLogBuffer } from "../session-log-buffer";
 import { CumulativeTerminalOutputAcknowledger } from "../terminal-output-ack";
@@ -18,6 +19,8 @@ import "@xterm/xterm/css/xterm.css";
 export interface TerminalCommandRequest {
   id: string;
   text: string;
+  batchRunId?: string;
+  targetTabId?: string;
 }
 
 interface TerminalPaneProps {
@@ -30,7 +33,8 @@ interface TerminalPaneProps {
   onStateChange: (state: string) => void;
   onConnectionChange?: (connectionId: string | null) => void;
   onFocus?: () => void;
-  onCommandResult: (result: { id: string; ok: boolean; error?: string }) => void;
+  onCommandResult: (result: { id: string; ok: boolean; error?: string; batchRunId?: string; targetTabId?: string }) => void;
+  onTrigger?: (event: { triggerId: string; label: string; matchedText: string }) => void;
   onEditSession?: (session: SavedSession) => void;
   onDiagnose?: (session: SavedSession) => void;
 }
@@ -53,6 +57,7 @@ export function TerminalPane({
   onConnectionChange,
   onFocus,
   onCommandResult,
+  onTrigger,
   onEditSession,
   onDiagnose,
 }: TerminalPaneProps) {
@@ -126,6 +131,7 @@ export function TerminalPane({
     let connectPendingForNetwork = false;
     let currentState = "connecting";
     let lastWakeCheckAt = Date.now();
+    const triggerMatcher = new TerminalTriggerMatcher();
     setConnectionError(null);
     setConnectionNotice(null);
     sessionLog.reset([
@@ -390,6 +396,15 @@ export function TerminalPane({
     };
 
     terminal.attachCustomKeyEventHandler((event) => {
+      const mapping = (session.terminal.keyMappings ?? []).find((candidate) =>
+        candidate.enabled && candidate.text && matchesTerminalShortcut(event, candidate.shortcut),
+      );
+      if (mapping && event.type === "keydown") {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        queueBytes(new TextEncoder().encode(decodeTerminalKeyMapping(mapping.text)));
+        return false;
+      }
       const copy = isCopyShortcut(event);
       const paste = isPasteShortcut(event);
       const search = isSearchShortcut(event);
@@ -635,6 +650,15 @@ export function TerminalPane({
           case "output": {
             const output = outputDecoder.decode(new Uint8Array(event.payload), { stream: true });
             sessionLog.append(output);
+            for (const match of triggerMatcher.match(output, session.terminal.triggers ?? [])) {
+              const timestamp = new Date().toISOString();
+              sessionLog.append(`\n[XSH Trigger ${timestamp}] ${match.trigger.label}: ${match.matchedText}\n`);
+              onTrigger?.({
+                triggerId: match.trigger.id,
+                label: match.trigger.label,
+                matchedText: match.matchedText,
+              });
+            }
             queueOutput(event.payload, acknowledgeOutput);
             break;
           }
@@ -861,11 +885,11 @@ export function TerminalPane({
     void api.terminalWrite(connectionId, Array.from(new TextEncoder().encode(text)))
       .then(() => {
         terminal?.focus();
-        onCommandResult({ id: command.id, ok: true });
+        onCommandResult({ id: command.id, ok: true, batchRunId: command.batchRunId, targetTabId: command.targetTabId });
       })
       .catch((error) => {
         terminal?.writeln(`\r\n\x1b[31m命令发送失败：${String(error)}\x1b[0m`);
-        onCommandResult({ id: command.id, ok: false, error: String(error) });
+        onCommandResult({ id: command.id, ok: false, error: String(error), batchRunId: command.batchRunId, targetTabId: command.targetTabId });
       });
   }, [command, connectionEpoch, onCommandResult]);
 

@@ -78,14 +78,14 @@ export function SshConfigModal({ entries, loading, onClose, onRefresh, onImport 
                     <small>{entry.username || "未设置用户"}@{entry.hostname}:{entry.port}</small>
                   </span>
                   <span className="ssh-config-row-meta">
-                    {entry.identityFile ? <><FileKey size={12} /> Key</> : "需要密码"}
+                    {entry.identityFile ? <><FileKey size={12} /> Key{entry.identityFiles.length > 1 ? ` · ${entry.identityFiles.length} 个` : ""}</> : "需要密码"}
                     {entry.proxyJump && <em>ProxyJump {entry.proxyJump}</em>}
                   </span>
                 </label>
               ))}
             </div>
           )}
-          <p className="ssh-config-note">导入后会创建本地会话。没有 IdentityFile 的配置会以密码认证导入，需要在会话编辑中填写密码；密码不会来自 ~/.ssh/config。</p>
+          <p className="ssh-config-note">导入会保留首个 IdentityFile 作为会话默认密钥；多个 IdentityFile 会显示数量，其他路径可在会话编辑中选择。没有 IdentityFile 的配置会以密码认证导入，需要在会话编辑中填写密码；密码不会来自 ~/.ssh/config。</p>
           {error && <div className="form-error">{error}</div>}
         </div>
         <footer className="modal-footer">

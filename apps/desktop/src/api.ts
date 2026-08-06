@@ -2,6 +2,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import type {
   BackupImportSummary,
+  ForwardHealth,
   ForwardInfo,
   ForwardProfile,
   ImportSummary,
@@ -10,6 +11,8 @@ import type {
   SshDiagnosticReport,
   HostKeyApproval,
   KnownHost,
+  LocalPortDiagnostic,
+  LocalSyncEntry,
   RemoteEntry,
   SavedSession,
   SessionDraft,
@@ -94,6 +97,10 @@ export const api = {
     invoke<void>("stop_forward", { connectionId, forwardId }),
   listForwards: (connectionId: Uuid) =>
     invoke<ForwardInfo[]>("list_forwards", { connectionId }),
+  diagnoseLocalPort: (bindHost: string, bindPort: number) =>
+    invoke<LocalPortDiagnostic>("diagnose_local_port", { bindHost, bindPort }),
+  getForwardHealth: (connectionId: Uuid, forwardId: Uuid) =>
+    invoke<ForwardHealth>("get_forward_health", { connectionId, forwardId }),
 
   terminalResize: (connectionId: Uuid, columns: number, rows: number) =>
     invoke<void>("terminal_resize", { connectionId, columns, rows }),
@@ -116,6 +123,8 @@ export const api = {
     invoke<string>("sftp_canonicalize", { connectionId, path }),
   sftpListDirectory: (connectionId: Uuid, path: string) =>
     invoke<RemoteEntry[]>("sftp_list_directory", { connectionId, path }),
+  listLocalSyncEntries: (rootPath: string, excludePatterns: string[]) =>
+    invoke<LocalSyncEntry[]>("list_local_sync_entries", { rootPath, excludePatterns }),
   sftpStat: (connectionId: Uuid, path: string) =>
     invoke<RemoteEntry>("sftp_stat", { connectionId, path }),
   prepareRemoteEditPath: (remoteName: string) =>

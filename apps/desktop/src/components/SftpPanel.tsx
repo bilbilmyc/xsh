@@ -13,10 +13,12 @@ import {
   Play,
   Pause,
   RefreshCw,
+  Repeat2,
   Trash2,
   X,
 } from "lucide-react";
 import { api } from "../api";
+import { SftpSyncModal } from "./SftpSyncModal";
 import { hostKeyConfirmationMessage, hostKeyEndpointLabel } from "../host-key";
 import { connectSftpWithHostKeyApprovals } from "../sftp-connection";
 import {
@@ -68,6 +70,7 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
   const [pendingUploads, setPendingUploads] = useState<PendingUpload[]>([]);
   const [draggingFiles, setDraggingFiles] = useState(false);
   const [remoteEdit, setRemoteEdit] = useState<RemoteEditState | null>(null);
+  const [syncVisible, setSyncVisible] = useState(false);
   const remoteListRef = useRef<HTMLDivElement>(null);
   const uploadQueueCancelEpochRef = useRef(0);
   const activeUploadCountRef = useRef(0);
@@ -698,6 +701,9 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
         <button onClick={() => void upload()} disabled={!connectionId} title="选择文件并上传到当前远程目录">
           <ArrowUpFromLine size={15} />
         </button>
+        <button onClick={() => setSyncVisible(true)} disabled={!connectionId} title="比较本地文件夹与当前远程目录并提交单向同步">
+          <Repeat2 size={15} />
+        </button>
         <button onClick={() => void download(false)} disabled={selectedEntries.length === 0} title="下载选中文件或目录">
           <ArrowDownToLine size={15} />
         </button>
@@ -755,7 +761,7 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
       </div>
       {(transferItems.length > 0 || pendingUploads.length > 0 || remoteEdit) && (
         <div className="transfer-list">
-          {remoteEdit && (
+      {remoteEdit && (
             <div className="remote-edit-card">
               <div className="transfer-title">远程编辑</div>
               <div className="remote-edit-copy">
@@ -820,6 +826,13 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
           )}
         </div>
       )}
+      {syncVisible && connectionId && <SftpSyncModal
+        connectionId={connectionId}
+        initialRemotePath={path}
+        onClose={() => setSyncVisible(false)}
+        onRefreshRemote={() => void load(connectionId, path)}
+        onToast={(message) => onToast?.(message)}
+      />}
     </aside>
   );
 }

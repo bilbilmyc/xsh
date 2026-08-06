@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   ArrowDownToLine,
   ArrowUpFromLine,
@@ -6,12 +6,13 @@ import {
   Edit3,
   Globe2,
   Play,
+  RefreshCw,
   Save,
   Trash2,
   X,
 } from "lucide-react";
 import { api } from "../api";
-import type { ForwardInfo, ForwardKind, ForwardProfile, SavedSession } from "../types";
+import type { ForwardHealth, ForwardInfo, ForwardKind, ForwardProfile, SavedSession } from "../types";
 
 interface PortForwardModalProps {
   connectionId: string;
@@ -34,11 +35,13 @@ export function PortForwardModal({
   const [targetHost, setTargetHost] = useState("127.0.0.1");
   const [targetPort, setTargetPort] = useState("");
   const [profileName, setProfileName] = useState("");
+  const [profileGroup, setProfileGroup] = useState("");
   const [autoStart, setAutoStart] = useState(true);
   const [saveAsProfile, setSaveAsProfile] = useState(true);
   const [editingProfileId, setEditingProfileId] = useState<string | null>(null);
   const [profiles, setProfiles] = useState<ForwardProfile[]>(session.forwardProfiles ?? []);
   const [forwards, setForwards] = useState<ForwardInfo[]>([]);
+  const [forwardHealth, setForwardHealth] = useState<Record<string, ForwardHealth>>({});
   const [busy, setBusy] = useState(false);
   const [loadingForwards, setLoadingForwards] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -47,24 +50,31 @@ export function PortForwardModal({
     setProfiles(session.forwardProfiles ?? []);
   }, [session.forwardProfiles, session.updatedAt]);
 
-  useEffect(() => {
-    let mounted = true;
+  const refreshForwards = useCallback(async () => {
     setLoadingForwards(true);
-    setError(null);
-    void api.listForwards(connectionId)
-      .then((items) => {
-        if (mounted) setForwards(items);
-      })
-      .catch((caught) => {
-        if (mounted) setError(String(caught));
-      })
-      .finally(() => {
-        if (mounted) setLoadingForwards(false);
-      });
-    return () => {
-      mounted = false;
-    };
+    try {
+      const items = await api.listForwards(connectionId);
+      setForwards(items);
+      const health = await Promise.all(items.map(async (forward) => {
+        try {
+          return await api.getForwardHealth(connectionId, forward.forwardId);
+        } catch {
+          return { forwardId: forward.forwardId, status: "unknown" as const, detail: "无法读取当前健康状态" };
+        }
+      }));
+      setForwardHealth(Object.fromEntries(health.map((item) => [item.forwardId, item])));
+    } catch (caught) {
+      setError(String(caught));
+    } finally {
+      setLoadingForwards(false);
+    }
   }, [connectionId]);
+
+  useEffect(() => {
+    void refreshForwards();
+    const interval = window.setInterval(() => void refreshForwards(), 10_000);
+    return () => window.clearInterval(interval);
+  }, [refreshForwards]);
 
   const resetForm = () => {
     setEditingProfileId(null);
@@ -74,6 +84,7 @@ export function PortForwardModal({
     setTargetHost("127.0.0.1");
     setTargetPort("");
     setProfileName("");
+    setProfileGroup("");
     setAutoStart(true);
     setSaveAsProfile(true);
     setError(null);
@@ -94,6 +105,7 @@ export function PortForwardModal({
     return {
       id: editingProfileId ?? crypto.randomUUID(),
       name: normalizedName || defaultProfileName(kind, normalizedBindHost, localBindPort, normalizedTargetHost, parsedTargetPort),
+      group: profileGroup.trim() || null,
       kind,
       bindHost: normalizedBindHost,
       bindPort: localBindPort,
@@ -118,6 +130,7 @@ export function PortForwardModal({
   const startProfile = async (profile: ForwardProfile) => {
     const info = await api.startForwardProfile(connectionId, profile);
     setForwards((current) => current.some((item) => item.forwardId === info.forwardId) ? current : [...current, info]);
+    void refreshForwards();
     onToast(`已启动隧道“${profile.name}”：${formatForwardAddress(info)}`);
   };
 
@@ -126,12 +139,17 @@ export function PortForwardModal({
     setError(null);
     try {
       const profile = buildProfile(saveAsProfile);
+      if (profile.kind !== "remote" && profile.bindPort !== 0) {
+        const diagnostic = await api.diagnoseLocalPort(profile.bindHost, profile.bindPort);
+        if (diagnostic.status !== "available") throw new Error(`${diagnostic.detail}。请释放端口或填写 0 自动分配。`);
+      }
       const startedProfile = saveAsProfile ? await saveProfile() : profile;
       if (saveAsProfile) {
         await startProfile(startedProfile);
       } else {
         const info = await startEphemeralForward(connectionId, profile);
         setForwards((current) => [...current, info]);
+        void refreshForwards();
         onToast(`已启动临时隧道：${formatForwardAddress(info)}`);
       }
     } catch (caught) {
@@ -161,6 +179,7 @@ export function PortForwardModal({
     setTargetHost(profile.targetHost ?? "127.0.0.1");
     setTargetPort(profile.targetPort === null ? "" : String(profile.targetPort));
     setProfileName(profile.name);
+    setProfileGroup(profile.group ?? "");
     setAutoStart(profile.autoStart);
     setSaveAsProfile(true);
     setError(null);
@@ -192,6 +211,11 @@ export function PortForwardModal({
     try {
       await api.stopForward(connectionId, forward.forwardId);
       setForwards((current) => current.filter((item) => item.forwardId !== forward.forwardId));
+      setForwardHealth((current) => {
+        const next = { ...current };
+        delete next[forward.forwardId];
+        return next;
+      });
       onToast(`已停止转发：${forward.bindHost}:${forward.bindPort}`);
     } catch (caught) {
       setError(String(caught));
@@ -216,6 +240,7 @@ export function PortForwardModal({
     : kind === "remote"
       ? `远程 ${bindHost || "127.0.0.1"}:${bindPort || "0"}  →  本地 ${targetHost || "127.0.0.1"}:${targetPort || "端口"}`
       : `SOCKS5 ${bindHost || "127.0.0.1"}:${bindPort || "0"}  →  SSH 可达网络`;
+  const groupedProfiles = groupForwardProfiles(profiles);
 
   return (
     <div className="modal-backdrop" onMouseDown={onClose}>
@@ -253,7 +278,8 @@ export function PortForwardModal({
             </div>
 
             <div className="forward-form-grid">
-              <label className="field field-span-2"><span>配置名称</span><input value={profileName} onChange={(event) => setProfileName(event.target.value)} placeholder="例如：开发 API 隧道" /></label>
+              <label className="field"><span>配置名称</span><input value={profileName} onChange={(event) => setProfileName(event.target.value)} placeholder="例如：开发 API 隧道" /></label>
+              <label className="field"><span>配置分组（可选）</span><input value={profileGroup} onChange={(event) => setProfileGroup(event.target.value)} placeholder="例如：开发环境" /></label>
               <label className="field"><span>{kind === "remote" ? "远程监听地址" : "本地监听地址"}</span><input value={bindHost} onChange={(event) => setBindHost(event.target.value)} placeholder="127.0.0.1" /></label>
               <label className="field"><span>{kind === "remote" ? "远程监听端口" : "本地监听端口"}</span><input type="number" min="0" max="65535" value={bindPort} onChange={(event) => setBindPort(event.target.value)} placeholder="0" /><small className="field-help">填 0 自动分配</small></label>
               {kind !== "dynamic" && <>
@@ -289,20 +315,24 @@ export function PortForwardModal({
             {profiles.length === 0
               ? <div className="forward-empty-state"><Save size={18} /><div><strong>暂无已保存配置</strong><span>填写上方参数后选择“保存配置”，下次连接即可复用。</span></div></div>
               : <div className="forward-list">
-                {profiles.map((profile) => <div className="forward-item" key={profile.id}>
-                  <div className="forward-item-copy"><strong>{profile.name}</strong><span>{profileKindLabel(profile.kind)} · {profile.bindHost}:{profile.bindPort}{profile.targetHost ? ` → ${profile.targetHost}:${profile.targetPort}` : ""}</span><small>{profile.autoStart ? "连接时自动启动" : "仅手动启动"}</small></div>
-                  <div className="forward-item-actions">
-                    <button disabled={busy} onClick={() => void startProfile(profile)} title="启动此隧道"><Play size={13} /></button>
-                    <button disabled={busy} onClick={() => editProfile(profile)} title="编辑配置"><Edit3 size={13} /></button>
-                    <button disabled={busy} onClick={() => void removeProfile(profile)} title="删除配置"><Trash2 size={13} /></button>
-                  </div>
+                {groupedProfiles.map(([group, items]) => <div className="forward-profile-group" key={group}>
+                  <div className="forward-profile-group-title">{group}</div>
+                  {items.map((profile) => <div className="forward-item" key={profile.id}>
+                    <div className="forward-item-copy"><strong>{profile.name}</strong><span>{profileKindLabel(profile.kind)} · {profile.bindHost}:{profile.bindPort}{profile.targetHost ? ` → ${profile.targetHost}:${profile.targetPort}` : ""}</span><small>{profile.autoStart ? "连接时自动启动" : "仅手动启动"}</small></div>
+                    <div className="forward-item-actions">
+                      <button disabled={busy} onClick={() => void startProfile(profile)} title="启动此隧道"><Play size={13} /></button>
+                      <button disabled={busy} onClick={() => editProfile(profile)} title="编辑配置"><Edit3 size={13} /></button>
+                      <button disabled={busy} onClick={() => void removeProfile(profile)} title="删除配置"><Trash2 size={13} /></button>
+                    </div>
+                  </div>)}
                 </div>)}
               </div>}
           </section>
 
           <section className="forward-running-card">
             <div className="forward-list-heading">
-              <div><strong>当前监听中的转发</strong><span>监听已建立，但不代表目标服务一定可达；目标暂时不可达时，访问会失败。</span></div>
+              <div><strong>当前监听中的转发</strong><span>运行状态每 10 秒刷新一次；本地监听代表已注册，远端目标服务不做虚假可达性判断。</span></div>
+              <button className="icon-button" disabled={loadingForwards} onClick={() => void refreshForwards()} title="刷新隧道状态"><RefreshCw size={14} /></button>
               <span className="forward-count">{forwards.length}</span>
             </div>
             {loadingForwards
@@ -311,7 +341,7 @@ export function PortForwardModal({
               ? <div className="forward-empty-state"><Globe2 size={18} /><div><strong>暂无运行中的转发</strong><span>启动成功的隧道会显示在这里。</span></div></div>
               : <div className="forward-list">
                 {forwards.map((forward) => <div className="forward-item" key={forward.forwardId}>
-                  <div className="forward-item-copy"><strong>{profileKindLabel(forward.kind)}</strong><span>{forward.bindHost}:{forward.bindPort}{forward.targetHost ? ` → ${forward.targetHost}:${forward.targetPort}` : ""}</span></div>
+                  <div className="forward-item-copy"><strong>{profiles.find((profile) => belongsToProfile(forward, profile))?.name ?? profileKindLabel(forward.kind)}</strong><span>{forward.bindHost}:{forward.bindPort}{forward.targetHost ? ` → ${forward.targetHost}:${forward.targetPort}` : ""}</span><small className={`forward-health ${forwardHealth[forward.forwardId]?.status ?? "unknown"}`} title={forwardHealth[forward.forwardId]?.detail}>{forwardHealthLabel(forwardHealth[forward.forwardId])}</small></div>
                   <button className="forward-stop-button" disabled={busy} onClick={() => void stop(forward)} title="停止此转发"><Trash2 size={13} />停止</button>
                 </div>)}
               </div>}
@@ -361,4 +391,24 @@ function belongsToProfile(forward: ForwardInfo, profile: ForwardProfile) {
     && forward.bindPort === profile.bindPort
     && forward.targetHost === profile.targetHost
     && forward.targetPort === profile.targetPort;
+}
+
+function groupForwardProfiles(profiles: ForwardProfile[]): Array<[string, ForwardProfile[]]> {
+  const groups = new Map<string, ForwardProfile[]>();
+  for (const profile of profiles) {
+    const group = profile.group?.trim() || "未分组";
+    groups.set(group, [...(groups.get(group) ?? []), profile]);
+  }
+  return Array.from(groups.entries()).sort(([left], [right]) => {
+    if (left === "未分组") return 1;
+    if (right === "未分组") return -1;
+    return left.localeCompare(right, "zh-CN");
+  });
+}
+
+function forwardHealthLabel(health: ForwardHealth | undefined) {
+  if (!health) return "正在读取状态";
+  if (health.status === "running") return "监听已注册";
+  if (health.status === "stopped") return "已停止";
+  return "远端状态未探测";
 }

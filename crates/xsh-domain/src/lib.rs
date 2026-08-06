@@ -64,6 +64,12 @@ pub struct TerminalProfile {
     pub font_family: Option<String>,
     pub font_size: u16,
     pub theme: String,
+    /// Match terminal output locally. Triggers never execute commands.
+    #[serde(default)]
+    pub triggers: Vec<TerminalTrigger>,
+    /// Per-session key sequences sent directly to the terminal input stream.
+    #[serde(default)]
+    pub key_mappings: Vec<TerminalKeyMapping>,
 }
 
 impl Default for TerminalProfile {
@@ -75,8 +81,60 @@ impl Default for TerminalProfile {
             font_family: None,
             font_size: 14,
             theme: "xsh-dark".into(),
+            triggers: Vec::new(),
+            key_mappings: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TerminalTriggerMatchMode {
+    Keyword,
+    Regex,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalTrigger {
+    pub id: Uuid,
+    pub label: String,
+    pub pattern: String,
+    #[serde(default)]
+    pub match_mode: TerminalTriggerMatchMode,
+    #[serde(default)]
+    pub case_sensitive: bool,
+    #[serde(default = "default_trigger_cooldown_seconds")]
+    pub cooldown_seconds: u16,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for TerminalTriggerMatchMode {
+    fn default() -> Self {
+        Self::Keyword
+    }
+}
+
+const fn default_trigger_cooldown_seconds() -> u16 {
+    30
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalKeyMapping {
+    pub id: Uuid,
+    /// For example, `F5` or `Ctrl+Alt+K`.
+    pub shortcut: String,
+    /// Printable text and the common `\\r`, `\\n`, `\\t`, and `\\e` escapes are
+    /// decoded only while this mapping is sent.
+    pub text: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -94,6 +152,9 @@ pub struct ForwardProfile {
     /// independently of the runtime SSH forward id.
     pub id: Uuid,
     pub name: String,
+    /// Optional local-only organization label for a session's tunnel profiles.
+    #[serde(default)]
+    pub group: Option<String>,
     pub kind: ForwardKind,
     pub bind_host: String,
     pub bind_port: u16,
@@ -564,6 +625,25 @@ mod tests {
         assert_eq!(profile.terminal_type, "xterm-256color");
         assert_eq!(profile.encoding, "utf-8");
         assert!(profile.scrollback_lines >= 1_000);
+        assert!(profile.triggers.is_empty());
+        assert!(profile.key_mappings.is_empty());
+    }
+
+    #[test]
+    fn legacy_terminal_profile_defaults_automation_fields() {
+        let profile: TerminalProfile = serde_json::from_str(
+            r#"{
+                "terminalType": "xterm-256color",
+                "encoding": "utf-8",
+                "scrollbackLines": 10000,
+                "fontFamily": null,
+                "fontSize": 14,
+                "theme": "xsh-dark"
+            }"#,
+        )
+        .unwrap();
+        assert!(profile.triggers.is_empty());
+        assert!(profile.key_mappings.is_empty());
     }
 
     #[test]
@@ -571,6 +651,7 @@ mod tests {
         let profile = ForwardProfile {
             id: Uuid::from_u128(7),
             name: "Local API".into(),
+            group: Some("Development".into()),
             kind: ForwardKind::Local,
             bind_host: "127.0.0.1".into(),
             bind_port: 18_080,
@@ -580,6 +661,7 @@ mod tests {
         };
         let json = serde_json::to_value(&profile).unwrap();
         assert_eq!(json["kind"], "local");
+        assert_eq!(json["group"], "Development");
         assert_eq!(json["bindHost"], "127.0.0.1");
         assert_eq!(json["autoStart"], true);
         assert_eq!(

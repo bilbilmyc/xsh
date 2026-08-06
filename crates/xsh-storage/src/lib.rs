@@ -752,6 +752,7 @@ mod tests {
         let profile = ForwardProfile {
             id: Uuid::from_u128(1),
             name: "API tunnel".into(),
+            group: Some("APIs".into()),
             kind: xsh_domain::ForwardKind::Local,
             bind_host: "127.0.0.1".into(),
             bind_port: 18_080,

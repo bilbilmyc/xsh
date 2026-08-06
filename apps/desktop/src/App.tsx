@@ -2,6 +2,7 @@ import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState
 import { open, save } from "@tauri-apps/plugin-dialog";
 import {
   Activity,
+  BellRing,
   Command,
   Columns2,
   Download,
@@ -17,11 +18,13 @@ import {
   PanelLeftOpen,
   Plus,
   Settings,
+  SendHorizontal,
   Upload,
   X,
 } from "lucide-react";
 import { api } from "./api";
 import { CommandCenterModal } from "./components/CommandCenterModal";
+import { BatchCommandModal, type BatchCommandRun, type BatchCommandTarget } from "./components/BatchCommandModal";
 import { ConnectionManagerModal } from "./components/ConnectionManagerModal";
 import { CommandHistoryModal } from "./components/CommandHistoryModal";
 import { ContextMenu } from "./components/ContextMenu";
@@ -70,7 +73,8 @@ interface TerminalPaneHostProps {
   onStateChange: (tabId: string, state: string) => void;
   onConnectionChange: (tabId: string, connectionId: string | null) => void;
   onFocus: (tabId: string) => void;
-  onCommandResult: (result: { id: string; ok: boolean; error?: string }) => void;
+  onCommandResult: (result: { id: string; ok: boolean; error?: string; batchRunId?: string; targetTabId?: string }) => void;
+  onTrigger: (tabId: string, event: { triggerId: string; label: string; matchedText: string }) => void;
   onEditSession: (session: SavedSession) => void;
   onDiagnose: (session: SavedSession) => void;
 }
@@ -86,12 +90,17 @@ const TerminalPaneHost = memo(function TerminalPaneHost({
   onConnectionChange,
   onFocus,
   onCommandResult,
+  onTrigger,
   onEditSession,
   onDiagnose,
 }: TerminalPaneHostProps) {
   const handleStateChange = useCallback((state: string) => onStateChange(tab.id, state), [onStateChange, tab.id]);
   const handleConnectionChange = useCallback((connectionId: string | null) => onConnectionChange(tab.id, connectionId), [onConnectionChange, tab.id]);
   const handleFocus = useCallback(() => onFocus(tab.id), [onFocus, tab.id]);
+  const handleTrigger = useCallback(
+    (event: { triggerId: string; label: string; matchedText: string }) => onTrigger(tab.id, event),
+    [onTrigger, tab.id],
+  );
 
   return (
     <TerminalPane
@@ -105,6 +114,7 @@ const TerminalPaneHost = memo(function TerminalPaneHost({
       onConnectionChange={handleConnectionChange}
       onFocus={handleFocus}
       onCommandResult={onCommandResult}
+      onTrigger={handleTrigger}
       onEditSession={onEditSession}
       onDiagnose={onDiagnose}
     />
@@ -151,6 +161,7 @@ interface TerminalTab {
   connectionVersion: number;
   locked: boolean;
   color: string | null;
+  alert?: { label: string; count: number; at: number };
 }
 
 const TAB_LABELS_STORAGE_KEY = "xsh.tab-labels.v1";
@@ -198,6 +209,18 @@ function normalizeTabColor(value: string | null | undefined): string | null {
   return /^#[0-9a-f]{6}$/i.test(trimmed) ? trimmed.toLowerCase() : null;
 }
 
+function showLocalTriggerNotification(title: string, body: string) {
+  if (!("Notification" in window)) return;
+  const deliver = () => {
+    if (Notification.permission === "granted") new Notification(title, { body, silent: false });
+  };
+  if (Notification.permission === "default") {
+    void Notification.requestPermission().then(() => deliver()).catch(() => undefined);
+  } else {
+    deliver();
+  }
+}
+
 function App() {
   const [groups, setGroups] = useState<SessionGroup[]>([]);
   const [sessions, setSessions] = useState<SavedSession[]>([]);
@@ -215,6 +238,8 @@ function App() {
   const [sshConfigEntries, setSshConfigEntries] = useState<SshConfigEntry[]>([]);
   const [sshConfigLoading, setSshConfigLoading] = useState(false);
   const [commandCenterVisible, setCommandCenterVisible] = useState(false);
+  const [batchCommandVisible, setBatchCommandVisible] = useState(false);
+  const [batchCommandRun, setBatchCommandRun] = useState<BatchCommandRun | null>(null);
   const [commands, setCommands] = useState<CommandSnippet[]>(() => loadCommandLibrary());
   const [commandHistory, setCommandHistory] = useState<CommandHistoryEntry[]>(() => loadCommandHistory());
   const [historyVisible, setHistoryVisible] = useState(false);
@@ -471,6 +496,7 @@ function App() {
       setSecondaryTabId(currentActiveTabId);
     }
     setActiveTabId(tabId);
+    setTabs((current) => current.map((tab) => tab.id === tabId && tab.alert ? { ...tab, alert: undefined } : tab));
   }, []);
 
   const focusOtherSplitPane = () => {
@@ -507,6 +533,12 @@ function App() {
   };
 
   const connectedTabs = tabs.filter((tab) => tab.state === "connected");
+  const batchCommandTargets: BatchCommandTarget[] = tabs.map((tab) => ({
+    tabId: tab.id,
+    name: getTabLabel(tab),
+    address: `${tab.session.username}@${tab.session.host}:${tab.session.port}`,
+    connected: tab.state === "connected",
+  }));
   const canExecuteCommand = broadcastEnabled ? connectedTabs.length > 0 : activeTab?.state === "connected";
   const commandExecutionUnavailableReason = !activeTab
     ? "请先打开一个 SSH 会话。"
@@ -538,11 +570,10 @@ function App() {
       setToast(commandExecutionUnavailableReason);
       return;
     }
-    const requestId = crypto.randomUUID();
-    const request = { id: requestId, text };
+    const requests = targets.map((tab) => [tab.id, { id: crypto.randomUUID(), text, targetTabId: tab.id }] as const);
     setPendingTerminalCommands((current) => Object.fromEntries([
       ...Object.entries(current),
-      ...targets.map((tab) => [tab.id, request] as const),
+      ...requests,
     ]));
     if (source !== "命令历史" && activeTab) {
       const historySource = source === "命令中心" ? "command-center" : "quick-command";
@@ -579,6 +610,23 @@ function App() {
     focusTab(tabId);
   }, [focusTab]);
 
+  const handleTerminalTrigger = useCallback((tabId: string, event: { triggerId: string; label: string; matchedText: string }) => {
+    const tab = tabsRef.current.find((candidate) => candidate.id === tabId);
+    const label = event.label.trim() || "终端触发器";
+    setTabs((current) => current.map((candidate) => candidate.id === tabId
+      ? {
+          ...candidate,
+          alert: {
+            label,
+            count: (candidate.alert?.count ?? 0) + 1,
+            at: Date.now(),
+          },
+        }
+      : candidate));
+    setToast(`“${tab ? getTabLabel(tab) : "终端"}”命中触发器：${label}`);
+    showLocalTriggerNotification(`XSH · ${tab ? getTabLabel(tab) : "终端"}`, `${label}${event.matchedText ? `：${event.matchedText.slice(0, 160)}` : ""}`);
+  }, []);
+
   const queueCommandForActiveTerminal = (command: CommandSnippet) => {
     if ((!activeTab || activeTab.state !== "connected") && !(broadcastEnabled && connectedTabs.length > 0)) {
       setToast(commandExecutionUnavailableReason);
@@ -592,10 +640,51 @@ function App() {
     queueTextForActiveTerminal(item.label, text, "快捷命令");
   };
 
-  const handleCommandResult = useCallback((result: { id: string; ok: boolean; error?: string }) => {
+  const runBatchCommand = useCallback((command: string, targetTabIds: string[]) => {
+    const targetSet = new Set(targetTabIds);
+    const targets = tabsRef.current.filter((tab) => targetSet.has(tab.id) && tab.state === "connected");
+    if (targets.length === 0) {
+      setToast("所选会话已全部断开，请重新选择。");
+      return;
+    }
+    const runId = crypto.randomUUID();
+    setBatchCommandRun({
+      id: runId,
+      command,
+      startedAt: Date.now(),
+      results: Object.fromEntries(targets.map((tab) => [tab.id, { status: "pending" as const }])),
+    });
+    setPendingTerminalCommands((current) => Object.fromEntries([
+      ...Object.entries(current),
+      ...targets.map((tab) => [tab.id, {
+        id: crypto.randomUUID(),
+        text: command,
+        batchRunId: runId,
+        targetTabId: tab.id,
+      }] as const),
+    ]));
+    setToast(`正在向 ${targets.length} 个会话发送批量命令。`);
+  }, []);
+
+  const handleCommandResult = useCallback((result: { id: string; ok: boolean; error?: string; batchRunId?: string; targetTabId?: string }) => {
     setPendingTerminalCommands((current) => Object.fromEntries(
       Object.entries(current).filter(([, request]) => request.id !== result.id),
     ));
+    const { batchRunId, targetTabId } = result;
+    if (batchRunId && targetTabId) {
+      setBatchCommandRun((current) => {
+        if (!current || current.id !== batchRunId) return current;
+        return {
+          ...current,
+          results: {
+            ...current.results,
+            [targetTabId]: result.ok
+              ? { status: "sent" }
+              : { status: "failed", error: result.error ?? "未知错误" },
+          },
+        };
+      });
+    }
     if (!result.ok) setToast(`命令发送失败：${result.error ?? "未知错误"}`);
   }, []);
 
@@ -1418,10 +1507,10 @@ function App() {
               {tabs.map((tab) => (
                 <button
                   key={tab.id}
-                  className={`terminal-tab ${activeTabId === tab.id ? "active" : ""} ${draggedTabId === tab.id ? "dragging" : ""} ${tab.locked ? "locked" : ""} ${tab.color ? "has-custom-color" : ""}`}
+                  className={`terminal-tab ${activeTabId === tab.id ? "active" : ""} ${draggedTabId === tab.id ? "dragging" : ""} ${tab.locked ? "locked" : ""} ${tab.color ? "has-custom-color" : ""} ${tab.alert ? "triggered" : ""}`}
                   style={tab.color ? { "--tab-accent": tab.color } as CSSProperties : undefined}
                   draggable
-                  title={`${getTabLabel(tab)} · ${connectionStateLabel(tab.state)}${tab.locked ? " · 已锁定" : ""}\n${tab.session.username}@${tab.session.host}:${tab.session.port}\n拖拽标签可调整顺序，双击可重命名`}
+                  title={`${getTabLabel(tab)} · ${connectionStateLabel(tab.state)}${tab.locked ? " · 已锁定" : ""}${tab.alert ? ` · 触发：${tab.alert.label}（${tab.alert.count}）` : ""}\n${tab.session.username}@${tab.session.host}:${tab.session.port}\n拖拽标签可调整顺序，双击可重命名`}
                   onClick={() => focusTab(tab.id)}
                   onDoubleClick={(event) => {
                     event.preventDefault();
@@ -1457,6 +1546,7 @@ function App() {
                 >
                   <span className={`connection-dot ${tab.state}`} />
                   <span>{getTabLabel(tab)}</span>
+                  {tab.alert && <span className="tab-trigger" title={`${tab.alert.label} · 已命中 ${tab.alert.count} 次`}><BellRing size={11} /></span>}
                   {tab.locked ? (
                     <span className="tab-lock" title="标签已锁定"><Lock size={11} /></span>
                   ) : (
@@ -1481,6 +1571,7 @@ function App() {
                 </select>
               )}
               <button className={broadcastEnabled ? "active" : ""} onClick={() => setBroadcastEnabled((value) => !value)} title={broadcastEnabled ? "关闭命令广播" : "开启命令广播"}>广播</button>
+              <button onClick={() => setBatchCommandVisible(true)} title="选择目标并逐会话汇总批量命令结果"><SendHorizontal size={13} />批量</button>
             </div>
             {activeTab && connectionIds[activeTab.id] && (
               <button className={`sftp-toggle ${portForwardVisible ? "active" : ""}`} onClick={() => setPortForwardVisible((value) => !value)} title="端口转发">
@@ -1521,6 +1612,7 @@ function App() {
                   onConnectionChange={handleTerminalConnectionChange}
                   onFocus={handleTerminalFocus}
                   onCommandResult={handleCommandResult}
+                  onTrigger={handleTerminalTrigger}
                   onEditSession={handleEditSession}
                   onDiagnose={runDiagnostic}
                 />
@@ -1673,6 +1765,14 @@ function App() {
           onToast={setToast}
         />
       )}
+
+      {batchCommandVisible && <BatchCommandModal
+        targets={batchCommandTargets}
+        run={batchCommandRun}
+        onExecute={runBatchCommand}
+        onClose={() => setBatchCommandVisible(false)}
+        onToast={setToast}
+      />}
 
       {historyVisible && (
         <CommandHistoryModal

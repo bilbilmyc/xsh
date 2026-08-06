@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ChevronDown, FolderOpen, KeyRound, Server, Trash2, X } from "lucide-react";
+import { BellRing, ChevronDown, FolderOpen, Keyboard, KeyRound, Plus, Server, Trash2, X } from "lucide-react";
 import { api } from "../api";
 import { rollbackUncommittedCredentials } from "../credential-lifecycle";
 import {
@@ -11,6 +11,8 @@ import {
   type SshKeyDefaults,
   type SessionDraft,
   type SessionGroup,
+  type TerminalKeyMapping,
+  type TerminalTrigger,
 } from "../types";
 
 interface SessionEditorProps {
@@ -106,6 +108,12 @@ export function SessionEditor({
   );
   const [terminalTheme, setTerminalTheme] = useState(
     session?.terminal.theme ?? defaultTerminalProfile().theme,
+  );
+  const [terminalTriggers, setTerminalTriggers] = useState<TerminalTrigger[]>(
+    session?.terminal.triggers ?? [],
+  );
+  const [terminalKeyMappings, setTerminalKeyMappings] = useState<TerminalKeyMapping[]>(
+    session?.terminal.keyMappings ?? [],
   );
   const [environment, setEnvironment] = useState(
     session?.environment ?? "development",
@@ -319,6 +327,36 @@ export function SessionEditor({
         throw new Error("终端字体大小必须在 10 到 48 之间");
       }
 
+      const normalizedTriggers = terminalTriggers.map((trigger) => ({
+        ...trigger,
+        label: trigger.label.trim() || trigger.pattern.trim(),
+        pattern: trigger.pattern.trim(),
+        cooldownSeconds: Math.min(86_400, Math.max(0, Math.round(Number(trigger.cooldownSeconds) || 0))),
+      }));
+      for (const trigger of normalizedTriggers) {
+        if (!trigger.pattern) throw new Error("终端触发器需要匹配关键词或正则表达式");
+        if (trigger.pattern.length > 1_024) throw new Error("终端触发器匹配内容不能超过 1024 个字符");
+        if (trigger.matchMode === "regex") {
+          try {
+            new RegExp(trigger.pattern, trigger.caseSensitive ? "" : "i");
+          } catch (caught) {
+            throw new Error(`终端触发器“${trigger.label || trigger.pattern}”的正则无效：${String(caught)}`);
+          }
+        }
+      }
+      const normalizedKeyMappings = terminalKeyMappings.map((mapping) => ({
+        ...mapping,
+        shortcut: mapping.shortcut.trim(),
+        text: mapping.text,
+      }));
+      const shortcuts = new Set<string>();
+      for (const mapping of normalizedKeyMappings) {
+        if (!mapping.shortcut || !mapping.text) throw new Error("键映射需要填写按键和发送内容");
+        const key = mapping.shortcut.toLowerCase().replace(/\s+/g, "");
+        if (shortcuts.has(key)) throw new Error(`键映射“${mapping.shortcut}”重复`);
+        shortcuts.add(key);
+      }
+
       const draft: SessionDraft = {
         groupId: groupId || null,
         name: normalizedName,
@@ -336,6 +374,8 @@ export function SessionEditor({
           fontFamily: terminalFontFamily.trim() || null,
           fontSize: parsedTerminalFontSize,
           theme: terminalTheme,
+          triggers: normalizedTriggers,
+          keyMappings: normalizedKeyMappings,
         },
         initialDirectory: initialDirectory.trim() || null,
         startupCommand: startupCommand.trim() || null,
@@ -455,6 +495,39 @@ export function SessionEditor({
                 <label className="field"><span>终端主题</span><select value={terminalTheme} onChange={(e) => setTerminalTheme(e.target.value)}><option value="xsh-dark">跟随全局主题</option><option value="xsh-blue">深蓝</option><option value="xsh-green">绿幕</option></select></label>
                 <datalist id="xsh-scrollback-presets"><option value="10000" /><option value="50000" /><option value="100000" /><option value="250000" /><option value="500000" /><option value="1000000" /></datalist>
               </div>
+            </details>
+            <details className="session-terminal-options field-span-2">
+              <summary><BellRing size={14} />终端输出触发器 <small>{terminalTriggers.length ? `${terminalTriggers.length} 条` : "未配置"}</small></summary>
+              <p className="field-help terminal-automation-note">命中后只发送本地通知、点亮标签并写入会话日志；不会执行任何命令。</p>
+              <div className="terminal-automation-list">
+                {terminalTriggers.map((trigger) => (
+                  <div className="terminal-automation-row" key={trigger.id}>
+                    <label className="field"><span>名称</span><input value={trigger.label} onChange={(event) => setTerminalTriggers((current) => current.map((item) => item.id === trigger.id ? { ...item, label: event.target.value } : item))} placeholder="例如：部署失败" /></label>
+                    <label className="field"><span>匹配</span><input value={trigger.pattern} onChange={(event) => setTerminalTriggers((current) => current.map((item) => item.id === trigger.id ? { ...item, pattern: event.target.value } : item))} placeholder="FAILED 或 error\\s+\\d+" spellCheck={false} /></label>
+                    <label className="field"><span>方式</span><select value={trigger.matchMode} onChange={(event) => setTerminalTriggers((current) => current.map((item) => item.id === trigger.id ? { ...item, matchMode: event.target.value === "regex" ? "regex" : "keyword" } : item))}><option value="keyword">关键词</option><option value="regex">正则</option></select></label>
+                    <label className="field terminal-automation-cooldown"><span>冷却（秒）</span><input type="number" min={0} max={86400} value={trigger.cooldownSeconds} onChange={(event) => setTerminalTriggers((current) => current.map((item) => item.id === trigger.id ? { ...item, cooldownSeconds: Number(event.target.value) } : item))} /></label>
+                    <label className="check-row terminal-automation-toggle"><input type="checkbox" checked={trigger.caseSensitive} onChange={(event) => setTerminalTriggers((current) => current.map((item) => item.id === trigger.id ? { ...item, caseSensitive: event.target.checked } : item))} />区分大小写</label>
+                    <label className="check-row terminal-automation-toggle"><input type="checkbox" checked={trigger.enabled} onChange={(event) => setTerminalTriggers((current) => current.map((item) => item.id === trigger.id ? { ...item, enabled: event.target.checked } : item))} />启用</label>
+                    <button type="button" className="icon-button terminal-automation-remove" onClick={() => setTerminalTriggers((current) => current.filter((item) => item.id !== trigger.id))} title="删除此触发器" aria-label="删除此触发器"><Trash2 size={14} /></button>
+                  </div>
+                ))}
+              </div>
+              <button type="button" className="secondary-button terminal-automation-add" onClick={() => setTerminalTriggers((current) => [...current, { id: crypto.randomUUID(), label: "", pattern: "", matchMode: "keyword", caseSensitive: false, cooldownSeconds: 30, enabled: true }])}><Plus size={14} />添加触发器</button>
+            </details>
+            <details className="session-terminal-options field-span-2">
+              <summary><Keyboard size={14} />会话键映射 <small>{terminalKeyMappings.length ? `${terminalKeyMappings.length} 条` : "未配置"}</small></summary>
+              <p className="field-help terminal-automation-note">映射优先于本应用的同一快捷键处理，可输入 <code>F5</code>、<code>Ctrl+Alt+K</code>；发送内容支持 <code>\\e</code>、<code>\\r</code>、<code>\\n</code> 和 <code>\\t</code>。</p>
+              <div className="terminal-automation-list">
+                {terminalKeyMappings.map((mapping) => (
+                  <div className="terminal-automation-row key-mapping-row" key={mapping.id}>
+                    <label className="field"><span>按键</span><input value={mapping.shortcut} onChange={(event) => setTerminalKeyMappings((current) => current.map((item) => item.id === mapping.id ? { ...item, shortcut: event.target.value } : item))} placeholder="F5 或 Ctrl+Alt+K" spellCheck={false} /></label>
+                    <label className="field"><span>发送内容</span><input value={mapping.text} onChange={(event) => setTerminalKeyMappings((current) => current.map((item) => item.id === mapping.id ? { ...item, text: event.target.value } : item))} placeholder="例如：\\e[15~" spellCheck={false} /></label>
+                    <label className="check-row terminal-automation-toggle"><input type="checkbox" checked={mapping.enabled} onChange={(event) => setTerminalKeyMappings((current) => current.map((item) => item.id === mapping.id ? { ...item, enabled: event.target.checked } : item))} />启用</label>
+                    <button type="button" className="icon-button terminal-automation-remove" onClick={() => setTerminalKeyMappings((current) => current.filter((item) => item.id !== mapping.id))} title="删除此键映射" aria-label="删除此键映射"><Trash2 size={14} /></button>
+                  </div>
+                ))}
+              </div>
+              <button type="button" className="secondary-button terminal-automation-add" onClick={() => setTerminalKeyMappings((current) => [...current, { id: crypto.randomUUID(), shortcut: "", text: "", enabled: true }])}><Plus size={14} />添加键映射</button>
             </details>
               <label className="field field-span-2"><span>标签（逗号分隔）</span><input value={tags} onChange={(e) => setTags(e.target.value)} placeholder="linux, api, production" /></label>
             </div>
