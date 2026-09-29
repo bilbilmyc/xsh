@@ -2303,8 +2303,53 @@ kbd {
 
 
 .backup-dialog-backdrop { z-index: 180; }
-.backup-dialog { width: min(460px, calc(100vw - 48px)); overflow: hidden; border: 1px solid #2b3c4d; border-radius: 10px; background: #111923; box-shadow: 0 24px 80px rgba(0, 0, 0, 0.58); }
+.backup-dialog { width: min(460px, calc(100vw - 48px)); overflow: hidden; border: 1px solid #2b3c4d; border-radius: 10px; background: #111923; box-shadow: 0 24px 80px rgba(0, 0, 0, 0.58), 0 1px 0 rgba(255, 255, 255, 0.035) inset; }
 .backup-dialog-body { display: grid; gap: 14px; padding: 20px; }
+
+.upload-conflict-backdrop { z-index: 180; }
+.upload-conflict-modal {
+  width: min(460px, calc(100vw - 48px));
+  overflow: hidden;
+  border: 1px solid #2b3c4d;
+  border-radius: 10px;
+  background: #111923;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.58), 0 1px 0 rgba(255, 255, 255, 0.035) inset;
+}
+.upload-conflict-body { display: grid; gap: 14px; padding: 20px; }
+.upload-conflict-file {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  background: #0e151e;
+}
+.upload-conflict-file-name {
+  min-width: 0;
+  overflow: hidden;
+  color: #d6dee6;
+  font-family: var(--mono-font);
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.upload-conflict-file-note { flex: none; color: var(--yellow); font-size: 10px; font-weight: 600; }
+.upload-conflict-warning {
+  margin: 0;
+  color: var(--yellow);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+.upload-conflict-body .field-help { color: var(--faint); font-size: 10.5px; line-height: 1.5; }
+.upload-conflict-body .form-error { margin-top: 0; }
+.upload-conflict-modal .modal-icon.conflict {
+  border-color: rgba(227, 179, 65, 0.28);
+  color: var(--yellow);
+  background: rgba(227, 179, 65, 0.1);
+}
 
 .settings-modal {
   width: min(680px, calc(100vw - 28px));
@@ -2617,7 +2662,8 @@ body {
 :root[data-theme="light"] .command-center-backdrop,
 :root[data-theme="light"] .connection-manager-backdrop,
 :root[data-theme="light"] .quick-command-modal-backdrop,
-:root[data-theme="light"] .backup-dialog-backdrop {
+:root[data-theme="light"] .backup-dialog-backdrop,
+:root[data-theme="light"] .upload-conflict-backdrop {
   background: rgba(36, 50, 61, 0.28);
 }
 
@@ -5231,10 +5277,28 @@ body.resizing-terminal-split .split-divider.horizontal * { cursor: row-resize !i
 :root[data-theme="light"] .context-menu,
 :root[data-theme="light"] .backup-dialog,
 :root[data-theme="light"] .port-forward-modal,
+:root[data-theme="light"] .upload-conflict-modal,
 :root[data-theme="light"] .auth-challenge-card {
   border-color: #d0dde4;
   background: #f7fafb;
   color: var(--text);
+}
+
+:root[data-theme="light"] .upload-conflict-file {
+  border-color: var(--line-soft);
+  background: #eef4f7;
+}
+
+:root[data-theme="light"] .upload-conflict-file-name {
+  color: var(--text);
+}
+
+:root[data-theme="light"] .upload-conflict-file-note {
+  color: #9a6d0c;
+}
+
+:root[data-theme="light"] .upload-conflict-warning {
+  color: #9a6d0c;
 }
 
 :root[data-theme="light"] .modal-footer {

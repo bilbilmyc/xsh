@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { api } from "../api";
 import { SftpSyncModal } from "./SftpSyncModal";
+import { UploadConflictModal, type UploadConflictChoice } from "./UploadConflictModal";
 import { hostKeyConfirmationMessage, hostKeyEndpointLabel } from "../host-key";
 import { connectSftpWithHostKeyApprovals } from "../sftp-connection";
 import {
@@ -56,6 +57,11 @@ interface UploadSlotWaiter {
   resolve: (acquired: boolean) => void;
 }
 
+interface UploadConflictPromptState {
+  fileName: string;
+  remainingConflicts: number;
+}
+
 export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast }: SftpPanelProps) {
   const submissionConcurrency = Math.min(32, Math.max(1, Math.floor(globalTransferConcurrency)));
   const [connectionId, setConnectionId] = useState<string | null>(null);
@@ -71,10 +77,12 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
   const [draggingFiles, setDraggingFiles] = useState(false);
   const [remoteEdit, setRemoteEdit] = useState<RemoteEditState | null>(null);
   const [syncVisible, setSyncVisible] = useState(false);
+  const [uploadConflict, setUploadConflict] = useState<UploadConflictPromptState | null>(null);
   const remoteListRef = useRef<HTMLDivElement>(null);
   const uploadQueueCancelEpochRef = useRef(0);
   const activeUploadCountRef = useRef(0);
   const uploadSlotWaitersRef = useRef<UploadSlotWaiter[]>([]);
+  const uploadConflictResolverRef = useRef<((choice: UploadConflictChoice | null) => void) | null>(null);
   const enqueueUploadsRef = useRef<(paths: string[]) => Promise<void>>(async () => undefined);
 
   const transferItems = useMemo(
@@ -86,6 +94,7 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
     [entries, selectedPaths],
   );
   const selected = selectedEntries[0] ?? null;
+  const remoteEntryNames = useMemo(() => new Set(entries.map((entry) => entry.name)), [entries]);
 
   const load = async (id: string, target: string) => {
     setLoading(true);
@@ -156,6 +165,9 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
     uploadQueueCancelEpochRef.current += 1;
     const waiters = uploadSlotWaitersRef.current.splice(0);
     waiters.forEach((waiter) => waiter.resolve(false));
+    const settleConflict = uploadConflictResolverRef.current;
+    uploadConflictResolverRef.current = null;
+    settleConflict?.(null);
   }, []);
 
   useEffect(() => {
@@ -268,11 +280,30 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
     return result;
   };
 
+  const requestUploadConflictDecision = (fileName: string, remainingConflicts: number) =>
+    new Promise<UploadConflictChoice | null>((resolve) => {
+      uploadConflictResolverRef.current = resolve;
+      setUploadConflict({ fileName, remainingConflicts });
+    });
+
+  const settleUploadConflict = (choice: UploadConflictChoice | null) => {
+    const resolve = uploadConflictResolverRef.current;
+    uploadConflictResolverRef.current = null;
+    setUploadConflict(null);
+    resolve?.(choice);
+  };
+
   const uploadFiles = async (selectedPaths: string[]) => {
     if (!connectionId || selectedPaths.length === 0) return;
     const tasks: Array<{ localPath: string; remotePath: string }> = [];
     let batchConflictStrategy: "overwrite" | "skip" | null = null;
-    for (const localPath of selectedPaths) {
+    const conflictsAhead = selectedPaths.map((localPath) => {
+      const fileName = localPath.split(/[\\/]/).pop();
+      const existing = fileName ? entries.find((entry) => entry.name === fileName) : undefined;
+      return existing !== undefined && existing.fileType !== "directory";
+    });
+    for (let index = 0; index < selectedPaths.length; index += 1) {
+      const localPath = selectedPaths[index];
       const fileName = localPath.split(/[\\/]/).pop();
       if (!fileName) continue;
       let remoteName = fileName;
@@ -284,30 +315,24 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
         }
         let choice = batchConflictStrategy;
         if (!choice) {
-          const answer = window.prompt(
-            `远程文件“${remoteName}”已存在。
-
-输入 overwrite 覆盖、overwrite-all 全部覆盖、skip 跳过、skip-all 全部跳过，或 rename 重命名：`,
-            "overwrite",
-          )?.trim().toLowerCase();
-          if (answer === "overwrite-all") {
+          const decision = await requestUploadConflictDecision(
+            remoteName,
+            conflictsAhead.slice(index + 1).filter(Boolean).length,
+          );
+          if (!decision) {
+            onToast?.("已取消本次上传。");
+            return;
+          }
+          if (decision.type === "overwrite-all") {
             batchConflictStrategy = "overwrite";
             choice = "overwrite";
-          } else if (answer === "skip-all") {
+          } else if (decision.type === "skip-all") {
             batchConflictStrategy = "skip";
             choice = "skip";
+          } else if (decision.type === "rename") {
+            remoteName = decision.name;
           } else {
-            choice = answer === "overwrite" || answer === "skip" ? answer : null;
-            if (answer === "rename") {
-              remoteName = window.prompt("输入新的远程文件名", `${remoteName}.new`)?.trim() ?? "";
-              if (!isValidRemoteName(remoteName)) {
-                setError("已跳过无效的远程文件名。");
-                continue;
-              }
-            } else if (!choice) {
-              if (answer !== undefined) setError("未知的文件冲突策略，已跳过该文件。");
-              continue;
-            }
+            choice = decision.type;
           }
         }
         if (choice === "skip") continue;
@@ -825,6 +850,15 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
             </>
           )}
         </div>
+      )}
+      {uploadConflict && (
+        <UploadConflictModal
+          fileName={uploadConflict.fileName}
+          remainingConflicts={uploadConflict.remainingConflicts}
+          existingNames={remoteEntryNames}
+          onConfirm={(choice) => settleUploadConflict(choice)}
+          onCancel={() => settleUploadConflict(null)}
+        />
       )}
       {syncVisible && connectionId && <SftpSyncModal
         connectionId={connectionId}
