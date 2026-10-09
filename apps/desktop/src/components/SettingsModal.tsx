@@ -184,7 +184,7 @@ export function SettingsModal({ preferences, onSave, onClose, onToast }: Setting
                 <SettingsHeading title="界面字体" description="提高字号可以改善高分屏上的可读性。" />
                 <div className="settings-form-grid">
                   <label className="field"><span>字体</span><select value={draft.uiFontFamily} onChange={(event) => patch({ uiFontFamily: event.target.value })}>{UI_FONTS.map((font) => <option key={font.value} value={font.value}>{font.label}</option>)}</select></label>
-                  <RangeField label="界面字号" value={draft.uiFontSize} min={12} max={16} step={1} suffix="px" onChange={(value) => patch({ uiFontSize: value })} />
+                  <RangeField label="界面字号" value={draft.uiFontSize} min={12} max={18} step={1} suffix="px" onChange={(value) => patch({ uiFontSize: value })} />
                 </div>
                 <div className="font-preview" style={{ fontFamily: draft.uiFontFamily, fontSize: draft.uiFontSize }}>
                   XSH 会话目录 · Production Server · 清晰显示中文与 English

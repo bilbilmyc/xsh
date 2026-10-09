@@ -31,7 +31,7 @@ export interface AppPreferences {
 const STORAGE_KEY = "xsh.preferences.v1";
 const UI_FONT_BASELINE = 15;
 const UI_FONT_MIN = 12;
-const UI_FONT_MAX = 16;
+const UI_FONT_MAX = 18;
 const TERMINAL_FONT_MIN = 12;
 const TERMINAL_FONT_MAX = 22;
 const SFTP_MAX_CONCURRENCY = 32;
