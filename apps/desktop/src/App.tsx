@@ -47,8 +47,6 @@ import { loadCommandHistory, recordCommandHistory, saveCommandHistory, type Comm
 import { loadQuickCommandBar, saveQuickCommandBar, type QuickCommandItem } from "./quick-command-bar";
 import { loadPreferences, savePreferences, toSftpTransferPolicy, type AppPreferences } from "./preferences";
 import {
-  loadWorkspaceSnapshot,
-  saveWorkspaceSnapshot,
   type NamedWorkspace,
   type WorkspacePaneLayout,
   type WorkspaceSnapshot,
@@ -260,8 +258,6 @@ function App() {
   const [tabContextMenu, setTabContextMenu] = useState<{ x: number; y: number; tabId: string } | null>(null);
   const [draggedTabId, setDraggedTabId] = useState<string | null>(null);
   const [tabLabels, setTabLabels] = useState<Record<string, string>>(() => loadTabLabels());
-  const [sessionDataReady, setSessionDataReady] = useState(false);
-  const [workspaceRestored, setWorkspaceRestored] = useState(false);
   const [workspaceManagerVisible, setWorkspaceManagerVisible] = useState(false);
   const [sessionFileDialog, setSessionFileDialog] = useState<{ mode: "export" | "import"; path: string } | null>(null);
   const [sessionFileBusy, setSessionFileBusy] = useState(false);
@@ -283,7 +279,6 @@ function App() {
       disposed = true;
     };
   }, []);
-  const workspaceRestoreStartedRef = useRef(false);
   const terminalStageRef = useRef<HTMLDivElement>(null);
   const tabsRef = useRef<TerminalTab[]>([]);
   const pendingSessionOpenRef = useRef(new Map<string, TerminalTab>());
@@ -308,7 +303,6 @@ function App() {
     ]);
     setGroups(nextGroups);
     setSessions(nextSessions);
-    setSessionDataReady(true);
     if (nextSessions.length === 0 && !loadOnboardingDismissed()) setOnboardingVisible(true);
   }, []);
 
@@ -317,43 +311,6 @@ function App() {
       .catch((error) => setToast(`加载本地数据失败：${String(error)}`))
       .finally(() => setLoading(false));
   }, [refresh]);
-
-  useEffect(() => {
-    if (!sessionDataReady || workspaceRestoreStartedRef.current) return;
-    workspaceRestoreStartedRef.current = true;
-    const snapshot = loadWorkspaceSnapshot();
-    if (snapshot) {
-      const sessionsById = new Map(sessions.map((session) => [session.id, session]));
-      const restoredTabs = snapshot.tabs.flatMap((tab) => {
-        const session = sessionsById.get(tab.sessionId);
-        return session
-          ? [{ id: tab.id, session, state: "queued", connectionVersion: 0, locked: tab.locked, color: tab.color }]
-          : [];
-      });
-      const restoredConnectionCount = Math.min(MAX_CONCURRENT_CONNECTIONS, restoredTabs.length);
-      restoredTabs.forEach((tab, index) => {
-        if (index < restoredConnectionCount) tab.state = "connecting";
-      });
-      const restoredIds = new Set(restoredTabs.map((tab) => tab.id));
-      const restoredActiveId = snapshot.activeTabId && restoredIds.has(snapshot.activeTabId)
-        ? snapshot.activeTabId
-        : restoredTabs[0]?.id ?? null;
-      const restoredSecondaryId = snapshot.secondaryTabId &&
-        restoredIds.has(snapshot.secondaryTabId) &&
-        snapshot.secondaryTabId !== restoredActiveId
-        ? snapshot.secondaryTabId
-        : restoredTabs.find((tab) => tab.id !== restoredActiveId)?.id ?? null;
-      const restoredLayout = snapshot.paneLayout !== "single" && restoredTabs.length < 2
-        ? "single"
-        : snapshot.paneLayout;
-      setTabs(restoredTabs);
-      setActiveTabId(restoredActiveId);
-      setSecondaryTabId(restoredSecondaryId);
-      setPaneLayout(restoredLayout);
-      window.localStorage.setItem(PANE_LAYOUT_STORAGE_KEY, restoredLayout);
-    }
-    setWorkspaceRestored(true);
-  }, [sessionDataReady, sessions]);
 
   useEffect(() => {
     const openSessionIds = new Set(tabs.map((tab) => tab.session.id));
@@ -379,16 +336,6 @@ function App() {
       return changed ? next : current;
     });
   }, [tabs]);
-
-  useEffect(() => {
-    if (!workspaceRestored) return;
-    saveWorkspaceSnapshot({
-      tabs: tabs.map((tab) => ({ id: tab.id, sessionId: tab.session.id, locked: tab.locked, color: tab.color })),
-      activeTabId,
-      secondaryTabId,
-      paneLayout,
-    });
-  }, [activeTabId, paneLayout, secondaryTabId, tabs, workspaceRestored]);
 
   const activeTab = useMemo(
     () => tabs.find((tab) => tab.id === activeTabId) ?? null,

@@ -30,23 +30,9 @@ export interface WorkspaceExportBundle {
   workspaces: NamedWorkspace[];
 }
 
-const STORAGE_KEY = "xsh.workspace.v1";
 const NAMED_STORAGE_KEY = "xsh.named-workspaces.v1";
 const MAX_RESTORED_TABS = 64;
 const MAX_NAMED_WORKSPACES = 24;
-
-export function loadWorkspaceSnapshot(): WorkspaceSnapshot | null {
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    return raw ? normalizeWorkspaceSnapshot(JSON.parse(raw)) : null;
-  } catch {
-    return null;
-  }
-}
-
-export function saveWorkspaceSnapshot(snapshot: Omit<WorkspaceSnapshot, "version">): void {
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(createSafeSnapshot(snapshot)));
-}
 
 export function loadNamedWorkspaces(): NamedWorkspace[] {
   try {

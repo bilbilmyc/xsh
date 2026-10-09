@@ -11,7 +11,7 @@ Build a local-first SSH2 desktop client for macOS and Windows that covers the da
 3. Present and persist SHA-256 server fingerprints on first use and block changed keys by default.
 4. Render UTF-8/CJK, 256-color and true-color terminal output with a resizable remote PTY and configurable scrollback up to 1,000,000 lines.
 5. Keep background terminal tabs mounted so switching tabs preserves the SSH connection, remote process, scrollback, and PTY state.
-6. Restore open session IDs, active tab, second split pane, and layout after restart without persisting credentials, terminal output, or command text.
+6. Launch into the default welcome window without automatically restoring or connecting the previous session (hosts are often reachable only over a VPN); reopening a previous tab set is an explicit named-workspace action that never persists credentials, terminal output, or command text.
 7. Support nested session folders, drag-to-folder organization, search, favorites, tags, import/export, and `~/.ssh/config` import.
 8. Support configurable right-click paste/menu, macOS Command clipboard/search shortcuts, Windows Ctrl+Shift clipboard/search shortcuts, optional copy-on-select, optional multiline-paste confirmation, and platform-safe temporary terminal font zoom without stealing remote Ctrl control sequences.
 9. Stream SFTP uploads/downloads with bounded memory, real concurrency limits, progress, cancellation, retry, bulk selection, drag upload, and conflict handling.
