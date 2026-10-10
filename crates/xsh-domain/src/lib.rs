@@ -87,9 +87,10 @@ impl Default for TerminalProfile {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum TerminalTriggerMatchMode {
+    #[default]
     Keyword,
     Regex,
 }
@@ -108,12 +109,6 @@ pub struct TerminalTrigger {
     pub cooldown_seconds: u16,
     #[serde(default = "default_true")]
     pub enabled: bool,
-}
-
-impl Default for TerminalTriggerMatchMode {
-    fn default() -> Self {
-        Self::Keyword
-    }
 }
 
 const fn default_trigger_cooldown_seconds() -> u16 {
