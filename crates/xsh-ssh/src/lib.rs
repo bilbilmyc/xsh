@@ -2004,13 +2004,20 @@ fn classify_ssh_error(details: &str) -> SshErrorCategory {
         || lower.contains("permission denied")
     {
         SshErrorCategory::PasswordAuthentication
-    } else if lower.contains("connection refused") {
+    } else if lower.contains("connection refused")
+        || lower.contains("actively refused")
+        || lower.contains("os error 10061")
+    {
         SshErrorCategory::ConnectionRefused
-    } else if lower.contains("timed out") || lower.contains("timeout") {
+    } else if lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("os error 10060")
+    {
         SshErrorCategory::ConnectionTimeout
     } else if lower.contains("could not resolve")
         || lower.contains("name or service not known")
         || lower.contains("nodename nor servname")
+        || lower.contains("no such host is known")
         || lower.contains("dns")
     {
         SshErrorCategory::DnsResolution
@@ -2039,9 +2046,29 @@ fn classify_ssh_error(details: &str) -> SshErrorCategory {
     }
 }
 
+// Windows io errors render as localized prose ("...actively refused it. (os
+// error 10061)") that text matching may miss, so prefer the typed ErrorKind
+// from the error chain when the message gives no answer.
+fn classify_io_error(error: &anyhow::Error) -> Option<SshErrorCategory> {
+    error.chain().find_map(|cause| {
+        let kind = cause.downcast_ref::<std::io::Error>()?.kind();
+        match kind {
+            std::io::ErrorKind::ConnectionRefused => Some(SshErrorCategory::ConnectionRefused),
+            std::io::ErrorKind::TimedOut => Some(SshErrorCategory::ConnectionTimeout),
+            std::io::ErrorKind::NetworkUnreachable | std::io::ErrorKind::HostUnreachable => {
+                Some(SshErrorCategory::NetworkUnreachable)
+            }
+            _ => None,
+        }
+    })
+}
+
 fn humanize_ssh_error(error: &anyhow::Error) -> String {
     let details = format!("{error:#}");
-    let category = classify_ssh_error(&details);
+    let category = match classify_ssh_error(&details) {
+        SshErrorCategory::Unknown => classify_io_error(error).unwrap_or(SshErrorCategory::Unknown),
+        category => category,
+    };
     format!(
         "{}（{}）：{}。",
         category.title(),
@@ -2111,6 +2138,51 @@ mod tests {
             classify_ssh_error("Host key changed: fingerprint mismatch"),
             SshErrorCategory::HostKeyChanged
         );
+    }
+
+    #[test]
+    fn windows_tcp_error_prose_is_classified() {
+        assert_eq!(
+            classify_ssh_error(
+                "failed to connect to 127.0.0.1:2222: No connection could be made because \
+                 the target machine actively refused it. (os error 10061)"
+            ),
+            SshErrorCategory::ConnectionRefused
+        );
+        assert_eq!(
+            classify_ssh_error(
+                "failed to connect: A connection attempt failed because the connected party \
+                 did not properly respond after a period of time. (os error 10060)"
+            ),
+            SshErrorCategory::ConnectionTimeout
+        );
+        assert_eq!(
+            classify_ssh_error(
+                "failed to connect: failed to lookup address information: No such host is \
+                 known. (os error 11001)"
+            ),
+            SshErrorCategory::DnsResolution
+        );
+    }
+
+    #[test]
+    fn io_error_kind_in_chain_is_classified() {
+        // Message deliberately matches no text pattern: only the ErrorKind in
+        // the anyhow chain identifies the failure.
+        let io_error = std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "wsaeconnrefused mock",
+        );
+        let error = anyhow::Error::new(io_error).context("failed to connect to 127.0.0.1:2222");
+        let message = humanize_ssh_error(&error);
+        assert!(message.contains("目标主机拒绝连接"));
+        assert!(message.contains("NET_REFUSED"));
+
+        let io_error = std::io::Error::new(std::io::ErrorKind::TimedOut, "wsaetimedout mock");
+        let error = anyhow::Error::new(io_error).context("failed to connect to 10.0.0.5:22");
+        let message = humanize_ssh_error(&error);
+        assert!(message.contains("连接超时"));
+        assert!(message.contains("NET_TIMEOUT"));
     }
 
     #[test]
