@@ -2,6 +2,7 @@ import { useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { Download, FolderOpen, RefreshCw, Save, Trash2, Upload, X } from "lucide-react";
 import { api } from "../api";
+import { confirmDialog, promptDialog } from "./DialogHost";
 import { PasswordPromptModal } from "./PasswordPromptModal";
 import {
   createNamedWorkspace,
@@ -53,28 +54,42 @@ export function WorkspaceManagerModal({ currentSnapshot, onOpen, onClose, onToas
     onToast(`已保存工作区：${workspace.name}`);
   };
 
-  const overwrite = (workspace: NamedWorkspace) => {
-    if (!window.confirm(`使用当前标签和分屏布局覆盖工作区“${workspace.name}”？`)) return;
+  const overwrite = async (workspace: NamedWorkspace) => {
+    if (!(await confirmDialog({
+      title: "覆盖工作区",
+      message: `使用当前标签和分屏布局覆盖工作区“${workspace.name}”？`,
+      confirmLabel: "覆盖",
+    }))) return;
     persist(workspaces.map((candidate) => candidate.id === workspace.id
       ? updateNamedWorkspace(candidate, { snapshot: currentSnapshot })
       : candidate));
     onToast(`已更新工作区：${workspace.name}`);
   };
 
-  const rename = (workspace: NamedWorkspace) => {
-    const nextName = window.prompt("重命名工作区", workspace.name)?.trim();
-    if (!nextName || nextName === workspace.name) return;
-    if (workspaces.some((candidate) => candidate.id !== workspace.id && candidate.name.toLowerCase() === nextName.toLowerCase())) {
+  const rename = async (workspace: NamedWorkspace) => {
+    const nextName = await promptDialog({
+      title: "重命名工作区",
+      initialValue: workspace.name,
+      confirmLabel: "重命名",
+    });
+    const trimmed = nextName?.trim();
+    if (!trimmed || trimmed === workspace.name) return;
+    if (workspaces.some((candidate) => candidate.id !== workspace.id && candidate.name.toLowerCase() === trimmed.toLowerCase())) {
       setError("已经存在同名工作区。");
       return;
     }
     persist(workspaces.map((candidate) => candidate.id === workspace.id
-      ? updateNamedWorkspace(candidate, { name: nextName })
+      ? updateNamedWorkspace(candidate, { name: trimmed })
       : candidate));
   };
 
-  const remove = (workspace: NamedWorkspace) => {
-    if (!window.confirm(`确定删除工作区“${workspace.name}”？会话本身不会被删除。`)) return;
+  const remove = async (workspace: NamedWorkspace) => {
+    if (!(await confirmDialog({
+      title: "删除工作区",
+      message: `确定删除工作区“${workspace.name}”？会话本身不会被删除。`,
+      danger: true,
+      confirmLabel: "删除",
+    }))) return;
     persist(workspaces.filter((candidate) => candidate.id !== workspace.id));
     onToast(`已删除工作区：${workspace.name}`);
   };

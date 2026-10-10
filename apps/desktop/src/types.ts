@@ -161,9 +161,11 @@ export interface SftpTransferPolicy {
   downloadLimitBytesPerSecond: number;
 }
 
+// Terminal output bytes no longer travel through this JSON event type: the
+// backend sends them as raw binary over the IPC channel, so the webview
+// receives an ArrayBuffer instead (see `TerminalEvent | ArrayBuffer`).
 export type TerminalEvent =
   | { type: "stateChanged"; payload: ConnectionState }
-  | { type: "output"; payload: number[] }
   | {
       type: "authChallenge";
       payload: {

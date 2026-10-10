@@ -18,9 +18,12 @@ import {
   X,
 } from "lucide-react";
 import { api } from "../api";
+import { writeClipboardText } from "../clipboard";
+import { ContextMenu } from "./ContextMenu";
 import { SftpSyncModal } from "./SftpSyncModal";
 import { UploadConflictModal, type UploadConflictChoice } from "./UploadConflictModal";
-import { hostKeyConfirmationMessage, hostKeyEndpointLabel } from "../host-key";
+import { hostKeyEndpointLabel } from "../host-key";
+import { confirmDialog, hostKeyDialog, promptDialog } from "./DialogHost";
 import { connectSftpWithHostKeyApprovals } from "../sftp-connection";
 import {
   indexTransfersForConnection,
@@ -75,6 +78,7 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
   const [transfers, setTransfers] = useState<Record<string, TransferEvent>>({});
   const [pendingUploads, setPendingUploads] = useState<PendingUpload[]>([]);
   const [draggingFiles, setDraggingFiles] = useState(false);
+  const [listContextMenu, setListContextMenu] = useState<{ x: number; y: number; entry: RemoteEntry } | null>(null);
   const [remoteEdit, setRemoteEdit] = useState<RemoteEditState | null>(null);
   const [syncVisible, setSyncVisible] = useState(false);
   const [uploadConflict, setUploadConflict] = useState<UploadConflictPromptState | null>(null);
@@ -127,7 +131,7 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
           async (key) => {
             if (disposed) return false;
             const endpointLabel = hostKeyEndpointLabel(key);
-            if (!window.confirm(hostKeyConfirmationMessage(key, "SFTP"))) {
+            if (!(await hostKeyDialog(key, "SFTP"))) {
               setError(`SFTP ${endpointLabel} Host Key 未确认`);
               return false;
             }
@@ -549,7 +553,12 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
     try {
       const latest = await api.sftpStat(connectionId, edit.remotePath);
       const changed = latest.size !== edit.originalSize || latest.modifiedAtUnix !== edit.originalModifiedAtUnix;
-      if (changed && !window.confirm(`远程文件“${edit.fileName}”在下载后已发生变化。\n\n仍要覆盖远程文件吗？`)) {
+      if (changed && !(await confirmDialog({
+        title: "远程文件已变化",
+        message: `远程文件“${edit.fileName}”在下载后已发生变化。\n\n仍要覆盖远程文件吗？`,
+        danger: true,
+        confirmLabel: "覆盖",
+      }))) {
         setRemoteEdit(edit);
         return;
       }
@@ -657,13 +666,25 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
 
   const rename = async () => {
     if (!connectionId || selectedEntries.length !== 1 || !selected) return;
-    const name = window.prompt("新的名称", selected.name)?.trim();
-    if (!name || name === selected.name) return;
-    if (!isValidRemoteName(name)) {
+    const name = await promptDialog({
+      title: "重命名",
+      initialValue: selected.name,
+      confirmLabel: "重命名",
+      validate: (value) => {
+        const trimmed = value.trim();
+        if (!trimmed || trimmed === selected.name) return null;
+        return isValidRemoteName(trimmed)
+          ? null
+          : "名称不能包含路径分隔符，也不能是 . 或 ..";
+      },
+    });
+    const trimmed = name?.trim();
+    if (!trimmed || trimmed === selected.name) return;
+    if (!isValidRemoteName(trimmed)) {
       setError("名称不能包含路径分隔符，也不能是 . 或 ..");
       return;
     }
-    const target = path === "/" ? `/${name}` : `${path}/${name}`;
+    const target = path === "/" ? `/${trimmed}` : `${path}/${trimmed}`;
     await api.sftpRename(connectionId, selected.path, target)
       .then(() => load(connectionId, path))
       .catch((caught) => setError(`重命名失败：${String(caught)}`));
@@ -671,8 +692,12 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
 
   const createDirectory = async () => {
     if (!connectionId) return;
-    const name = window.prompt("新目录名称");
-    if (!name) return;
+    const name = await promptDialog({
+      title: "新建目录",
+      placeholder: "目录名称",
+      confirmLabel: "创建",
+    });
+    if (name === null) return;
     const normalizedName = name.trim();
     if (!isValidRemoteName(normalizedName)) {
       setError("目录名称不能包含路径分隔符，也不能是 . 或 ..");
@@ -702,7 +727,12 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
     const message = names.length === 1
       ? `确定删除 ${names[0]}？${containsDirectory ? "\n\n该目录中的全部子目录和文件也会被永久删除。" : ""}`
       : `确定删除选中的 ${names.length} 项？\n\n${names.slice(0, 8).join("、")}${names.length > 8 ? "…" : ""}${containsDirectory ? "\n\n选中目录中的全部内容也会被永久删除。" : ""}`;
-    if (!window.confirm(message)) return;
+    if (!(await confirmDialog({
+      title: "删除远程项目",
+      message,
+      danger: true,
+      confirmLabel: "删除",
+    }))) return;
     try {
       const counter = { value: 0 };
       for (const entry of selectedEntries) {
@@ -775,15 +805,46 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
                 className={`remote-entry ${selectedPaths.has(entry.path) ? "selected" : ""}`}
                 onClick={(event) => selectEntry(entry, event)}
                 onDoubleClick={() => entry.fileType === "directory" && connectionId ? void load(connectionId, entry.path) : void editRemote(entry)}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  if (!selectedPaths.has(entry.path)) selectEntry(entry, event);
+                  setListContextMenu({ x: event.clientX, y: event.clientY, entry });
+                }}
               >
                 {entry.fileType === "directory" ? <Folder size={15} /> : <File size={15} />}
                 <span className="remote-entry-name">{entry.name}</span>
+                <span className="remote-entry-time">{formatRemoteTimestamp(entry.modifiedAtUnix)}</span>
                 <span className="remote-entry-size">{entry.fileType === "directory" ? "—" : formatBytes(entry.size)}</span>
               </button>
             ))}
           </div>
         </section>
       </div>
+      {listContextMenu && (
+        <ContextMenu
+          x={listContextMenu.x}
+          y={listContextMenu.y}
+          onClose={() => setListContextMenu(null)}
+          items={[
+            ...(listContextMenu.entry.fileType === "file"
+              ? [
+                  { label: "下载", onClick: () => void download(false) },
+                  { label: "编辑", onClick: () => void editRemote(listContextMenu.entry) },
+                ]
+              : []),
+            { label: "重命名", onClick: () => void rename() },
+            {
+              label: "复制路径",
+              onClick: () => {
+                void writeClipboardText(listContextMenu.entry.path)
+                  .then(() => onToast?.(`已复制：${listContextMenu.entry.path}`))
+                  .catch(() => onToast?.("复制失败，请检查系统剪贴板权限。"));
+              },
+            },
+            { label: "删除", onClick: () => void remove(), danger: true, separatorBefore: true },
+          ]}
+        />
+      )}
       {(transferItems.length > 0 || pendingUploads.length > 0 || remoteEdit) && (
         <div className="transfer-list">
       {remoteEdit && (
@@ -891,6 +952,19 @@ function formatTransferStatus(status: TransferEvent["status"]) {
     cancelled: "已取消",
     failed: "失败",
   }[status];
+}
+
+function formatRemoteTimestamp(modifiedAtUnix: number | null): string {
+  if (modifiedAtUnix === null || !Number.isFinite(modifiedAtUnix) || modifiedAtUnix <= 0) return "";
+  const date = new Date(modifiedAtUnix * 1000);
+  if (Number.isNaN(date.getTime())) return "";
+  const now = new Date();
+  const sameYear = date.getFullYear() === now.getFullYear();
+  const pad = (value: number) => String(value).padStart(2, "0");
+  const datePart = sameYear
+    ? `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+    : `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  return datePart;
 }
 
 function formatBytes(value: number) {

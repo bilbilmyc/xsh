@@ -560,6 +560,7 @@ export function SessionSidebar({
       <Server size={14} />
       <span className="session-row-copy">
         <strong>{session.name}</strong>
+        <small className="session-row-address">{session.username}@{session.host}{session.port === 22 ? "" : `:${session.port}`}</small>
       </span>
       <span className="session-row-indicators" aria-hidden="true">
         {activity && (

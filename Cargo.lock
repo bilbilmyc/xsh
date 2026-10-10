@@ -6835,6 +6835,7 @@ name = "xsh-sftp"
 version = "0.1.17"
 dependencies = [
  "anyhow",
+ "futures",
  "russh",
  "russh-sftp",
  "serde",

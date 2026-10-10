@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 #[cfg(target_os = "macos")]
 use tauri::RunEvent;
-use tauri::ipc::Channel;
+use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, State, WindowEvent};
@@ -141,28 +141,28 @@ async fn read_text_file(source_path: PathBuf) -> CommandResult<String> {
 }
 
 #[tauri::command]
-fn list_groups(state: State<'_, AppState>) -> CommandResult<Vec<SessionGroup>> {
-    state.repository.list_groups().map_err(display_error)
+async fn list_groups(state: State<'_, AppState>) -> CommandResult<Vec<SessionGroup>> {
+    let repository = Arc::clone(&state.repository);
+    run_storage_operation(move || repository.list_groups().map_err(display_error)).await
 }
 
 #[tauri::command]
-fn create_group(
+async fn create_group(
     state: State<'_, AppState>,
     draft: SessionGroupDraft,
 ) -> CommandResult<SessionGroup> {
-    state.repository.create_group(draft).map_err(display_error)
+    let repository = Arc::clone(&state.repository);
+    run_storage_operation(move || repository.create_group(draft).map_err(display_error)).await
 }
 
 #[tauri::command]
-fn update_group(
+async fn update_group(
     state: State<'_, AppState>,
     id: Uuid,
     draft: SessionGroupDraft,
 ) -> CommandResult<SessionGroup> {
-    state
-        .repository
-        .update_group(id, draft)
-        .map_err(display_error)
+    let repository = Arc::clone(&state.repository);
+    run_storage_operation(move || repository.update_group(id, draft).map_err(display_error)).await
 }
 
 #[tauri::command]
@@ -179,20 +179,26 @@ async fn delete_group(state: State<'_, AppState>, id: Uuid) -> CommandResult<Vec
 }
 
 #[tauri::command]
-fn list_known_hosts(state: State<'_, AppState>) -> CommandResult<Vec<KnownHost>> {
-    state.repository.list_known_hosts().map_err(display_error)
+async fn list_known_hosts(state: State<'_, AppState>) -> CommandResult<Vec<KnownHost>> {
+    let repository = Arc::clone(&state.repository);
+    run_storage_operation(move || repository.list_known_hosts().map_err(display_error)).await
 }
 
 #[tauri::command]
-fn delete_known_host(state: State<'_, AppState>, host: String, port: u16) -> CommandResult<()> {
-    state
-        .repository
-        .delete_known_host(&host, port)
-        .map_err(display_error)
+async fn delete_known_host(
+    state: State<'_, AppState>,
+    host: String,
+    port: u16,
+) -> CommandResult<()> {
+    let repository = Arc::clone(&state.repository);
+    run_storage_operation(move || {
+        repository.delete_known_host(&host, port).map_err(display_error)
+    })
+    .await
 }
 
 #[tauri::command]
-fn trust_session_host_key(
+async fn trust_session_host_key(
     state: State<'_, AppState>,
     session_id: SessionId,
     approval: HostKeyApproval,
@@ -200,15 +206,17 @@ fn trust_session_host_key(
     let session = require_session(&state, session_id)?;
     validate_session_host_key_endpoint(&session, &approval)?;
     let known_host = validate_host_key_approval(&approval).map_err(display_error)?;
-    state
-        .repository
-        .save_known_host(known_host)
-        .map_err(display_error)
+    let repository = Arc::clone(&state.repository);
+    run_storage_operation(move || {
+        repository.save_known_host(known_host).map_err(display_error)
+    })
+    .await
 }
 
 #[tauri::command]
-fn list_sessions(state: State<'_, AppState>) -> CommandResult<Vec<SavedSession>> {
-    state.repository.list_sessions().map_err(display_error)
+async fn list_sessions(state: State<'_, AppState>) -> CommandResult<Vec<SavedSession>> {
+    let repository = Arc::clone(&state.repository);
+    run_storage_operation(move || repository.list_sessions().map_err(display_error)).await
 }
 
 #[tauri::command]
@@ -233,8 +241,10 @@ fn get_ssh_key_defaults() -> CommandResult<SshKeyDefaults> {
 }
 
 #[tauri::command]
-fn list_ssh_config_entries() -> CommandResult<Vec<SshConfigEntry>> {
-    SshConfigEntry::read_user_config().map_err(display_error)
+async fn list_ssh_config_entries() -> CommandResult<Vec<SshConfigEntry>> {
+    SshConfigEntry::read_user_config_async()
+        .await
+        .map_err(display_error)
 }
 
 #[tauri::command]
@@ -244,10 +254,8 @@ async fn create_session(
 ) -> CommandResult<SavedSession> {
     let _credential_lifecycle = state.credential_lifecycle.lock().await;
     validate_session_draft(&state, &draft, None).await?;
-    state
-        .repository
-        .create_session(draft)
-        .map_err(display_error)
+    let repository = Arc::clone(&state.repository);
+    run_storage_operation(move || repository.create_session(draft).map_err(display_error)).await
 }
 
 #[tauri::command]
@@ -259,10 +267,10 @@ async fn update_session(
     let _credential_lifecycle = state.credential_lifecycle.lock().await;
     let previous = require_session(&state, id)?;
     validate_session_draft(&state, &draft, Some(&previous)).await?;
-    let updated = state
-        .repository
-        .update_session(id, draft)
-        .map_err(display_error)?;
+    let repository = Arc::clone(&state.repository);
+    let updated =
+        run_storage_operation(move || repository.update_session(id, draft).map_err(display_error))
+            .await?;
     let previous_refs = session_credential_references(&previous);
     let updated_refs = session_credential_references(&updated);
     for credential_ref in previous_refs
@@ -278,7 +286,8 @@ async fn update_session(
 async fn delete_session(state: State<'_, AppState>, id: SessionId) -> CommandResult<()> {
     let _credential_lifecycle = state.credential_lifecycle.lock().await;
     let session = require_session(&state, id)?;
-    state.repository.delete_session(id).map_err(display_error)?;
+    let repository = Arc::clone(&state.repository);
+    run_storage_operation(move || repository.delete_session(id).map_err(display_error)).await?;
     for credential_ref in session_credential_references(&session) {
         cleanup_credential_if_unused(&state, &credential_ref).await;
     }
@@ -331,7 +340,7 @@ async fn connect_terminal(
     session_id: SessionId,
     columns: u16,
     rows: u16,
-    on_event: Channel<TerminalEvent>,
+    on_event: Channel<InvokeResponseBody>,
 ) -> CommandResult<ConnectionId> {
     validate_dimensions(columns, rows).map_err(display_error)?;
     let session = require_session(&state, session_id)?;
@@ -374,11 +383,22 @@ async fn connect_terminal(
     let ssh = state.ssh.clone();
     tauri::async_runtime::spawn(async move {
         while let Some(event) = events.recv().await {
-            let connected = matches!(
-                &event,
-                TerminalEvent::StateChanged(ConnectionState::Connected)
-            );
-            if on_event.send(event).is_err() {
+            let connected =
+                matches!(&event, TerminalEvent::StateChanged(ConnectionState::Connected));
+            // Terminal output dominates the traffic; sending it as raw bytes
+            // avoids the ~4x JSON number-array expansion and the per-element
+            // decode on the webview side. Control events stay JSON.
+            let send_result = match event {
+                TerminalEvent::Output(bytes) => on_event.send(InvokeResponseBody::Raw(bytes)),
+                event => serde_json::to_string(&event).map_or_else(
+                    |error| {
+                        tracing::warn!(%error, "序列化终端事件失败");
+                        Ok(())
+                    },
+                    |json| on_event.send(InvokeResponseBody::Json(json)),
+                ),
+            };
+            if send_result.is_err() {
                 events.close();
                 let _ = ssh.disconnect(connection_id).await;
                 break;
@@ -765,23 +785,29 @@ async fn sftp_list_directory(
 }
 
 #[tauri::command]
-fn list_local_sync_entries(
+async fn list_local_sync_entries(
     root_path: PathBuf,
     exclude_patterns: Vec<String>,
 ) -> CommandResult<Vec<LocalSyncEntry>> {
-    let root = root_path.canonicalize().map_err(display_error)?;
-    if !root.is_dir() {
-        return Err("同步本地目录不存在或不是文件夹".into());
-    }
-    let patterns = exclude_patterns
-        .into_iter()
-        .map(|pattern| pattern.trim().replace('\\', "/"))
-        .filter(|pattern| !pattern.is_empty() && !pattern.starts_with('#'))
-        .collect::<Vec<_>>();
-    let mut entries = Vec::new();
-    collect_local_sync_entries(&root, &root, &patterns, &mut entries)?;
-    entries.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
-    Ok(entries)
+    // The recursive directory walk with glob matching can take seconds on
+    // large trees; keep it off the main thread.
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = root_path.canonicalize().map_err(display_error)?;
+        if !root.is_dir() {
+            return Err("同步本地目录不存在或不是文件夹".into());
+        }
+        let patterns = exclude_patterns
+            .into_iter()
+            .map(|pattern| pattern.trim().replace('\\', "/"))
+            .filter(|pattern| !pattern.is_empty() && !pattern.starts_with('#'))
+            .collect::<Vec<_>>();
+        let mut entries = Vec::new();
+        collect_local_sync_entries(&root, &root, &patterns, &mut entries)?;
+        entries.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+        Ok(entries)
+    })
+    .await
+    .map_err(|error| format!("XSH 本地目录扫描线程异常：{error}"))?
 }
 
 #[tauri::command]
@@ -798,7 +824,7 @@ async fn sftp_stat(
 }
 
 #[tauri::command]
-fn prepare_remote_edit_path(app: AppHandle, remote_name: String) -> CommandResult<PathBuf> {
+async fn prepare_remote_edit_path(app: AppHandle, remote_name: String) -> CommandResult<PathBuf> {
     if remote_name.is_empty()
         || remote_name == "."
         || remote_name == ".."
@@ -813,23 +839,27 @@ fn prepare_remote_edit_path(app: AppHandle, remote_name: String) -> CommandResul
         .map_err(display_error)?
         .join("xsh")
         .join("remote-edit");
-    std::fs::create_dir_all(&directory).map_err(display_error)?;
-    let now = std::time::SystemTime::now();
-    if let Ok(entries) = std::fs::read_dir(&directory) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let stale = entry
-                .metadata()
-                .and_then(|metadata| metadata.modified())
-                .ok()
-                .and_then(|modified| now.duration_since(modified).ok())
-                .is_some_and(|age| age > Duration::from_secs(7 * 24 * 60 * 60));
-            if stale && path.is_file() {
-                let _ = std::fs::remove_file(path);
+    tauri::async_runtime::spawn_blocking(move || {
+        std::fs::create_dir_all(&directory).map_err(display_error)?;
+        let now = std::time::SystemTime::now();
+        if let Ok(entries) = std::fs::read_dir(&directory) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let stale = entry
+                    .metadata()
+                    .and_then(|metadata| metadata.modified())
+                    .ok()
+                    .and_then(|modified| now.duration_since(modified).ok())
+                    .is_some_and(|age| age > Duration::from_secs(7 * 24 * 60 * 60));
+                if stale && path.is_file() {
+                    let _ = std::fs::remove_file(path);
+                }
             }
         }
-    }
-    Ok(directory.join(format!("{}-{remote_name}", Uuid::new_v4())))
+        Ok(directory.join(format!("{}-{remote_name}", Uuid::new_v4())))
+    })
+    .await
+    .map_err(|error| format!("XSH 远程编辑副本准备失败：{error}"))?
 }
 
 #[tauri::command]
@@ -1138,35 +1168,41 @@ async fn import_sessions(
     }
 
     let _credential_lifecycle = state.credential_lifecycle.lock().await;
-    let mut group_map = HashMap::new();
-    for group in &bundle.groups {
-        let created = state
-            .repository
-            .create_group(SessionGroupDraft {
-                parent_id: None,
-                name: group.name.clone(),
-                color: group.color.clone(),
-                sort_order: group.sort_order,
-            })
-            .map_err(display_error)?;
-        group_map.insert(group.id, created.id);
-    }
-    for group in &bundle.groups {
-        if let Some(new_id) = group_map.get(&group.id).copied() {
-            state
-                .repository
-                .update_group(
-                    new_id,
-                    SessionGroupDraft {
-                        parent_id: group.parent_id.and_then(|id| group_map.get(&id).copied()),
-                        name: group.name.clone(),
-                        color: group.color.clone(),
-                        sort_order: group.sort_order,
-                    },
-                )
+    let group_count = bundle.groups.len();
+    let session_count = bundle.sessions.len();
+    let repository = Arc::clone(&state.repository);
+    let groups_bundle = bundle.groups.clone();
+    let group_map = run_storage_operation(move || {
+        let mut group_map = HashMap::new();
+        for group in &groups_bundle {
+            let created = repository
+                .create_group(SessionGroupDraft {
+                    parent_id: None,
+                    name: group.name.clone(),
+                    color: group.color.clone(),
+                    sort_order: group.sort_order,
+                })
                 .map_err(display_error)?;
+            group_map.insert(group.id, created.id);
         }
-    }
+        for group in &groups_bundle {
+            if let Some(new_id) = group_map.get(&group.id).copied() {
+                repository
+                    .update_group(
+                        new_id,
+                        SessionGroupDraft {
+                            parent_id: group.parent_id.and_then(|id| group_map.get(&id).copied()),
+                            name: group.name.clone(),
+                            color: group.color.clone(),
+                            sort_order: group.sort_order,
+                        },
+                    )
+                    .map_err(display_error)?;
+            }
+        }
+        Ok(group_map)
+    })
+    .await?;
 
     let credentials_store = Arc::clone(&state.credentials);
     let credential_summary = run_credential_mutation(move || {
@@ -1176,37 +1212,41 @@ async fn import_sessions(
     })
     .await?;
 
-    for session in &bundle.sessions {
-        state
-            .repository
-            .create_session(SessionDraft {
-                group_id: session.group_id.and_then(|id| group_map.get(&id).copied()),
-                name: session.name.clone(),
-                host: session.host.clone(),
-                port: session.port,
-                username: session.username.clone(),
-                proxy_jump: session.proxy_jump.clone(),
-                proxy_jump_username: session.proxy_jump_username.clone(),
-                proxy_jump_authentication: session.proxy_jump_authentication.clone(),
-                authentication: session.authentication.clone(),
-                terminal: session.terminal.clone(),
-                forward_profiles: session.forward_profiles.clone(),
-                initial_directory: session.initial_directory.clone(),
-                startup_command: session.startup_command.clone(),
-                keepalive_seconds: session.keepalive_seconds,
-                auto_reconnect: session.auto_reconnect,
-                environment: session.environment.clone(),
-                color: session.color.clone(),
-                notes: session.notes.clone(),
-                tags: session.tags.clone(),
-                favorite: session.favorite,
-            })
-            .map_err(display_error)?;
-    }
+    let repository = Arc::clone(&state.repository);
+    run_storage_operation(move || {
+        for session in &bundle.sessions {
+            repository
+                .create_session(SessionDraft {
+                    group_id: session.group_id.and_then(|id| group_map.get(&id).copied()),
+                    name: session.name.clone(),
+                    host: session.host.clone(),
+                    port: session.port,
+                    username: session.username.clone(),
+                    proxy_jump: session.proxy_jump.clone(),
+                    proxy_jump_username: session.proxy_jump_username.clone(),
+                    proxy_jump_authentication: session.proxy_jump_authentication.clone(),
+                    authentication: session.authentication.clone(),
+                    terminal: session.terminal.clone(),
+                    forward_profiles: session.forward_profiles.clone(),
+                    initial_directory: session.initial_directory.clone(),
+                    startup_command: session.startup_command.clone(),
+                    keepalive_seconds: session.keepalive_seconds,
+                    auto_reconnect: session.auto_reconnect,
+                    environment: session.environment.clone(),
+                    color: session.color.clone(),
+                    notes: session.notes.clone(),
+                    tags: session.tags.clone(),
+                    favorite: session.favorite,
+                })
+                .map_err(display_error)?;
+        }
+        Ok(())
+    })
+    .await?;
 
     Ok(ImportSummary {
-        groups_created: bundle.groups.len(),
-        sessions_created: bundle.sessions.len(),
+        groups_created: group_count,
+        sessions_created: session_count,
         credentials_imported: credential_summary.imported,
         credentials_overwritten: credential_summary.overwritten,
     })
@@ -1368,6 +1408,22 @@ where
     .await
     .map_err(|_| "XSH 本地凭据库操作超时，请稍后重试".to_owned())?
     .map_err(|error| format!("XSH 本地凭据库操作线程异常：{error}"))?
+}
+
+/// SQLite commits (including fsync) must not run on async workers or, for
+/// sync commands, on the webview main thread.
+async fn run_storage_operation<T, F>(operation: F) -> CommandResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> CommandResult<T> + Send + 'static,
+{
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        tauri::async_runtime::spawn_blocking(operation),
+    )
+    .await
+    .map_err(|_| "XSH 本地存储操作超时，请稍后重试".to_owned())?
+    .map_err(|error| format!("XSH 本地存储操作线程异常：{error}"))?
 }
 
 async fn run_credential_mutation<T, F>(operation: F) -> CommandResult<T>
@@ -1683,31 +1739,25 @@ fn sync_glob_match(pattern: &str, value: &str) -> bool {
     {
         return true;
     }
-    let (pattern, value): (Vec<char>, Vec<char>) =
-        (pattern.chars().collect(), value.chars().collect());
-    let mut matches = vec![vec![false; value.len() + 1]; pattern.len() + 1];
-    matches[0][0] = true;
-    for index in 1..=pattern.len() {
-        if pattern[index - 1] == '*' {
-            matches[index][0] = matches[index - 1][0];
-        }
-    }
+    let pattern: Vec<char> = pattern.chars().collect();
+    let value: Vec<char> = value.chars().collect();
+    // Two rolling rows instead of a full (pattern x value) matrix: this runs
+    // once per directory entry per exclude pattern on large sync trees.
+    let mut previous = vec![false; value.len() + 1];
+    previous[0] = true;
     for pattern_index in 1..=pattern.len() {
+        let mut current = vec![false; value.len() + 1];
+        current[0] = previous[0] && pattern[pattern_index - 1] == '*';
         for value_index in 1..=value.len() {
-            matches[pattern_index][value_index] = match pattern[pattern_index - 1] {
-                '*' => {
-                    matches[pattern_index - 1][value_index]
-                        || matches[pattern_index][value_index - 1]
-                }
-                '?' => matches[pattern_index - 1][value_index - 1],
-                character => {
-                    matches[pattern_index - 1][value_index - 1]
-                        && character == value[value_index - 1]
-                }
+            current[value_index] = match pattern[pattern_index - 1] {
+                '*' => previous[value_index] || current[value_index - 1],
+                '?' => previous[value_index - 1],
+                character => previous[value_index - 1] && character == value[value_index - 1],
             };
         }
+        previous = current;
     }
-    matches[pattern.len()][value.len()]
+    previous[value.len()]
 }
 
 async fn validate_authentication_reference(

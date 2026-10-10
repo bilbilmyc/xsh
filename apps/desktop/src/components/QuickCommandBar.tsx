@@ -9,6 +9,7 @@ import {
   type QuickCommandItem,
 } from "../quick-command-bar";
 import { containsSensitiveCommand, SENSITIVE_COMMAND_ERROR } from "../sensitive-command";
+import { confirmDialog } from "./DialogHost";
 import type { TerminalShortcutMode } from "../preferences";
 
 interface QuickCommandBarProps {
@@ -125,13 +126,17 @@ export function QuickCommandBar({
     onChange(next);
   };
 
-  const runItem = (item: QuickCommandItem) => {
+  const runItem = async (item: QuickCommandItem) => {
     if (!canSend) {
       onToast(unavailableReason);
       return;
     }
     const needsConfirmation = item.requiresConfirmation || /\r?\n/.test(item.command.trim());
-    if (needsConfirmation && !window.confirm(`即将向“${targetName}”发送：\n\n${item.command}\n\n是否继续？`)) return;
+    if (needsConfirmation && !(await confirmDialog({
+      title: "发送快捷命令",
+      message: `即将向“${targetName}”发送：\n\n${item.command}`,
+      confirmLabel: "发送",
+    }))) return;
     onSend(item, item.command);
     setSentItemId(item.id);
     window.setTimeout(() => setSentItemId((current) => current === item.id ? null : current), 900);
@@ -152,7 +157,7 @@ export function QuickCommandBar({
       const item = items.find((candidate) => candidate?.shortcut === shortcut);
       if (!item) return;
       event.preventDefault();
-      runItem(item);
+      void runItem(item);
     };
     window.addEventListener("keydown", onShortcut);
     return () => window.removeEventListener("keydown", onShortcut);
@@ -162,7 +167,7 @@ export function QuickCommandBar({
     if (clickTimerRef.current !== null) window.clearTimeout(clickTimerRef.current);
     clickTimerRef.current = window.setTimeout(() => {
       clickTimerRef.current = null;
-      runItem(item);
+      void runItem(item);
     }, 220);
   };
 

@@ -1,4 +1,5 @@
 use anyhow::{Context, bail};
+use futures::join;
 use russh_sftp::client::SftpSession;
 use russh_sftp::client::error::Error as SftpError;
 use russh_sftp::protocol::{FileType, OpenFlags, StatusCode};
@@ -336,8 +337,12 @@ async fn recover_remote_replace_with<I: RemoteReplaceIo>(
     current_source_token: &str,
 ) -> anyhow::Result<RecoveryOutcome> {
     let paths = RemoteReplacePaths::new(destination);
-    let records = load_protocol_records(io, &paths).await?;
-    let backup = io.lstat(&paths.backup).await?;
+    let (records, backup) = join!(
+        load_protocol_records(io, &paths),
+        io.lstat(&paths.backup)
+    );
+    let records = records?;
+    let backup = backup?;
     let record = records.common()?.cloned();
 
     if records.journal.is_none() && records.installed.is_none() {
@@ -637,11 +642,19 @@ async fn load_protocol_records<I: RemoteReplaceIo>(
     io: &I,
     paths: &RemoteReplacePaths,
 ) -> anyhow::Result<ProtocolRecords> {
+    // The four control files are probed concurrently: on the no-recovery fast
+    // path this is the bulk of the per-upload fixed cost on high-latency links.
+    let (journal, journal_temporary, installed, installed_temporary) = join!(
+        read_optional_record(io, &paths.journal, paths),
+        read_optional_record(io, &paths.journal_temporary, paths),
+        read_optional_record(io, &paths.installed, paths),
+        read_optional_record(io, &paths.installed_temporary, paths),
+    );
     let records = ProtocolRecords {
-        journal: read_optional_record(io, &paths.journal, paths).await?,
-        journal_temporary: read_optional_record(io, &paths.journal_temporary, paths).await?,
-        installed: read_optional_record(io, &paths.installed, paths).await?,
-        installed_temporary: read_optional_record(io, &paths.installed_temporary, paths).await?,
+        journal: journal?,
+        journal_temporary: journal_temporary?,
+        installed: installed?,
+        installed_temporary: installed_temporary?,
     };
     records.common()?;
     Ok(records)
@@ -777,12 +790,17 @@ async fn fingerprint_file<I: RemoteReplaceIo>(
         bail!("SFTP remote replacement artifact is not a regular file: {path}");
     }
     let sample_len = info.len.min(REMOTE_REPLACE_SAMPLE_BYTES);
-    let first = io.read_range(path, 0, sample_len).await?;
-    let last = if info.len > sample_len {
-        io.read_range(path, info.len - sample_len, sample_len)
-            .await?
+    // Head and tail samples are independent reads; issuing them together keeps
+    // the fingerprint at one round trip instead of two on every upload.
+    let (first, last) = if info.len > sample_len {
+        let tail_offset = info.len - sample_len;
+        let (first, last) = join!(
+            io.read_range(path, 0, sample_len),
+            io.read_range(path, tail_offset, sample_len)
+        );
+        (first?, last?)
     } else {
-        Vec::new()
+        (io.read_range(path, 0, sample_len).await?, Vec::new())
     };
     Ok(RemoteFileFingerprint {
         size: info.len,

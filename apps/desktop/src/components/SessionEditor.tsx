@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { BellRing, ChevronDown, FolderOpen, Keyboard, KeyRound, Plus, Server, Trash2, X } from "lucide-react";
 import { api } from "../api";
 import { rollbackUncommittedCredentials } from "../credential-lifecycle";
+import { confirmDialog } from "./DialogHost";
 import {
   defaultTerminalProfile,
   type AuthenticationMethod,
@@ -21,6 +22,7 @@ interface SessionEditorProps {
   session?: SavedSession;
   onClose: () => void;
   onSaved: (session: SavedSession) => void | Promise<void>;
+  onSavedAndConnect?: (session: SavedSession) => void | Promise<void>;
   onDeleted: (sessionId: string) => void;
 }
 
@@ -36,6 +38,7 @@ export function SessionEditor({
   session,
   onClose,
   onSaved,
+  onSavedAndConnect,
   onDeleted,
 }: SessionEditorProps) {
   const existingAuthType = session?.authentication.type ?? "password";
@@ -199,7 +202,7 @@ export function SessionEditor({
     else setPrivateKeyPath(defaultKeyPath);
   };
 
-  const save = async () => {
+  const save = async (connectAfterSave = false) => {
     setSaving(true);
     setError(null);
     const createdCredentialRefs: string[] = [];
@@ -236,9 +239,11 @@ export function SessionEditor({
             ? `已存在同名会话“${duplicateName.name}”`
             : null,
         ].filter(Boolean);
-        const confirmed = window.confirm(
-          `${warnings.join("\n")}。\n\n目标：${normalizedUsername}@${normalizedHost}:${parsedPort}\n\n仍要保存当前会话吗？`,
-        );
+        const confirmed = await confirmDialog({
+          title: "重复的会话",
+          message: `${warnings.join("\n")}。\n\n目标：${normalizedUsername}@${normalizedHost}:${parsedPort}\n\n仍要保存当前会话吗？`,
+          confirmLabel: "仍然保存",
+        });
         if (!confirmed) return;
       }
 
@@ -395,7 +400,8 @@ export function SessionEditor({
         ? await api.updateSession(session.id, draft)
         : await api.createSession(draft);
       sessionPersisted = true;
-      await onSaved(saved);
+      if (connectAfterSave && onSavedAndConnect) await onSavedAndConnect(saved);
+      else await onSaved(saved);
     } catch (caught) {
       await rollbackUncommittedCredentials(
         sessionPersisted,
@@ -409,7 +415,12 @@ export function SessionEditor({
   };
 
   const remove = async () => {
-    if (!session || !window.confirm(`确定删除会话“${session.name}”？此操作不会删除服务器上的任何内容。`)) return;
+    if (!session || !(await confirmDialog({
+      title: "删除会话",
+      message: `确定删除会话“${session.name}”？此操作不会删除服务器上的任何内容。`,
+      danger: true,
+      confirmLabel: "删除",
+    }))) return;
     setSaving(true);
     setError(null);
     try {
@@ -421,9 +432,44 @@ export function SessionEditor({
     }
   };
 
+  const [dirty, setDirty] = useState(false);
+  const requestClose = () => {
+    if (saving) return;
+    if (dirty) {
+      void confirmDialog({
+        title: "未保存的修改",
+        message: "有未保存的修改，关闭后将丢失，确定关闭吗？",
+      }).then((confirmed) => {
+        if (confirmed) onClose();
+      });
+      return;
+    }
+    onClose();
+  };
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") requestClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dirty, saving]);
+  const onEditorKeyDown = (event: React.KeyboardEvent) => {
+    if (event.key !== "Enter" || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return;
+    const target = event.target as HTMLElement;
+    if (target.tagName !== "INPUT") return;
+    event.preventDefault();
+    void save();
+  };
+
   return (
-    <div className="modal-backdrop" onMouseDown={onClose}>
-      <section className="session-editor" onMouseDown={(event) => event.stopPropagation()}>
+    <div className="modal-backdrop" onMouseDown={requestClose}>
+      <section
+        className="session-editor"
+        onMouseDown={(event) => event.stopPropagation()}
+        onKeyDown={onEditorKeyDown}
+        onChange={() => setDirty(true)}
+      >
         <header className="modal-header">
           <div className="modal-title-wrap">
             <span className="modal-icon"><Server size={18} /></span>
@@ -432,7 +478,7 @@ export function SessionEditor({
               <p>连接信息保存在本地，密码由 XSH 本地加密数据库托管，不使用系统钥匙串。</p>
             </div>
           </div>
-          <button className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button>
+          <button className="icon-button" onClick={requestClose} aria-label="关闭"><X size={18} /></button>
         </header>
 
         <div className="editor-body">
@@ -473,7 +519,7 @@ export function SessionEditor({
           <div className="form-section">
             <div className="section-heading"><KeyRound size={15} />目标主机认证</div>
             <div className="segmented-control"><button className={authType === "password" ? "active" : ""} onClick={() => setAuthType("password")}>密码</button><button className={authType === "privateKey" ? "active" : ""} onClick={() => setAuthType("privateKey")}>SSH Key</button><button className={authType === "agent" ? "active" : ""} onClick={() => setAuthType("agent")}>SSH Agent</button></div>
-            {authType === "password" ? <label className="field"><span>密码 {passwordSaved && <em className="credential-saved-badge">•••••••• 已保存</em>}</span><input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={passwordSaved ? "留空保持已保存的密码" : "请输入 SSH 密码"} autoComplete="new-password" /></label> : authType === "agent" ? <label className="field"><span>Agent 身份（可选）</span><select value={agentFingerprint} onChange={(e) => setAgentFingerprint(e.target.value)}><option value="">自动尝试 Agent 中的密钥</option>{agentKeys.map((key) => <option key={key.fingerprint} value={key.fingerprint}>{key.algorithm} · {key.fingerprint}{key.comment ? ` · ${key.comment}` : ""}{key.certificate ? " · certificate" : ""}</option>)}</select><small className="field-help">{agentLoading ? "正在读取本机 SSH Agent…" : agentKeys.length ? `已发现 ${agentKeys.length} 个 Agent 身份` : "未发现身份；保存后连接时会再次检测"}<button type="button" className="link-button" onClick={() => void refreshAgentKeys()}>刷新</button></small></label> : <div className="form-grid"><label className="field field-span-2"><span>私钥文件</span><div className="input-action-row"><input value={privateKeyPath} onChange={(e) => setPrivateKeyPath(e.target.value)} placeholder="~/.ssh/id_ed25519" /><button type="button" className="secondary-button" onClick={() => void choosePrivateKey()}>选择私钥</button></div><div className="private-key-actions"><button type="button" className="link-button private-key-directory-button" onClick={() => void openSshDirectory()}><FolderOpen size={13} />打开 ~/.ssh</button>{sshKeyDefaults?.defaultKeyPath && <button type="button" className="link-button" onClick={() => useDefaultPrivateKey()}>使用默认密钥</button>}</div><small className="field-help">选择器会默认打开 ~/.ssh，不需要在 Finder 中显示隐藏目录。</small></label><label className="field field-span-2"><span>Key Passphrase（没有则留空） {passphraseSaved && <em className="credential-saved-badge">•••••••• 已保存</em>}</span><input type="password" value={passphrase} onChange={(e) => setPassphrase(e.target.value)} placeholder={passphraseSaved ? "留空保持已保存的 Passphrase" : "没有则留空"} autoComplete="new-password" /></label></div>}
+            {authType === "password" ? <label className="field"><span>密码 {passwordSaved && <em className="credential-saved-badge">•••••••• 已保存</em>}</span><input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={passwordSaved ? "留空保持已保存的密码" : "请输入 SSH 密码"} autoComplete="new-password" /></label> : authType === "agent" ? <label className="field"><span>Agent 身份（可选）</span><select value={agentFingerprint} onChange={(e) => setAgentFingerprint(e.target.value)}><option value="">自动尝试 Agent 中的密钥</option>{agentKeys.map((key) => <option key={key.fingerprint} value={key.fingerprint}>{key.algorithm} · {key.fingerprint}{key.comment ? ` · ${key.comment}` : ""}{key.certificate ? " · 证书" : ""}</option>)}</select><small className="field-help">{agentLoading ? "正在读取本机 SSH Agent…" : agentKeys.length ? `已发现 ${agentKeys.length} 个 Agent 身份` : "未发现身份；保存后连接时会再次检测"}<button type="button" className="link-button" onClick={() => void refreshAgentKeys()}>刷新</button></small></label> : <div className="form-grid"><label className="field field-span-2"><span>私钥文件</span><div className="input-action-row"><input value={privateKeyPath} onChange={(e) => setPrivateKeyPath(e.target.value)} placeholder="~/.ssh/id_ed25519" /><button type="button" className="secondary-button" onClick={() => void choosePrivateKey()}>选择私钥</button></div><div className="private-key-actions"><button type="button" className="link-button private-key-directory-button" onClick={() => void openSshDirectory()}><FolderOpen size={13} />打开 ~/.ssh</button>{sshKeyDefaults?.defaultKeyPath && <button type="button" className="link-button" onClick={() => useDefaultPrivateKey()}>使用默认密钥</button>}</div><small className="field-help">选择器会默认打开 ~/.ssh，不需要在 Finder 中显示隐藏目录。</small></label><label className="field field-span-2"><span>Key Passphrase（没有则留空） {passphraseSaved && <em className="credential-saved-badge">•••••••• 已保存</em>}</span><input type="password" value={passphrase} onChange={(e) => setPassphrase(e.target.value)} placeholder={passphraseSaved ? "留空保持已保存的 Passphrase" : "没有则留空"} autoComplete="new-password" /></label></div>}
           </div>
 
 
@@ -536,7 +582,7 @@ export function SessionEditor({
           {error && <div className="form-error">{error}</div>}
         </div>
 
-        <footer className="modal-footer">{session && <button className="danger-button" disabled={saving} onClick={remove}><Trash2 size={14} />删除会话</button>}<button className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" disabled={saving} onClick={save}>{saving ? "保存中…" : "保存会话"}</button></footer>
+        <footer className="modal-footer">{session && <button className="danger-button" disabled={saving} onClick={remove}><Trash2 size={14} />删除会话</button>}<button className="secondary-button" onClick={requestClose}>取消</button>{!session && onSavedAndConnect && <button className="primary-button" disabled={saving} onClick={() => void save(true)}>{saving ? "保存中…" : "保存并连接"}</button>}<button className={session ? "primary-button" : "secondary-button"} disabled={saving} onClick={() => void save()}>{saving ? "保存中…" : "保存会话"}</button></footer>
       </section>
     </div>
   );

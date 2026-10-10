@@ -41,17 +41,21 @@ const LEGACY_DEFAULT_TERMINAL_FONT_FAMILY = '"SFMono-Regular", "Cascadia Code", 
 const LEGACY_MONACO_DEFAULT_TERMINAL_FONT_FAMILY = '"Monaco", "SFMono-Regular", Menlo, Consolas, monospace';
 const LEGACY_DEFAULT_TERMINAL_LINE_HEIGHT = 1.22;
 const LEGACY_DEFAULT_TERMINAL_FONT_SIZE = 14;
+// v1.17 shipped a 15px UI baseline and 700-weight terminal bold; the defaults
+// were slimmed to 14px / 400 in v1.18.
+const LEGACY_DEFAULT_UI_FONT_SIZE = 15;
+const LEGACY_DEFAULT_TERMINAL_FONT_WEIGHT_BOLD = 700;
 
 export const defaultPreferences: AppPreferences = {
   theme: "midnight",
   accent: "cyan",
   uiFontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
-  uiFontSize: 15,
+  uiFontSize: 14,
   terminalFontFamily: '"Cascadia Mono", "Cascadia Code", "SFMono-Regular", "SF Mono", Menlo, Consolas, "Courier New", monospace',
   terminalFontSize: 15,
   terminalLineHeight: 1.22,
   terminalFontWeight: 400,
-  terminalFontWeightBold: 700,
+  terminalFontWeightBold: 400,
   terminalScrollbackLines: 10_000,
   useSessionTerminalFont: false,
   useSessionTerminalScrollback: false,
@@ -97,6 +101,16 @@ export function loadPreferences(): AppPreferences {
       || hasDenseReadabilityDefaults) {
       merged.terminalFontSize = defaultPreferences.terminalFontSize;
       merged.terminalLineHeight = defaultPreferences.terminalLineHeight;
+    }
+    // Same policy for the slimmer UI defaults: only migrate stored values that
+    // still equal the old defaults, so explicit choices survive upgrades.
+    if (parsed.uiFontSize === LEGACY_DEFAULT_UI_FONT_SIZE) {
+      merged.uiFontSize = defaultPreferences.uiFontSize;
+    }
+    if (parsed.terminalFontWeightBold === LEGACY_DEFAULT_TERMINAL_FONT_WEIGHT_BOLD
+      && (parsed.terminalFontWeight === undefined
+        || parsed.terminalFontWeight === defaultPreferences.terminalFontWeight)) {
+      merged.terminalFontWeightBold = defaultPreferences.terminalFontWeightBold;
     }
     return normalizePreferences(merged);
   } catch {

@@ -4,6 +4,8 @@ use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::SystemTime;
 
 /// A concrete host alias from the user's OpenSSH configuration.
 ///
@@ -41,11 +43,59 @@ struct HostBlock {
     options: HostOptions,
 }
 
+struct UserConfigCache {
+    signature: Option<(SystemTime, u64)>,
+    entries: Vec<SshConfigEntry>,
+}
+
+fn user_config_cache() -> &'static Mutex<Option<UserConfigCache>> {
+    static CACHE: OnceLock<Mutex<Option<UserConfigCache>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn user_config_signature(path: &Path) -> Option<(SystemTime, u64)> {
+    let metadata = fs::metadata(path).ok()?;
+    Some((metadata.modified().ok()?, metadata.len()))
+}
+
 impl SshConfigEntry {
+    /// Reads the user's `~/.ssh/config`.
+    ///
+    /// The parse walks `Include` directives (including directory globs), so it
+    /// performs blocking filesystem work; results are cached keyed on the main
+    /// config file's (mtime, len) so repeated calls only stat the file. Edits
+    /// to `Include`d files without touching the main config need a restart to
+    /// be picked up. Async callers should prefer [`Self::read_user_config_async`].
     pub fn read_user_config() -> Result<Vec<Self>> {
         let home = home_directory()
             .ok_or_else(|| anyhow!("could not determine the user home directory"))?;
-        Self::read_from(home.join(".ssh").join("config"))
+        let path = home.join(".ssh").join("config");
+        let signature = user_config_signature(&path);
+        let cached_entries = match user_config_cache().lock() {
+            Ok(guard) => match guard.as_ref() {
+                Some(cache) if cache.signature == signature => Some(cache.entries.clone()),
+                _ => None,
+            },
+            Err(_) => None,
+        };
+        if let Some(entries) = cached_entries {
+            return Ok(entries);
+        }
+        let entries = Self::read_from(&path)?;
+        if let Ok(mut cache) = user_config_cache().lock() {
+            *cache = Some(UserConfigCache {
+                signature,
+                entries: entries.clone(),
+            });
+        }
+        Ok(entries)
+    }
+
+    /// Blocking-safe variant of [`Self::read_user_config`] for async callers.
+    pub async fn read_user_config_async() -> Result<Vec<Self>> {
+        tokio::task::spawn_blocking(Self::read_user_config)
+            .await
+            .context("SSH config parsing task failed")?
     }
 
     pub fn read_from(path: impl AsRef<Path>) -> Result<Vec<Self>> {

@@ -24,23 +24,16 @@ import {
 } from "lucide-react";
 import { api } from "./api";
 import { CommandCenterModal } from "./components/CommandCenterModal";
-import { BatchCommandModal, type BatchCommandRun, type BatchCommandTarget } from "./components/BatchCommandModal";
-import { ConnectionManagerModal } from "./components/ConnectionManagerModal";
-import { CommandHistoryModal } from "./components/CommandHistoryModal";
+import type { BatchCommandRun, BatchCommandTarget } from "./components/BatchCommandModal";
 import { ContextMenu } from "./components/ContextMenu";
-import { DiagnosticModal } from "./components/DiagnosticModal";
+import { colorDialog, confirmDialog, isDialogOpen, promptDialog, DialogHost } from "./components/DialogHost";
 import { GroupEditorModal } from "./components/GroupEditorModal";
-import { SshConfigModal } from "./components/SshConfigModal";
 import { QuickCommandBar } from "./components/QuickCommandBar";
 import { PortForwardModal } from "./components/PortForwardModal";
-import { SessionBatchEditorModal, type SessionBatchUpdates } from "./components/SessionBatchEditorModal";
+import type { SessionBatchUpdates } from "./components/SessionBatchEditorModal";
 import { SessionEditor } from "./components/SessionEditor";
-import { SettingsModal } from "./components/SettingsModal";
 import { PasswordPromptModal } from "./components/PasswordPromptModal";
 import { SessionSidebar, type SessionActivitySummary } from "./components/SessionSidebar";
-import { WorkspaceManagerModal } from "./components/WorkspaceManagerModal";
-import { OnboardingModal } from "./components/OnboardingModal";
-import { TransferManagerModal } from "./components/TransferManagerModal";
 import type { TerminalCommandRequest } from "./components/TerminalPane";
 import { loadCommandLibrary, saveCommandLibrary, type CommandSnippet } from "./command-library";
 import { loadCommandHistory, recordCommandHistory, saveCommandHistory, type CommandHistoryEntry } from "./command-history";
@@ -59,6 +52,37 @@ const TerminalPane = lazy(() =>
 );
 const SftpPanel = lazy(() =>
   import("./components/SftpPanel").then((module) => ({ default: module.SftpPanel })),
+);
+// Infrequently used modals stay out of the initial bundle.
+const BatchCommandModal = lazy(() =>
+  import("./components/BatchCommandModal").then((module) => ({ default: module.BatchCommandModal })),
+);
+const CommandHistoryModal = lazy(() =>
+  import("./components/CommandHistoryModal").then((module) => ({ default: module.CommandHistoryModal })),
+);
+const ConnectionManagerModal = lazy(() =>
+  import("./components/ConnectionManagerModal").then((module) => ({ default: module.ConnectionManagerModal })),
+);
+const DiagnosticModal = lazy(() =>
+  import("./components/DiagnosticModal").then((module) => ({ default: module.DiagnosticModal })),
+);
+const OnboardingModal = lazy(() =>
+  import("./components/OnboardingModal").then((module) => ({ default: module.OnboardingModal })),
+);
+const SessionBatchEditorModal = lazy(() =>
+  import("./components/SessionBatchEditorModal").then((module) => ({ default: module.SessionBatchEditorModal })),
+);
+const SettingsModal = lazy(() =>
+  import("./components/SettingsModal").then((module) => ({ default: module.SettingsModal })),
+);
+const SshConfigModal = lazy(() =>
+  import("./components/SshConfigModal").then((module) => ({ default: module.SshConfigModal })),
+);
+const TransferManagerModal = lazy(() =>
+  import("./components/TransferManagerModal").then((module) => ({ default: module.TransferManagerModal })),
+);
+const WorkspaceManagerModal = lazy(() =>
+  import("./components/WorkspaceManagerModal").then((module) => ({ default: module.WorkspaceManagerModal })),
 );
 
 interface TerminalPaneHostProps {
@@ -245,12 +269,19 @@ function App() {
   const [pendingTerminalCommands, setPendingTerminalCommands] = useState<Record<string, TerminalCommandRequest>>({});
   const [paneLayout, setPaneLayout] = useState<PaneLayout>(() => loadPaneLayout());
   const [splitRatio, setSplitRatio] = useState(() => loadSplitRatio());
+  const splitRatioRef = useRef(splitRatio);
+  splitRatioRef.current = splitRatio;
   const [secondaryTabId, setSecondaryTabId] = useState<string | null>(null);
   const [sidebarVisible, setSidebarVisible] = useState(() => loadSidebarVisible());
   const [onboardingVisible, setOnboardingVisible] = useState(false);
   const [broadcastEnabled, setBroadcastEnabled] = useState(false);
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState<string | null>(null);
+  useEffect(() => {
+    if (!toast) return;
+    const timer = window.setTimeout(() => setToast(null), toast.length > 40 ? 12000 : 6000);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
   const [diagnosticSession, setDiagnosticSession] = useState<SavedSession | null>(null);
   const [diagnosticReport, setDiagnosticReport] = useState<SshDiagnosticReport | null>(null);
   const [diagnosticLoading, setDiagnosticLoading] = useState(false);
@@ -397,10 +428,12 @@ function App() {
     window.localStorage.setItem(PANE_LAYOUT_STORAGE_KEY, next);
   };
 
-  const updateSplitRatio = (next: number) => {
+  const updateSplitRatio = (next: number, persist = true) => {
     const normalized = Math.min(MAX_SPLIT_RATIO, Math.max(MIN_SPLIT_RATIO, Math.round(next * 10) / 10));
     setSplitRatio(normalized);
-    window.localStorage.setItem(SPLIT_RATIO_STORAGE_KEY, String(normalized));
+    // Persisting synchronously on every pointermove blocks the main thread
+    // while dragging; the caller persists once on pointerup instead.
+    if (persist) window.localStorage.setItem(SPLIT_RATIO_STORAGE_KEY, String(normalized));
   };
 
   const beginSplitResize = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -416,10 +449,11 @@ function App() {
       const next = paneLayout === "vertical"
         ? ((moveEvent.clientX - rect.left) / Math.max(rect.width, 1)) * 100
         : ((moveEvent.clientY - rect.top) / Math.max(rect.height, 1)) * 100;
-      updateSplitRatio(next);
+      updateSplitRatio(next, false);
     };
     const finish = () => {
       document.body.classList.remove("resizing-terminal-split");
+      window.localStorage.setItem(SPLIT_RATIO_STORAGE_KEY, String(splitRatioRef.current));
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", finish);
       window.removeEventListener("pointercancel", finish);
@@ -454,9 +488,13 @@ function App() {
 
   const getTabLabel = (tab: TerminalTab) => tabLabels[tab.session.id]?.trim() || tab.session.name;
 
-  const renameTab = (tab: TerminalTab) => {
+  const renameTab = async (tab: TerminalTab) => {
     const currentLabel = getTabLabel(tab);
-    const nextLabel = window.prompt("设置标签显示名称", currentLabel);
+    const nextLabel = await promptDialog({
+      title: "设置标签显示名称",
+      initialValue: currentLabel,
+      confirmLabel: "保存",
+    });
     if (nextLabel === null) return;
     const trimmed = nextLabel.trim().slice(0, 80);
     const next = { ...tabLabels };
@@ -684,7 +722,7 @@ function App() {
     setActiveTabId(tab.id);
   };
 
-  const openGroupSessions = (group: SessionGroup) => {
+  const openGroupSessions = async (group: SessionGroup) => {
     const includedGroupIds = new Set([group.id]);
     let changed = true;
     while (changed) {
@@ -705,9 +743,10 @@ function App() {
     const existingBySessionId = new Map(tabs.map((tab) => [tab.session.id, tab]));
     const unopened = groupSessions.filter((session) => !existingBySessionId.has(session.id));
     const openLimit = 24;
-    if (unopened.length > 12 && !window.confirm(
-      `目录“${group.name}”中有 ${unopened.length} 个尚未打开的会话。批量连接会同时建立多个 SSH 连接，是否继续？${unopened.length > openLimit ? `\n\n为避免瞬时资源占用，本次最多打开前 ${openLimit} 个。` : ""}`,
-    )) return;
+    if (unopened.length > 12 && !(await confirmDialog({
+      title: "批量连接确认",
+      message: `目录“${group.name}”中有 ${unopened.length} 个尚未打开的会话。批量连接会同时建立多个 SSH 连接，是否继续？${unopened.length > openLimit ? `\n\n为避免瞬时资源占用，本次最多打开前 ${openLimit} 个。` : ""}`,
+    }))) return;
 
     const sessionsToOpen = unopened.slice(0, openLimit);
     let reservedConnections = tabs.filter((tab) => isConnectionInFlight(tab.state)).length;
@@ -778,17 +817,14 @@ function App() {
     setTabs((current) => current.map((tab) => tab.id === tabId ? { ...tab, locked: !tab.locked } : tab));
   };
 
-  const setTabColor = (tab: TerminalTab) => {
-    const value = window.prompt(
-      "输入标签颜色（HEX，例如 #39b8d6）。留空恢复默认。\n常用：蓝 #39b8d6 · 绿 #56d364 · 黄 #d4a72c · 橙 #db6d28 · 紫 #a371f7 · 红 #f47067",
-      tab.color ?? "",
-    );
+  const setTabColor = async (tab: TerminalTab) => {
+    const value = await colorDialog({
+      title: "选择标签颜色",
+      message: "留空恢复默认。",
+      initialColor: tab.color ?? "",
+    });
     if (value === null) return;
     const color = normalizeTabColor(value);
-    if (value.trim() && !color) {
-      setToast("标签颜色格式无效，请输入类似 #39b8d6 的六位 HEX 颜色。");
-      return;
-    }
     setTabs((current) => current.map((candidate) => candidate.id === tab.id ? { ...candidate, color } : candidate));
   };
 
@@ -906,8 +942,11 @@ function App() {
     if (lockedTabs.length > 0) setToast(`已保留 ${lockedTabs.length} 个锁定标签。`);
   };
 
-  const openNamedWorkspace = (workspace: NamedWorkspace) => {
-    if (tabs.length > 0 && !window.confirm(`打开工作区“${workspace.name}”将关闭当前未锁定和锁定标签，并重新建立其中的 SSH 连接。是否继续？`)) {
+  const openNamedWorkspace = async (workspace: NamedWorkspace) => {
+    if (tabs.length > 0 && !(await confirmDialog({
+      title: "打开工作区",
+      message: `打开工作区“${workspace.name}”将关闭当前未锁定和锁定标签，并重新建立其中的 SSH 连接。是否继续？`,
+    }))) {
       return;
     }
 
@@ -978,7 +1017,12 @@ function App() {
   };
 
   const deleteGroup = async (group: SessionGroup) => {
-    if (!window.confirm(`确定删除目录“${group.name}”？子目录及其中的会话也会一并删除，此操作不会删除服务器上的任何内容。`)) return;
+    if (!(await confirmDialog({
+      title: "删除目录",
+      message: `确定删除目录“${group.name}”？子目录及其中的会话也会一并删除，此操作不会删除服务器上的任何内容。`,
+      danger: true,
+      confirmLabel: "删除",
+    }))) return;
     try {
       const deletedSessionIds = await api.deleteGroup(group.id);
       const deletedIdSet = new Set(deletedSessionIds);
@@ -1126,7 +1170,12 @@ function App() {
   };
 
   const deleteSession = async (session: SavedSession) => {
-    if (!window.confirm(`确定删除会话“${session.name}”？此操作不会删除服务器上的任何内容。`)) return;
+    if (!(await confirmDialog({
+      title: "删除会话",
+      message: `确定删除会话“${session.name}”？此操作不会删除服务器上的任何内容。`,
+      danger: true,
+      confirmLabel: "删除",
+    }))) return;
     try {
       await api.deleteSession(session.id);
       const relatedTabs = tabs.filter((tab) => tab.session.id === session.id);
@@ -1142,7 +1191,12 @@ function App() {
     if (selectedSessions.length === 0) return;
     const preview = selectedSessions.slice(0, 6).map((session) => session.name).join("、");
     const suffix = selectedSessions.length > 6 ? "…" : "";
-    if (!window.confirm(`确定删除选中的 ${selectedSessions.length} 个会话？\n\n${preview}${suffix}\n\n此操作不会删除服务器上的任何内容。`)) return;
+    if (!(await confirmDialog({
+      title: `删除 ${selectedSessions.length} 个会话`,
+      message: `确定删除选中的 ${selectedSessions.length} 个会话？\n\n${preview}${suffix}\n\n此操作不会删除服务器上的任何内容。`,
+      danger: true,
+      confirmLabel: "全部删除",
+    }))) return;
     const deletedIds = new Set<string>();
     let failed = 0;
     for (const session of selectedSessions) {
@@ -1306,9 +1360,10 @@ function App() {
       if (!IS_MACOS && preferences.terminalShortcutMode === "remote-first" && terminalHasFocus) return;
       const key = event.key.toLowerCase();
       const chromeShift = IS_MACOS ? !event.shiftKey : event.shiftKey;
-      const hasOverlay = editorSession !== undefined || settingsVisible || sshConfigVisible ||
+      const hasOverlay = isDialogOpen() || editorSession !== undefined || settingsVisible || sshConfigVisible ||
         commandCenterVisible || historyVisible || diagnosticSession !== null || groupEditor !== null ||
-        workspaceManagerVisible || sessionFileDialog !== null || connectionManagerVisible || batchEditorSessions.length > 0 || portForwardVisible;
+        workspaceManagerVisible || sessionFileDialog !== null || connectionManagerVisible || batchEditorSessions.length > 0 || portForwardVisible ||
+        batchCommandVisible || transferManagerVisible || onboardingVisible || tabContextMenu !== null;
       if (hasOverlay) return;
 
       if (key === "p" && event.shiftKey && !event.altKey) {
@@ -1387,14 +1442,38 @@ function App() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [activeTabId, batchEditorSessions.length, commandCenterVisible, connectionManagerVisible, diagnosticSession, editorSession, groupEditor, historyVisible, paneLayout, portForwardVisible, preferences.terminalShortcutMode, sessionFileDialog, settingsVisible, sshConfigVisible, tabs, workspaceManagerVisible]);
+  }, [activeTabId, batchCommandVisible, batchEditorSessions.length, commandCenterVisible, connectionManagerVisible, diagnosticSession, editorSession, groupEditor, historyVisible, onboardingVisible, paneLayout, portForwardVisible, preferences.terminalShortcutMode, sessionFileDialog, settingsVisible, sshConfigVisible, tabContextMenu, tabs, transferManagerVisible, workspaceManagerVisible]);
+
+  // Global Escape for overlays that do not manage it themselves. The session
+  // editor, settings, port-forward and command-center modals intercept Escape
+  // internally (with unsaved-change guards where it matters).
+  useEffect(() => {
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (isDialogOpen()) return;
+      if (tabContextMenu) setTabContextMenu(null);
+      else if (sessionFileDialog) setSessionFileDialog(null);
+      else if (diagnosticSession) setDiagnosticSession(null);
+      else if (groupEditor) setGroupEditor(null);
+      else if (batchEditorSessions.length > 0) setBatchEditorSessions([]);
+      else if (batchCommandVisible) setBatchCommandVisible(false);
+      else if (historyVisible) setHistoryVisible(false);
+      else if (workspaceManagerVisible) setWorkspaceManagerVisible(false);
+      else if (connectionManagerVisible) setConnectionManagerVisible(false);
+      else if (sshConfigVisible) setSshConfigVisible(false);
+      else if (onboardingVisible) setOnboardingVisible(false);
+      else if (transferManagerVisible) setTransferManagerVisible(false);
+    };
+    window.addEventListener("keydown", onEscape);
+    return () => window.removeEventListener("keydown", onEscape);
+  }, [tabContextMenu, sessionFileDialog, diagnosticSession, groupEditor, batchEditorSessions.length, batchCommandVisible, historyVisible, workspaceManagerVisible, connectionManagerVisible, sshConfigVisible, onboardingVisible, transferManagerVisible]);
 
   return (
     <main className="app-shell">
       <header className="app-header">
         <div className="brand-block">
           <div className="brand-mark">X</div>
-          <div><strong>XSH</strong><span>SSH Workspace</span></div>
+          <div><strong>XSH</strong><span>SSH 工作台</span></div>
         </div>
         <div className="header-actions">
           <button className="icon-button" title={`${sidebarVisible ? "隐藏" : "显示"}会话侧栏 · macOS ⌘B / Windows Ctrl+Shift+B`} onClick={toggleSidebar} aria-label={sidebarVisible ? "隐藏会话侧栏" : "显示会话侧栏"}>
@@ -1646,8 +1725,18 @@ function App() {
               {
                 label: "关闭全部标签",
                 onClick: () => {
-                  if (tabs.length > 1 && !window.confirm(`确定关闭全部 ${tabs.length} 个标签？`)) return;
-                  closeAllTabs();
+                  if (tabs.length <= 1) {
+                    closeAllTabs();
+                    return;
+                  }
+                  void confirmDialog({
+                    title: "关闭全部标签",
+                    message: `确定关闭全部 ${tabs.length} 个标签？`,
+                    danger: true,
+                    confirmLabel: "全部关闭",
+                  }).then((confirmed) => {
+                    if (confirmed) closeAllTabs();
+                  });
                 },
                 danger: true,
                 separatorBefore: true,
@@ -1669,6 +1758,7 @@ function App() {
         </span>
       </footer>
 
+      <Suspense fallback={null}>
       {connectionManagerVisible && (
         <ConnectionManagerModal
           items={tabs.map((tab) => ({
@@ -1853,6 +1943,12 @@ function App() {
             await refresh();
             setToast(`已保存会话：${saved.name}，正在使用新凭据重连。`);
           }}
+          onSavedAndConnect={async (saved) => {
+            setEditorSession(undefined);
+            await refresh();
+            openSession(saved);
+            setToast(`已保存并连接：${saved.name}`);
+          }}
           onDeleted={async (sessionId) => {
             const deletedTab = tabs.find((tab) => tab.session.id === sessionId);
             if (deletedTab) closeTab(deletedTab.id, true);
@@ -1862,7 +1958,9 @@ function App() {
           }}
         />
       )}
-      {toast && <button className="toast" onClick={() => setToast(null)}>{toast}<X size={13} /></button>}
+      </Suspense>
+      {toast && <button className="toast" role="status" aria-live="polite" onClick={() => setToast(null)}>{toast}<X size={13} /></button>}
+      <DialogHost />
     </main>
   );
 }

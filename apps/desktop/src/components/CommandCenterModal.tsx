@@ -21,6 +21,7 @@ import {
   type CommandSnippetDraft,
 } from "../command-library";
 import { containsSensitiveCommand, SENSITIVE_COMMAND_ERROR } from "../sensitive-command";
+import { confirmDialog } from "./DialogHost";
 
 interface CommandCenterModalProps {
   commands: CommandSnippet[];
@@ -88,6 +89,26 @@ export function CommandCenterModal({
 
   const selected = filteredCommands.find((command) => command.id === selectedId) ?? filteredCommands[0] ?? null;
 
+  // Palette-style keyboard flow: ↑/↓ move the highlight, Enter runs it.
+  const moveSelection = (offset: number) => {
+    if (filteredCommands.length === 0) return;
+    const index = selected ? filteredCommands.findIndex((command) => command.id === selected.id) : -1;
+    const next = Math.min(filteredCommands.length - 1, Math.max(0, (index < 0 ? 0 : index) + offset));
+    setSelectedId(filteredCommands[next].id);
+  };
+  const onSearchKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      moveSelection(1);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      moveSelection(-1);
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      if (selected) void runCommand(selected);
+    }
+  };
+
   const beginCreate = () => {
     setError(null);
     setEditor({ mode: "create", draft: emptyCommandSnippet() });
@@ -136,8 +157,13 @@ export function CommandCenterModal({
     onToast(editor.mode === "create" ? "命令片段已保存。" : "命令片段已更新。");
   };
 
-  const deleteCommand = (command: CommandSnippet) => {
-    if (!window.confirm(`确定删除命令片段“${command.name}”？`)) return;
+  const deleteCommand = async (command: CommandSnippet) => {
+    if (!(await confirmDialog({
+      title: "删除命令片段",
+      message: `确定删除命令片段“${command.name}”？`,
+      danger: true,
+      confirmLabel: "删除",
+    }))) return;
     const next = commands.filter((candidate) => candidate.id !== command.id);
     onChange(next);
     setSelectedId(next[0]?.id ?? null);
@@ -159,7 +185,7 @@ export function CommandCenterModal({
     }
   };
 
-  const runCommand = (command: CommandSnippet) => {
+  const runCommand = async (command: CommandSnippet) => {
     if (!canExecute) {
       onToast(executionUnavailableReason);
       return;
@@ -171,7 +197,12 @@ export function CommandCenterModal({
         ? `广播到 ${broadcastTargetCount} 个已连接会话${activeSessionName ? `（当前：${activeSessionName}）` : ""}`
         : `${activeSessionName ?? "当前会话"}${activeSessionAddress ? `\n${activeSessionAddress}` : ""}`;
       const riskNote = risk ? `\n\n风险提示：${risk}` : "";
-      if (!window.confirm(`执行目标：${target}\n\n命令：\n${command.command}${riskNote}\n\n是否继续？`)) return;
+      if (!(await confirmDialog({
+        title: "执行命令确认",
+        message: `执行目标：${target}\n\n命令：\n${command.command}${riskNote}`,
+        danger: Boolean(risk),
+        confirmLabel: "执行",
+      }))) return;
     }
     onExecute(command);
   };
@@ -214,7 +245,7 @@ export function CommandCenterModal({
               <div className="command-library-tools">
                 <label className="command-search">
                   <Search size={15} />
-                  <input value={query} onChange={(event) => setQuery(event.target.value)} autoFocus placeholder="搜索命令、标签或正文" />
+                  <input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={onSearchKeyDown} autoFocus placeholder="搜索命令、标签或正文（↑↓ 选择，Enter 执行）" />
                 </label>
                 <button className="primary-button command-new-button" onClick={beginCreate}><Plus size={15} />新建</button>
               </div>
@@ -231,6 +262,7 @@ export function CommandCenterModal({
                     key={command.id}
                     className={`command-list-item ${selected?.id === command.id ? "active" : ""}`}
                     onClick={() => setSelectedId(command.id)}
+                    onDoubleClick={() => runCommand(command)}
                   >
                     <span className="command-list-item-top">
                       <strong>{command.name}</strong>

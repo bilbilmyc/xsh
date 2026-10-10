@@ -12,6 +12,7 @@ import {
   X,
 } from "lucide-react";
 import { api } from "../api";
+import { confirmDialog } from "./DialogHost";
 import type { ForwardHealth, ForwardInfo, ForwardKind, ForwardProfile, SavedSession } from "../types";
 
 interface PortForwardModalProps {
@@ -186,7 +187,12 @@ export function PortForwardModal({
   };
 
   const removeProfile = async (profile: ForwardProfile) => {
-    if (!window.confirm(`删除已保存的隧道配置“${profile.name}”？运行中的隧道也会停止。`)) return;
+    if (!(await confirmDialog({
+      title: "删除隧道配置",
+      message: `删除已保存的隧道配置“${profile.name}”？运行中的隧道也会停止。`,
+      danger: true,
+      confirmLabel: "删除",
+    }))) return;
     setBusy(true);
     setError(null);
     try {
@@ -242,15 +248,44 @@ export function PortForwardModal({
       : `SOCKS5 ${bindHost || "127.0.0.1"}:${bindPort || "0"}  →  SSH 可达网络`;
   const groupedProfiles = groupForwardProfiles(profiles);
 
+  const [dirty, setDirty] = useState(false);
+  const requestClose = () => {
+    if (!dirty) {
+      onClose();
+      return;
+    }
+    void confirmDialog({
+      title: "未保存的修改",
+      message: "隧道配置有未保存的修改，关闭后将丢失，确定关闭吗？",
+    }).then((confirmed) => {
+      if (confirmed) onClose();
+    });
+  };
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") requestClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dirty]);
+
   return (
-    <div className="modal-backdrop" onMouseDown={onClose}>
-      <section className="modal-card port-forward-modal" role="dialog" aria-modal="true" aria-labelledby="port-forward-title" onMouseDown={(event) => event.stopPropagation()}>
+    <div className="modal-backdrop" onMouseDown={requestClose}>
+      <section
+        className="modal-card port-forward-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="port-forward-title"
+        onMouseDown={(event) => event.stopPropagation()}
+        onChange={() => setDirty(true)}
+      >
         <header className="modal-header">
           <div className="modal-title-wrap">
             <span className="modal-icon"><Globe2 size={18} /></span>
             <div><h2 id="port-forward-title">端口转发</h2><p>{session.name} · 会话隧道 · 断线后可自动恢复</p></div>
           </div>
-          <button className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button>
+          <button className="icon-button" onClick={requestClose} aria-label="关闭"><X size={18} /></button>
         </header>
         <div className="port-forward-body">
           <section className="forward-config-card">
@@ -347,7 +382,7 @@ export function PortForwardModal({
               </div>}
           </section>
         </div>
-        <footer className="modal-footer"><button className="secondary-button" onClick={onClose}><Check size={14} />完成</button></footer>
+        <footer className="modal-footer"><button className="secondary-button" onClick={requestClose}><Check size={14} />完成</button></footer>
       </section>
     </div>
   );

@@ -71,7 +71,7 @@ export const api = {
     sessionId: Uuid,
     columns: number,
     rows: number,
-    onEvent: Channel<TerminalEvent>,
+    onEvent: Channel<TerminalEvent | ArrayBuffer>,
   ) =>
     invoke<Uuid>("connect_terminal", {
       sessionId,

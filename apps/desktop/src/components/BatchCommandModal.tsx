@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Check, ClipboardCopy, Command, Play, Square, X } from "lucide-react";
 import { containsSensitiveCommand, SENSITIVE_COMMAND_ERROR } from "../sensitive-command";
+import { confirmDialog } from "./DialogHost";
 
 export interface BatchCommandTarget {
   tabId: string;
@@ -58,7 +59,7 @@ export function BatchCommandModal({ targets, run, onExecute, onClose, onToast }:
     });
   };
 
-  const submit = () => {
+  const submit = async () => {
     const text = command.trim();
     if (!text) {
       onToast("请输入要发送的命令。");
@@ -74,7 +75,11 @@ export function BatchCommandModal({ targets, run, onExecute, onClose, onToast }:
     }
     const names = selectedConnectedTargets.slice(0, 5).map((target) => target.name).join("、");
     const suffix = selectedConnectedTargets.length > 5 ? "…" : "";
-    if (!window.confirm(`将向 ${selectedConnectedTargets.length} 个会话发送命令：\n${names}${suffix}\n\n${text}\n\n继续？`)) return;
+    if (!(await confirmDialog({
+      title: "批量发送命令",
+      message: `将向 ${selectedConnectedTargets.length} 个会话发送命令：\n${names}${suffix}\n\n${text}`,
+      confirmLabel: "发送",
+    }))) return;
     onExecute(text, selectedConnectedTargets.map((target) => target.tabId));
   };
 
@@ -127,7 +132,7 @@ export function BatchCommandModal({ targets, run, onExecute, onClose, onToast }:
           </section>
           <section className="batch-command-compose">
             <label className="field"><span>命令</span><textarea value={command} onChange={(event) => setCommand(event.target.value)} placeholder="例如：uname -a" rows={5} spellCheck={false} /></label>
-            <button type="button" className="primary-button batch-command-send" onClick={submit} disabled={selectedConnectedTargets.length === 0}><Play size={15} />发送到 {selectedConnectedTargets.length} 个会话</button>
+            <button type="button" className="primary-button batch-command-send" onClick={() => void submit()} disabled={selectedConnectedTargets.length === 0}><Play size={15} />发送到 {selectedConnectedTargets.length} 个会话</button>
             <div className="batch-command-run" aria-live="polite">
               <div className="batch-command-section-heading"><span>投递结果</span>{run && <small><Check size={12} /> {sent} 已发送 · {failed} 失败 · {pending} 等待</small>}</div>
               {run ? <>

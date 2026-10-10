@@ -3,15 +3,18 @@ import { save } from "@tauri-apps/plugin-dialog";
 import { Channel } from "@tauri-apps/api/core";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
+import { WebLinksAddon } from "@xterm/addon-web-links";
+import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
-import { Activity, ChevronDown, Copy, Eraser, FileText, Minus, Plus, RefreshCw, Search, X } from "lucide-react";
+import { Activity, ChevronDown, ChevronUp, Copy, Eraser, FileText, Minus, Plus, RefreshCw, Search, X } from "lucide-react";
 import { api } from "../api";
+import { writeClipboardText } from "../clipboard";
 import { ContextMenu } from "./ContextMenu";
 import type { AppPreferences } from "../preferences";
 import type { SavedSession, TerminalEvent } from "../types";
 import { decodeTerminalKeyMapping, normalizeTerminalCommand } from "../terminal-command";
 import { matchesTerminalShortcut, TerminalTriggerMatcher } from "../terminal-trigger";
-import { hostKeyConfirmationMessage } from "../host-key";
+import { confirmDialog, hostKeyDialog } from "./DialogHost";
 import { BoundedSessionLogBuffer } from "../session-log-buffer";
 import { CumulativeTerminalOutputAcknowledger } from "../terminal-output-ack";
 import "@xterm/xterm/css/xterm.css";
@@ -67,6 +70,10 @@ export function TerminalPane({
   const connectionIdRef = useRef<string | null>(null);
   const connectionEnabledRef = useRef(connectionEnabled);
   connectionEnabledRef.current = connectionEnabled;
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
+  // Resumes deferred terminal writes when the pane becomes visible again.
+  const resumeOutputRef = useRef<(() => void) | null>(null);
   const reconnectRef = useRef<(() => void) | null>(null);
   const lastCommandIdRef = useRef<string | null>(null);
   const [connectionEpoch, setConnectionEpoch] = useState(0);
@@ -74,6 +81,7 @@ export function TerminalPane({
   const [connectionNotice, setConnectionNotice] = useState<string | null>(null);
   const [searchVisible, setSearchVisible] = useState(false);
   const [searchValue, setSearchValue] = useState("");
+  const [searchResults, setSearchResults] = useState<{ index: number; count: number } | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const [authChallenge, setAuthChallenge] = useState<{ challengeId: string; prompts: Array<{ prompt: string; echo: boolean }> } | null>(null);
   const [authResponses, setAuthResponses] = useState<string[]>([]);
@@ -135,10 +143,10 @@ export function TerminalPane({
     setConnectionError(null);
     setConnectionNotice(null);
     sessionLog.reset([
-      "XSH Session Log",
-      `Session: ${session.name}`,
-      `Host: ${session.username}@${session.host}:${session.port}`,
-      `Started: ${new Date().toISOString()}`,
+      "XSH 会话日志 (XSH Session Log)",
+      `会话 (Session): ${session.name}`,
+      `主机 (Host): ${session.username}@${session.host}:${session.port}`,
+      `开始时间 (Started): ${new Date().toISOString()}`,
       "",
     ].join("\n"));
 
@@ -162,12 +170,27 @@ export function TerminalPane({
     });
     const fitAddon = new FitAddon();
     const searchAddon = new SearchAddon();
+    const webLinksAddon = new WebLinksAddon();
+    const webglAddon = new WebglAddon();
     terminalRef.current = terminal;
     fitAddonRef.current = fitAddon;
     searchAddonRef.current = searchAddon;
     terminal.loadAddon(fitAddon);
     terminal.loadAddon(searchAddon);
+    terminal.loadAddon(webLinksAddon);
     terminal.open(host);
+    const searchResultsDisposable = searchAddon.onDidChangeResults((result) => {
+      setSearchResults(result.resultCount > 0
+        ? { index: result.resultIndex, count: result.resultCount }
+        : null);
+    });
+    try {
+      terminal.loadAddon(webglAddon);
+    } catch {
+      // WebGL may be unavailable (disabled GPU, locked-down webview); the DOM
+      // renderer keeps working, just slower under heavy scroll.
+      webglAddon.dispose();
+    }
 
     // The quick-command bar is a sibling grid row. Wait for that row and the
     // native window scale to settle before measuring cells; fitting immediately
@@ -277,7 +300,7 @@ export function TerminalPane({
       flushBytesSinceSample += bytesToWrite;
       flushDurationSinceSample += performance.now() - startedAt;
       reportOutputStats();
-      if (!disposed && pendingOutputBytes > 0 && !drainAll) {
+      if (!disposed && pendingOutputBytes > 0 && !drainAll && visibleRef.current) {
         outputFlushFrame = window.requestAnimationFrame(() => flushOutput(false));
       }
     };
@@ -289,17 +312,25 @@ export function TerminalPane({
       while (!disposed && pendingOutputBytes > 0) flushOutput(true);
       reportOutputStats(true);
     };
-    const queueOutput = (payload: number[], acknowledge: OutputAcknowledge) => {
-      const chunk = Uint8Array.from(payload);
+    const scheduleOutputFlush = () => {
+      if (outputFlushFrame === undefined) {
+        outputFlushFrame = window.requestAnimationFrame(() => flushOutput(false));
+      }
+    };
+    resumeOutputRef.current = () => {
+      if (!disposed && pendingOutputBytes > 0) scheduleOutputFlush();
+    };
+    // While the pane is hidden, output is only logged (session log + triggers
+    // still run) and NOT acknowledged, so the backend's flow window pauses the
+    // stream; switching back to the pane drains what accumulated.
+    const queueOutput = (chunk: Uint8Array, acknowledge: OutputAcknowledge) => {
       if (chunk.length === 0) return;
       pendingOutput.push({ data: chunk, acknowledge });
       pendingOutputBytes += chunk.length;
       outputBytesSinceSample += chunk.length;
       outputChunksSinceSample += 1;
       reportOutputStats();
-      if (outputFlushFrame === undefined) {
-        outputFlushFrame = window.requestAnimationFrame(() => flushOutput(false));
-      }
+      if (visibleRef.current) scheduleOutputFlush();
     };
 
     const flushInput = () => {
@@ -332,10 +363,15 @@ export function TerminalPane({
       return true;
     };
 
-    const pasteText = (text: string) => {
+    const pasteText = async (text: string) => {
       if (!text) return;
       const lineCount = text.split(/\r?\n/).length;
-      if (preferencesRef.current.confirmMultiLinePaste && lineCount > 3 && !window.confirm(`即将粘贴 ${lineCount} 行内容到 ${session.name}，是否继续？`)) return;
+      if (preferencesRef.current.confirmMultiLinePaste && lineCount > 3
+        && !(await confirmDialog({
+          title: "多行粘贴确认",
+          message: `即将粘贴 ${lineCount} 行内容到 ${session.name}，是否继续？`,
+          confirmLabel: "粘贴",
+        }))) return;
       lastPasteAt = performance.now();
       terminal.paste(text);
       terminal.focus();
@@ -353,7 +389,7 @@ export function TerminalPane({
         // clipboard read was pending. Re-check after awaiting to avoid a
         // duplicate paste in WebKit/Tauri.
         if (performance.now() - lastPasteAt < 250) return;
-        if (text) pasteText(text);
+        if (text) void pasteText(text);
       } finally {
         pasteInFlight = false;
       }
@@ -513,7 +549,7 @@ export function TerminalPane({
       if (performance.now() < suppressNativePasteUntil || performance.now() - lastPasteAt < 250) return;
       const text = event.clipboardData?.getData("text/plain");
       if (text) {
-        pasteText(text);
+        void pasteText(text);
       } else {
         void safePaste().catch((error) => {
           terminal.writeln(`\r\n\x1b[31m粘贴失败：${String(error)}\x1b[0m`);
@@ -556,6 +592,20 @@ export function TerminalPane({
       });
     });
     resizeObserver.observe(host);
+
+    // Ctrl/Cmd + wheel adjusts the font size, matching what every native
+    // terminal offers; without preventDefault the browser would zoom the page.
+    const onWheel = (event: WheelEvent) => {
+      if (disposed) return;
+      const zoomModifier = isMac
+        ? event.metaKey && !event.ctrlKey
+        : event.ctrlKey && !event.metaKey;
+      if (!zoomModifier) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      applyTerminalFontSize(currentFontSizeRef.current + (event.deltaY < 0 ? 1 : -1));
+    };
+    host.addEventListener("wheel", onWheel, { passive: false, capture: true });
 
     const reportState = (state: string) => {
       currentState = state;
@@ -634,7 +684,7 @@ export function TerminalPane({
         void api.disconnectTerminal(previousConnectionId).catch(() => undefined);
       }
 
-      const channel = new Channel<TerminalEvent>();
+      const channel = new Channel<TerminalEvent | ArrayBuffer>();
       const outputAcknowledger = new CumulativeTerminalOutputAcknowledger();
       let connectionEnded = false;
       const acknowledgeOutput: OutputAcknowledge = (bytes) => {
@@ -644,13 +694,17 @@ export function TerminalPane({
         }
         outputAcknowledger.consume(bytes);
       };
-      channel.onmessage = (event) => {
+      channel.onmessage = (message) => {
         if (disposed || generation !== connectGeneration) return;
-        switch (event.type) {
-          case "output": {
-            const output = outputDecoder.decode(new Uint8Array(event.payload), { stream: true });
-            sessionLog.append(output);
-            for (const match of triggerMatcher.match(output, session.terminal.triggers ?? [])) {
+        // Raw output chunks arrive as ArrayBuffer from the binary IPC path;
+        // control events stay JSON objects.
+        if (message instanceof ArrayBuffer || message instanceof Uint8Array) {
+          const bytes = message instanceof Uint8Array ? message : new Uint8Array(message);
+          const output = outputDecoder.decode(bytes, { stream: true });
+          sessionLog.append(output);
+          const triggers = session.terminal.triggers ?? [];
+          if (triggers.length > 0) {
+            for (const match of triggerMatcher.match(output, triggers)) {
               const timestamp = new Date().toISOString();
               sessionLog.append(`\n[XSH Trigger ${timestamp}] ${match.trigger.label}: ${match.matchedText}\n`);
               onTrigger?.({
@@ -659,9 +713,12 @@ export function TerminalPane({
                 matchedText: match.matchedText,
               });
             }
-            queueOutput(event.payload, acknowledgeOutput);
-            break;
           }
+          queueOutput(bytes, acknowledgeOutput);
+          return;
+        }
+        const event = message as TerminalEvent;
+        switch (event.type) {
           case "authChallenge":
             setAuthChallenge(event.payload);
             setAuthResponses(event.payload.prompts.map(() => ""));
@@ -687,8 +744,8 @@ export function TerminalPane({
           case "hostKeyUnknown": {
             const key = event.payload;
             reconnectAllowed = false;
-            const accepted = window.confirm(hostKeyConfirmationMessage(key, "SSH"));
-            if (accepted) {
+            void hostKeyDialog(key, "SSH").then((accepted) => {
+              if (!accepted) return;
               void api.trustSessionHostKey(session.id, key)
                 .then(() => {
                   if (!disposed && generation === connectGeneration) void connect();
@@ -698,7 +755,7 @@ export function TerminalPane({
                   setConnectionError(`Host Key 保存失败：${String(error)}`);
                   reportState("failed");
                 });
-            }
+            });
             break;
           }
           case "hostKeyChanged":
@@ -833,6 +890,7 @@ export function TerminalPane({
 
     return () => {
       disposed = true;
+      resumeOutputRef.current = null;
       connectGeneration += 1;
       if (resizeTimer) window.clearTimeout(resizeTimer);
       if (fitTimer) window.clearTimeout(fitTimer);
@@ -853,12 +911,14 @@ export function TerminalPane({
       dataDisposable.dispose();
       binaryDisposable.dispose();
       resizeDisposable.dispose();
+      searchResultsDisposable.dispose();
       resizeObserver.disconnect();
       setContextMenu(null);
       host.removeEventListener("contextmenu", nativeContextMenu, true);
       host.removeEventListener("keydown", nativeKeydown, true);
       host.removeEventListener("copy", nativeCopy, true);
       host.removeEventListener("paste", nativePaste, true);
+      host.removeEventListener("wheel", onWheel, true);
       window.removeEventListener("offline", handleOffline);
       window.removeEventListener("online", handleOnline);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
@@ -920,6 +980,7 @@ export function TerminalPane({
       setContextMenu(null);
       return;
     }
+    resumeOutputRef.current?.();
     const timer = window.setTimeout(() => {
       fitAddonRef.current?.fit();
       terminalRef.current?.focus();
@@ -960,6 +1021,25 @@ export function TerminalPane({
   const openTerminalSearch = () => {
     setSearchVisible(true);
     window.setTimeout(() => document.querySelector<HTMLInputElement>(".terminal-search input")?.focus(), 0);
+  };
+
+  // Result counting only works when decorations are enabled in the search
+  // options; the gray overview-ruler marks are the cheapest way to opt in.
+  const TERMINAL_SEARCH_DECORATIONS = {
+    matchOverviewRuler: "#6b7280",
+    activeMatchColorOverviewRuler: "#eab308",
+  } as const;
+  const closeTerminalSearch = () => {
+    setSearchVisible(false);
+    setSearchResults(null);
+    searchAddonRef.current?.clearDecorations();
+    terminalRef.current?.focus();
+  };
+  const runTerminalSearch = (direction: "next" | "previous", term: string, incremental = false) => {
+    if (!term) return;
+    const options = { incremental, decorations: TERMINAL_SEARCH_DECORATIONS };
+    if (direction === "next") searchAddonRef.current?.findNext(term, options);
+    else searchAddonRef.current?.findPrevious(term, options);
   };
 
   const submitAuthChallenge = async () => {
@@ -1039,16 +1119,22 @@ export function TerminalPane({
             value={searchValue}
             onChange={(event) => {
               setSearchValue(event.target.value);
-              searchAddonRef.current?.findNext(event.target.value, { incremental: true });
+              runTerminalSearch("next", event.target.value, true);
             }}
             onKeyDown={(event) => {
-              if (event.key === "Enter") searchAddonRef.current?.findNext(searchValue);
-              if (event.key === "Escape") setSearchVisible(false);
+              if (event.key === "Enter") {
+                event.preventDefault();
+                runTerminalSearch(event.shiftKey ? "previous" : "next", searchValue);
+              }
+              if (event.key === "Escape") closeTerminalSearch();
             }}
-            placeholder="查找终端内容"
+            placeholder="查找终端内容（Enter 下一个，Shift+Enter 上一个）"
             autoFocus
           />
-          <button onClick={() => setSearchVisible(false)}><X size={14} /></button>
+          <span className="terminal-search-count">{searchResults ? `${searchResults.index + 1}/${searchResults.count}` : "0/0"}</span>
+          <button onClick={() => runTerminalSearch("previous", searchValue)} title="上一个匹配（Shift+Enter）" aria-label="上一个匹配"><ChevronUp size={14} /></button>
+          <button onClick={() => runTerminalSearch("next", searchValue)} title="下一个匹配（Enter）" aria-label="下一个匹配"><ChevronDown size={14} /></button>
+          <button onClick={closeTerminalSearch} title="关闭搜索（Esc）" aria-label="关闭搜索"><X size={14} /></button>
         </div>
       )}
       <div className="xterm-host" ref={hostRef} />
@@ -1103,38 +1189,14 @@ async function pasteIntoTerminal(terminal: Terminal | null, confirmMultiLine: bo
   const text = await readClipboardText();
   if (!text) return;
   const lineCount = text.split(/\r?\n/).length;
-  if (confirmMultiLine && lineCount > 3 && !window.confirm(`即将粘贴 ${lineCount} 行内容到 ${sessionName}，是否继续？`)) return;
+  if (confirmMultiLine && lineCount > 3
+    && !(await confirmDialog({
+      title: "多行粘贴确认",
+      message: `即将粘贴 ${lineCount} 行内容到 ${sessionName}，是否继续？`,
+      confirmLabel: "粘贴",
+    }))) return;
   terminal.paste(text);
   terminal.focus();
-}
-
-async function writeClipboardText(text: string) {
-  try {
-    await api.clipboardWrite(text);
-    return;
-  } catch {
-    // Keep a browser fallback for development mode and non-desktop hosts.
-  }
-  if (navigator.clipboard?.writeText) {
-    try {
-      await navigator.clipboard.writeText(text);
-      return;
-    } catch {
-      // Fall through to the user-gesture based DOM fallback.
-    }
-  }
-
-  const textarea = document.createElement("textarea");
-  textarea.value = text;
-  textarea.setAttribute("readonly", "true");
-  textarea.style.position = "fixed";
-  textarea.style.opacity = "0";
-  textarea.style.pointerEvents = "none";
-  document.body.appendChild(textarea);
-  textarea.select();
-  const copied = document.execCommand("copy");
-  textarea.remove();
-  if (!copied) throw new Error("系统剪贴板不可用");
 }
 
 async function readClipboardText() {

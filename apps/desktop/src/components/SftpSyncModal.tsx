@@ -4,6 +4,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { ClipboardCopy, FolderOpen, Play, RefreshCw, Upload, X } from "lucide-react";
 import { api } from "../api";
 import { buildSftpSyncPreview, matchesSyncExclude, type SyncChange } from "../sftp-sync-plan";
+import { confirmDialog } from "./DialogHost";
 import type { RemoteEntry, TransferEvent } from "../types";
 
 interface SftpSyncModalProps {
@@ -75,7 +76,11 @@ export function SftpSyncModal({ connectionId, initialRemotePath, onClose, onRefr
       onToast(conflicts.length ? "当前只有冲突项，未提交同步。" : "没有需要同步的变更。");
       return;
     }
-    if (!window.confirm(`将创建 ${executableChanges.filter((change) => change.type === "createDirectory").length} 个远程目录，并提交 ${executableChanges.filter((change) => change.type === "upload").length} 个上传任务。远端多出的文件不会删除。继续？`)) return;
+    if (!(await confirmDialog({
+      title: "提交目录同步",
+      message: `将创建 ${executableChanges.filter((change) => change.type === "createDirectory").length} 个远程目录，并提交 ${executableChanges.filter((change) => change.type === "upload").length} 个上传任务。远端多出的文件不会删除。`,
+      confirmLabel: "开始同步",
+    }))) return;
     setSubmitting(true);
     setError(null);
     try {

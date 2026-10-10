@@ -1197,7 +1197,10 @@ async fn run_terminal_connection(
         .await
         .ok();
 
-    let session = Arc::new(Mutex::new(session));
+    // `client::Handle` methods take `&self`, so sharing it behind a plain Arc
+    // keeps concurrent channel opens (forwarding, SOCKS5) parallel instead of
+    // serializing them behind a lock held across network round trips.
+    let session = Arc::new(session);
     let (accepted_tx, mut accepted_rx) = mpsc::channel::<ForwardAccepted>(128);
     let mut local_forwards: HashMap<Uuid, ForwardRuntime> = HashMap::new();
 
@@ -1216,8 +1219,6 @@ async fn run_terminal_connection(
                             let session = Arc::clone(&session);
                             tokio::spawn(async move {
                                 let channel = session
-                                    .lock()
-                                    .await
                                     .channel_open_direct_tcpip(
                                         target_host,
                                         target_port.into(),
@@ -1287,8 +1288,6 @@ async fn run_terminal_connection(
                                             .cloned()
                                         {
                                             session
-                                                .lock()
-                                                .await
                                                 .cancel_tcpip_forward(
                                                     target.bind_host.clone(),
                                                     target.bind_port.into(),
@@ -1342,8 +1341,6 @@ async fn run_terminal_connection(
                                                 .target_port
                                                 .expect("validated remote target port");
                                             let info = session
-                                                .lock()
-                                                .await
                                                 .tcpip_forward(
                                                     bind_host.clone(),
                                                     profile.bind_port.into(),
@@ -1431,7 +1428,7 @@ async fn run_terminal_connection(
                         }
                     }
                     Some(SessionCommand::StartRemoteForward { forward_id, bind_host, bind_port, local_host, local_port, reply }) => {
-                        let result = session.lock().await.tcpip_forward(bind_host.clone(), bind_port.into()).await
+                        let result = session.tcpip_forward(bind_host.clone(), bind_port.into()).await
                             .map(|port| ForwardInfo {
                                 forward_id,
                                 kind: "remote".into(),
@@ -1458,7 +1455,7 @@ async fn run_terminal_connection(
                             runtime.abort();
                             Ok(())
                         } else if let Some(target) = remote_forwards.lock().await.get(&forward_id).cloned() {
-                            let result = session.lock().await.cancel_tcpip_forward(target.bind_host.clone(), target.bind_port.into()).await
+                            let result = session.cancel_tcpip_forward(target.bind_host.clone(), target.bind_port.into()).await
                                 .map_err(|error| anyhow!("停止远程转发失败：{error}"));
                             if result.is_ok() { remote_forwards.lock().await.remove(&forward_id); }
                             result
@@ -1503,15 +1500,11 @@ async fn run_terminal_connection(
     let remote_targets: Vec<_> = remote_forwards.lock().await.values().cloned().collect();
     for target in remote_targets {
         let _ = session
-            .lock()
-            .await
             .cancel_tcpip_forward(target.bind_host, target.bind_port.into())
             .await;
     }
 
     session
-        .lock()
-        .await
         .disconnect(Disconnect::ByApplication, "XSH session closed", "en")
         .await
         .ok();
@@ -1739,7 +1732,7 @@ async fn proxy_channel_with_tcp(
 }
 
 async fn handle_socks5_connection(
-    session: &Arc<Mutex<client::Handle<HostKeyHandler>>>,
+    session: &Arc<client::Handle<HostKeyHandler>>,
     mut stream: TcpStream,
     origin: std::net::SocketAddr,
 ) -> anyhow::Result<()> {
@@ -1781,8 +1774,6 @@ async fn handle_socks5_connection(
     stream.read_exact(&mut port).await?;
     let target_port = u16::from_be_bytes(port);
     let channel = session
-        .lock()
-        .await
         .channel_open_direct_tcpip(
             host.clone(),
             target_port.into(),

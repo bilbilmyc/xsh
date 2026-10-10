@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { open, save as saveFile } from "@tauri-apps/plugin-dialog";
 import { Check, Copy, Fingerprint, Gauge, Keyboard, Monitor, RotateCcw, Shield, TerminalSquare, Trash2, X } from "lucide-react";
 import { api } from "../api";
+import { confirmDialog } from "./DialogHost";
 import { defaultPreferences, type AccentColor, type AppPreferences, type AppTheme } from "../preferences";
 import type { KnownHost } from "../types";
 
@@ -77,7 +78,12 @@ export function SettingsModal({ preferences, onSave, onClose, onToast }: Setting
   };
 
   const removeHost = async (host: KnownHost) => {
-    if (!window.confirm(`删除 ${host.host}:${host.port} 的本地信任记录？\n下次连接时会重新显示指纹确认。`)) return;
+    if (!(await confirmDialog({
+      title: "删除信任记录",
+      message: `删除 ${host.host}:${host.port} 的本地信任记录？\n下次连接时会重新显示指纹确认。`,
+      danger: true,
+      confirmLabel: "删除",
+    }))) return;
     try {
       await api.deleteKnownHost(host.host, host.port);
       setKnownHosts((current) => current.filter((candidate) => !(candidate.host === host.host && candidate.port === host.port)));
@@ -123,7 +129,11 @@ export function SettingsModal({ preferences, onSave, onClose, onToast }: Setting
         const overwriteHint = preview.overwritten > 0
           ? `其中 ${preview.overwritten} 条会覆盖当前同名凭据。`
           : "不会覆盖当前凭据。";
-        if (!window.confirm(`备份中有 ${preview.imported} 条可恢复凭据，${overwriteHint}\n\n确认继续恢复吗？`)) return;
+        if (!(await confirmDialog({
+          title: "恢复凭据备份",
+          message: `备份中有 ${preview.imported} 条可恢复凭据，${overwriteHint}\n\n确认继续恢复吗？`,
+          confirmLabel: "恢复",
+        }))) return;
         const summary = await api.importCredentialsBackup(backupDialog.path, backupPassword);
         onToast(summary.overwritten > 0
           ? `已恢复 ${summary.imported} 条 XSH 凭据，其中 ${summary.overwritten} 条覆盖了同名凭据。`
@@ -139,15 +149,37 @@ export function SettingsModal({ preferences, onSave, onClose, onToast }: Setting
     }
   };
 
+  const dirty = draft !== preferences;
+  const requestClose = () => {
+    if (!dirty) {
+      onClose();
+      return;
+    }
+    void confirmDialog({
+      title: "未保存的修改",
+      message: "设置有未保存的修改，关闭后将丢失，确定关闭吗？",
+    }).then((confirmed) => {
+      if (confirmed) onClose();
+    });
+  };
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") requestClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dirty]);
+
   return (
-    <div className="modal-backdrop" onMouseDown={onClose}>
+    <div className="modal-backdrop" onMouseDown={requestClose}>
       <section className="settings-modal settings-modal-wide" onMouseDown={(event) => event.stopPropagation()}>
         <header className="modal-header">
           <div className="modal-title-wrap">
             <span className="modal-icon"><Monitor size={18} /></span>
             <div><h2>设置</h2><p>调整应用外观、终端、传输和服务器信任记录。</p></div>
           </div>
-          <button className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button>
+          <button className="icon-button" onClick={requestClose} aria-label="关闭"><X size={18} /></button>
         </header>
 
         <div className="settings-layout">
@@ -349,7 +381,7 @@ export function SettingsModal({ preferences, onSave, onClose, onToast }: Setting
 
         <footer className="modal-footer settings-footer">
           <button className="secondary-button reset-button" onClick={() => setDraft(defaultPreferences)}><RotateCcw size={14} />恢复默认</button>
-          <button className="secondary-button" onClick={onClose}>取消</button>
+          <button className="secondary-button" onClick={requestClose}>取消</button>
           <button className="primary-button" onClick={save}>保存并应用</button>
         </footer>
       </section>

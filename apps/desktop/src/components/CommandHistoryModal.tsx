@@ -1,5 +1,6 @@
 import { ClipboardCopy, Play, Trash2, X } from "lucide-react";
 import type { CommandHistoryEntry } from "../command-history";
+import { confirmDialog } from "./DialogHost";
 
 interface CommandHistoryModalProps {
   entries: CommandHistoryEntry[];
@@ -56,7 +57,7 @@ export function CommandHistoryModal({
           ))}
         </div>
         <footer className="modal-footer">
-          <button className="danger-button" disabled={!entries.length} onClick={() => window.confirm("确定清空全部命令历史？") && onClear()}><Trash2 size={14} />清空历史</button>
+          <button className="danger-button" disabled={!entries.length} onClick={() => void confirmDialog({ title: "清空命令历史", message: "确定清空全部命令历史？", danger: true, confirmLabel: "清空" }).then((confirmed) => { if (confirmed) onClear(); })}><Trash2 size={14} />清空历史</button>
           <span />
           <button className="secondary-button" onClick={onClose}>关闭</button>
         </footer>

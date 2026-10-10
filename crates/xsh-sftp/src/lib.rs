@@ -4,9 +4,11 @@ mod remote_replace;
 mod protocol_test;
 
 use anyhow::{Context, bail};
+use futures::future::join_all;
 use russh::client;
 use russh::keys::{HashAlg, PrivateKeyWithHashAlg, PublicKey, load_secret_key};
-use russh_sftp::client::SftpSession;
+use russh_sftp::client::fs::File as RemoteFile;
+use russh_sftp::client::{Config as SftpSessionConfig, SftpSession};
 use russh_sftp::client::error::Error as SftpError;
 use russh_sftp::protocol::{FileType, OpenFlags, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -1639,7 +1641,7 @@ impl SftpManager {
             .request_subsystem(true, "sftp")
             .await
             .context("the server rejected the SFTP subsystem")?;
-        let sftp = SftpSession::new(channel.into_stream())
+        let sftp = SftpSession::new_with_config(channel.into_stream(), sftp_session_config())
             .await
             .context("failed to initialize the SFTP protocol")?;
         sftp.set_timeout(30);
@@ -2535,7 +2537,9 @@ async fn upload_file(
         remote.seek(SeekFrom::Start(transferred)).await?;
     }
 
-    let mut buffer = vec![0_u8; 64 * 1024];
+    // 256 KiB matches russh-sftp's maximum write size so every pipelined
+    // SSH_FXP_WRITE carries a full packet instead of a quarter of one.
+    let mut buffer = vec![0_u8; 256 * 1024];
     loop {
         if let Some(status) = run_gate.wait_until_running(control).await? {
             remote.flush().await.ok();
@@ -2962,6 +2966,171 @@ async fn read_remote_resume_metadata(session: &SftpSession, path: &str) -> anyho
     Ok(raw)
 }
 
+// Concurrent READ pipelining for downloads. `fs::File` keeps at most one
+// SSH_FXP_READ in flight, which caps serial throughput at chunk/RTT, so
+// downloads open several handles and read interleaved chunk ranges instead.
+const DOWNLOAD_PIPELINE_HANDLES: usize = 6;
+const DOWNLOAD_CHUNK_BYTES: usize = 256 * 1024;
+
+enum DownloadReadMessage {
+    Chunk { offset: u64, data: Vec<u8> },
+    EndOfStream,
+    Failed { error: anyhow::Error },
+}
+
+struct DownloadPipeline {
+    receiver: mpsc::Receiver<DownloadReadMessage>,
+    readers: usize,
+}
+
+async fn spawn_download_pipeline(
+    session: &SftpSession,
+    remote_path: &str,
+    start_offset: u64,
+    total_bytes: u64,
+    scheduler: TransferScheduler,
+    control: watch::Receiver<TransferControl>,
+) -> anyhow::Result<DownloadPipeline> {
+    let remaining = total_bytes.saturating_sub(start_offset);
+    let chunk_cap = (DOWNLOAD_CHUNK_BYTES as u64).max(1);
+    let handle_count = DOWNLOAD_PIPELINE_HANDLES
+        .min(usize::try_from(remaining.div_ceil(chunk_cap)).unwrap_or(DOWNLOAD_PIPELINE_HANDLES))
+        .max(1);
+    let opens = (0..handle_count).map(|index| {
+        let offset = start_offset + (index as u64) * chunk_cap;
+        let path = remote_path.to_owned();
+        async move {
+            if offset >= total_bytes {
+                return Ok::<Option<(u64, RemoteFile)>, anyhow::Error>(None);
+            }
+            let mut handle = session.open(path).await?;
+            if offset > 0 {
+                handle.seek(SeekFrom::Start(offset)).await?;
+            }
+            Ok(Some((offset, handle)))
+        }
+    });
+    let mut opened = Vec::with_capacity(handle_count);
+    let mut first_error: Option<anyhow::Error> = None;
+    for result in join_all(opens).await {
+        match result {
+            Ok(Some(entry)) => opened.push(entry),
+            Ok(None) => {}
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+    }
+    if opened.is_empty() {
+        bail!("failed to open the remote file for download: {first_error:?}");
+    }
+    let readers = opened.len();
+    let (chunk_tx, receiver) = mpsc::channel::<DownloadReadMessage>(handle_count * 2);
+    for (offset, handle) in opened {
+        let task_tx = chunk_tx.clone();
+        let task_scheduler = scheduler.clone();
+        let task_control = control.clone();
+        tokio::spawn(async move {
+            let outcome = run_download_reader(
+                handle,
+                offset,
+                total_bytes,
+                task_scheduler,
+                task_control,
+                task_tx.clone(),
+            )
+            .await;
+            let message = outcome.unwrap_or_else(|error| DownloadReadMessage::Failed { error });
+            let _ = task_tx.send(message).await;
+        });
+    }
+    drop(chunk_tx);
+    Ok(DownloadPipeline { receiver, readers })
+}
+
+async fn run_download_reader(
+    mut remote: RemoteFile,
+    mut offset: u64,
+    total_bytes: u64,
+    scheduler: TransferScheduler,
+    mut control: watch::Receiver<TransferControl>,
+    chunk_tx: mpsc::Sender<DownloadReadMessage>,
+) -> anyhow::Result<DownloadReadMessage> {
+    loop {
+        if offset >= total_bytes {
+            return Ok(DownloadReadMessage::EndOfStream);
+        }
+        let control_state = *control.borrow_and_update();
+        match control_state {
+            TransferControl::Running => {}
+            TransferControl::Paused => {
+                control
+                    .changed()
+                    .await
+                    .context("transfer control channel closed")?;
+                continue;
+            }
+            TransferControl::Cancelled => bail!("transfer cancelled"),
+        }
+        let remaining = total_bytes - offset;
+        let desired =
+            DOWNLOAD_CHUNK_BYTES.min(usize::try_from(remaining).unwrap_or(DOWNLOAD_CHUNK_BYTES));
+        let permit = match scheduler
+            .acquire_bandwidth(BandwidthDirection::Download, desired, &mut control)
+            .await?
+        {
+            BandwidthWaitOutcome::Ready(permit) => permit,
+            BandwidthWaitOutcome::Paused => continue,
+            BandwidthWaitOutcome::Cancelled => bail!("transfer cancelled"),
+        };
+        let mut buffer = vec![0_u8; permit.bytes().max(1)];
+        let mut filled = 0_usize;
+        let mut hit_end = false;
+        while filled < buffer.len() {
+            match remote.read(&mut buffer[filled..]).await {
+                Ok(0) => {
+                    hit_end = true;
+                    break;
+                }
+                Ok(read) => filled += read,
+                Err(error) => {
+                    let _ = permit.commit(filled);
+                    // Preserve the bytes that were already read so the
+                    // partial download stays resumable after the failure.
+                    if filled > 0 {
+                        buffer.truncate(filled);
+                        let _ = chunk_tx
+                            .send(DownloadReadMessage::Chunk { offset, data: buffer })
+                            .await;
+                    }
+                    return Err(anyhow::Error::from(error).context("SFTP download read failed"));
+                }
+            }
+        }
+        permit.commit(filled)?;
+        if filled > 0 {
+            buffer.truncate(filled);
+            let chunk_offset = offset;
+            offset += filled as u64;
+            if chunk_tx
+                .send(DownloadReadMessage::Chunk {
+                    offset: chunk_offset,
+                    data: buffer,
+                })
+                .await
+                .is_err()
+            {
+                bail!("the download writer stopped before the reader finished");
+            }
+        }
+        if hit_end {
+            return Ok(DownloadReadMessage::EndOfStream);
+        }
+    }
+}
+
 async fn download_file(
     session: &SftpSession,
     request: DownloadFileRequest<'_>,
@@ -3030,55 +3199,80 @@ async fn download_file(
         return Ok(TransferStatus::Completed);
     }
 
-    let mut remote = session.open(request.remote_path.to_owned()).await?;
-    if transferred > 0 {
-        remote.seek(SeekFrom::Start(transferred)).await?;
-    }
     let mut local = tokio::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&temporary_path)
         .await?;
-    let mut buffer = vec![0_u8; 64 * 1024];
-    loop {
+    let pipeline = spawn_download_pipeline(
+        session,
+        request.remote_path,
+        transferred,
+        request.total_bytes,
+        run_gate.scheduler.clone(),
+        control.clone(),
+    )
+    .await?;
+    let mut chunk_rx = pipeline.receiver;
+    let mut live_readers = pipeline.readers;
+    let mut pending_chunks: HashMap<u64, Vec<u8>> = HashMap::new();
+    let mut next_write_offset = transferred;
+    let mut reader_failure: Option<anyhow::Error> = None;
+    while live_readers > 0 {
         if let Some(status) = run_gate.wait_until_running(control).await? {
             local.flush().await.ok();
             local.shutdown().await.ok();
             return Ok(status);
         }
-        let Some(chunk_size) =
-            remaining_transfer_chunk_size(request.total_bytes, transferred, buffer.len())
-        else {
-            break;
-        };
-        let permit = match wait_for_transfer_bandwidth(
-            run_gate,
-            control,
-            BandwidthDirection::Download,
-            chunk_size,
-        )
-        .await?
-        {
-            TransferBandwidthWaitOutcome::Ready(permit) => permit,
-            TransferBandwidthWaitOutcome::Finished(status) => {
-                local.flush().await.ok();
-                local.shutdown().await.ok();
-                return Ok(status);
+        let message = tokio::select! {
+            changed = control.changed() => {
+                if changed.is_err() {
+                    bail!("transfer control channel closed");
+                }
+                continue;
             }
+            message = chunk_rx.recv() => match message {
+                Some(message) => message,
+                None => break,
+            },
         };
-        let read = remote.read(&mut buffer[..permit.bytes()]).await?;
-        permit.commit(read)?;
-        if read == 0 {
-            break;
+        match message {
+            DownloadReadMessage::Chunk { offset, data } => {
+                if offset != next_write_offset {
+                    pending_chunks.insert(offset, data);
+                    continue;
+                }
+                let mut chunk = data;
+                loop {
+                    local.write_all(&chunk).await?;
+                    next_write_offset += chunk.len() as u64;
+                    transferred += chunk.len() as u64;
+                    progress(transferred);
+                    match pending_chunks.remove(&next_write_offset) {
+                        Some(buffered) => chunk = buffered,
+                        None => break,
+                    }
+                }
+            }
+            DownloadReadMessage::EndOfStream => {
+                live_readers -= 1;
+            }
+            DownloadReadMessage::Failed { error } => {
+                // Keep draining the remaining readers so their partial chunks
+                // still land in the resumable temporary file.
+                if reader_failure.is_none() {
+                    reader_failure = Some(error);
+                }
+                live_readers -= 1;
+            }
         }
-        local.write_all(&buffer[..read]).await?;
-        transferred += read as u64;
-        progress(transferred);
     }
     local.flush().await?;
-    local.shutdown().await?;
+    local.shutdown().await.ok();
     drop(local);
-    drop(remote);
+    if let Some(error) = reader_failure {
+        return Err(error);
+    }
     if transferred != request.total_bytes {
         bail!(
             "remote file ended early: expected {} bytes, received {transferred} bytes",
@@ -3411,6 +3605,20 @@ fn entry_rank(file_type: &RemoteFileType) -> u8 {
 fn sftp_client_config() -> client::Config {
     client::Config {
         nodelay: true,
+        keepalive_interval: Some(Duration::from_secs(30)),
+        keepalive_max: 3,
+        ..Default::default()
+    }
+}
+
+// The SFTP write pipeline depth: how many SSH_FXP_WRITE requests may be in
+// flight before we wait for acknowledgements. The default of 8 caps upload
+// throughput at 8 x write_size / RTT on high-latency links.
+const SFTP_MAX_CONCURRENT_WRITES: usize = 32;
+
+fn sftp_session_config() -> SftpSessionConfig {
+    SftpSessionConfig {
+        max_concurrent_writes: SFTP_MAX_CONCURRENT_WRITES,
         ..Default::default()
     }
 }
