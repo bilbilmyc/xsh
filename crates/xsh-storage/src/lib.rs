@@ -299,7 +299,7 @@ impl SessionRepository {
              initial_directory = ?12, startup_command = ?13, keepalive_seconds = ?14, auto_reconnect = ?15,
              environment = ?16, color = ?17, notes = ?18, favorite = ?19,
              updated_at = ?20, forward_profiles_json = ?21 WHERE id = ?1",
-            session_params(&session),
+            session_params(&session)?,
         )?;
         if changed == 0 {
             return Err(StorageError::SessionNotFound(id));
@@ -518,9 +518,9 @@ fn insert_session(connection: &Connection, session: &SavedSession) -> Result<()>
     Ok(())
 }
 
-fn session_params(session: &SavedSession) -> [rusqlite::types::Value; 21] {
+fn session_params(session: &SavedSession) -> Result<[rusqlite::types::Value; 21]> {
     use rusqlite::types::Value;
-    [
+    Ok([
         Value::Text(session.id.to_string()),
         session
             .group_id
@@ -543,10 +543,11 @@ fn session_params(session: &SavedSession) -> [rusqlite::types::Value; 21] {
         session
             .proxy_jump_authentication
             .as_ref()
-            .map(|auth| Value::Text(serde_json::to_string(auth).expect("serializable proxy auth")))
+            .map(|auth| serde_json::to_string(auth).map(Value::Text))
+            .transpose()?
             .unwrap_or(Value::Null),
-        Value::Text(serde_json::to_string(&session.authentication).expect("serializable auth")),
-        Value::Text(serde_json::to_string(&session.terminal).expect("serializable terminal")),
+        Value::Text(serde_json::to_string(&session.authentication)?),
+        Value::Text(serde_json::to_string(&session.terminal)?),
         session
             .initial_directory
             .clone()
@@ -576,11 +577,8 @@ fn session_params(session: &SavedSession) -> [rusqlite::types::Value; 21] {
             .unwrap_or(Value::Null),
         Value::Integer(i64::from(session.favorite)),
         Value::Text(session.updated_at.to_rfc3339()),
-        Value::Text(
-            serde_json::to_string(&session.forward_profiles)
-                .expect("serializable forward profiles"),
-        ),
-    ]
+        Value::Text(serde_json::to_string(&session.forward_profiles)?),
+    ])
 }
 
 fn ensure_session_columns(connection: &Connection) -> Result<()> {

@@ -168,7 +168,6 @@ export function SettingsModal({ preferences, onSave, onClose, onToast }: Setting
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dirty]);
 
   return (

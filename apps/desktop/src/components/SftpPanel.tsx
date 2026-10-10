@@ -348,7 +348,11 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
   const enqueueUploads = async (paths: string[]) => {
     await uploadFiles(paths);
   };
-  enqueueUploadsRef.current = enqueueUploads;
+  // The drag-drop handler reads through the ref; updating it in an effect
+  // keeps the render phase free of side effects.
+  useEffect(() => {
+    enqueueUploadsRef.current = enqueueUploads;
+  });
 
   const acquireUploadSlot = (cancelEpoch: number): Promise<boolean> => {
     if (uploadQueueCancelEpochRef.current !== cancelEpoch) return Promise.resolve(false);

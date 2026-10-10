@@ -164,8 +164,7 @@ export interface SftpTransferPolicy {
 // Terminal output bytes no longer travel through this JSON event type: the
 // backend sends them as raw binary over the IPC channel, so the webview
 // receives an ArrayBuffer instead (see `TerminalEvent | ArrayBuffer`).
-export type TerminalEvent =
-  | { type: "stateChanged"; payload: ConnectionState }
+export type TerminalEvent =  | { type: "stateChanged"; payload: ConnectionState }
   | {
       type: "authChallenge";
       payload: {
@@ -188,6 +187,17 @@ export type TerminalEvent =
     }
   | { type: "exitStatus"; payload: number }
   | { type: "error"; payload: string };
+
+/** Narrows the terminal IPC channel union without a blind cast; keeps the
+ * `TerminalEvent | ArrayBuffer` contract honest if the union ever grows. */
+export function isTerminalEvent(value: unknown): value is TerminalEvent {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "type" in value &&
+    typeof (value as { type: unknown }).type === "string"
+  );
+}
 
 export type RemoteFileType = "directory" | "file" | "symlink" | "other";
 

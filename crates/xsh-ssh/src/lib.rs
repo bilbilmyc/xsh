@@ -142,6 +142,11 @@ pub struct ConnectionSubscription {
 
 const TERMINAL_EVENT_CAPACITY: usize = 128;
 
+/// Per-session cap on concurrently live forwarded TCP connections (local,
+/// dynamic, and remote). Generous enough for real workloads, but bounded so
+/// a runaway local app or remote peer cannot open unbounded SSH channels.
+const MAX_FORWARDED_CONNECTIONS: usize = 256;
+
 fn terminal_event_channel() -> (mpsc::Sender<TerminalEvent>, mpsc::Receiver<TerminalEvent>) {
     mpsc::channel(TERMINAL_EVENT_CAPACITY)
 }
@@ -717,6 +722,10 @@ struct HostKeyHandler {
     event_tx: mpsc::Sender<TerminalEvent>,
     output_flow: Arc<TerminalOutputFlow>,
     remote_forwards: Arc<Mutex<HashMap<Uuid, RemoteForwardTarget>>>,
+    /// Bounds concurrently live forwarded TCP connections per session; a
+    /// buggy local app or remote peer must not be able to open unbounded
+    /// SSH channels. Held for each connection's lifetime.
+    forward_slots: Arc<tokio::sync::Semaphore>,
 }
 
 impl client::Handler for HostKeyHandler {
@@ -803,6 +812,7 @@ impl client::Handler for HostKeyHandler {
         _session: &mut client::Session,
     ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
         let remote_forwards = Arc::clone(&self.remote_forwards);
+        let forward_slots = Arc::clone(&self.forward_slots);
         let connected_address = _connected_address.to_owned();
         let connected_port = _connected_port as u16;
         async move {
@@ -821,21 +831,27 @@ impl client::Handler for HostKeyHandler {
                     })
                     .cloned()
             };
-            if let Some(target) = target {
-                tokio::spawn(async move {
-                    match TcpStream::connect((target.local_host.as_str(), target.local_port)).await
-                    {
-                        Ok(stream) => {
-                            let _ = proxy_channel_with_tcp(channel, stream).await;
-                        }
-                        Err(_) => {
-                            let _ = channel.close().await;
-                        }
-                    }
-                });
-            } else {
+            let Some(target) = target else {
                 let _ = channel.close().await;
-            }
+                return Ok(());
+            };
+            let Ok(permit) = forward_slots.try_acquire_owned() else {
+                // Over the per-session cap: refuse the channel instead of
+                // letting a remote peer pile up unbounded SSH channels.
+                let _ = channel.close().await;
+                return Ok(());
+            };
+            tokio::spawn(async move {
+                match TcpStream::connect((target.local_host.as_str(), target.local_port)).await {
+                    Ok(stream) => {
+                        let _ = proxy_channel_with_tcp(channel, stream).await;
+                    }
+                    Err(_) => {
+                        let _ = channel.close().await;
+                    }
+                }
+                drop(permit);
+            });
             Ok(())
         }
     }
@@ -1058,6 +1074,7 @@ async fn run_terminal_connection(
     };
     let mut proxy_session: Option<client::Handle<HostKeyHandler>> = None;
     let remote_forwards = Arc::new(Mutex::new(HashMap::new()));
+    let forward_slots = Arc::new(tokio::sync::Semaphore::new(MAX_FORWARDED_CONNECTIONS));
     let target_handler = HostKeyHandler {
         role: HostKeyRole::Target,
         host: options.host.clone(),
@@ -1066,6 +1083,7 @@ async fn run_terminal_connection(
         event_tx: event_tx.clone(),
         output_flow: Arc::clone(&output_flow),
         remote_forwards: Arc::clone(&remote_forwards),
+        forward_slots: Arc::clone(&forward_slots),
     };
 
     let mut session = if let Some(proxy) = proxy_target {
@@ -1077,6 +1095,7 @@ async fn run_terminal_connection(
             event_tx: event_tx.clone(),
             output_flow: Arc::clone(&output_flow),
             remote_forwards: Arc::clone(&remote_forwards),
+            forward_slots: Arc::clone(&forward_slots),
         };
         let mut jump_session = connect_jump_session(
             Arc::new(client_config(options.keepalive_seconds)),
@@ -1203,6 +1222,10 @@ async fn run_terminal_connection(
                             let target_host = target_host.clone();
                             let target_port = *target_port;
                             let session = Arc::clone(&session);
+                            let Ok(permit) = Arc::clone(&forward_slots).try_acquire_owned() else {
+                                let _ = accepted.stream.shutdown().await;
+                                continue;
+                            };
                             tokio::spawn(async move {
                                 let channel = session
                                     .channel_open_direct_tcpip(
@@ -1216,12 +1239,18 @@ async fn run_terminal_connection(
                                     Ok(channel) => { let _ = proxy_channel_with_tcp(channel, accepted.stream).await; }
                                     Err(_) => { let _ = accepted.stream.shutdown().await; }
                                 }
+                                drop(permit);
                             });
                         }
                         ForwardRuntime::Dynamic { .. } => {
                             let session = Arc::clone(&session);
+                            let Ok(permit) = Arc::clone(&forward_slots).try_acquire_owned() else {
+                                let _ = accepted.stream.shutdown().await;
+                                continue;
+                            };
                             tokio::spawn(async move {
                                 let _ = handle_socks5_connection(&session, accepted.stream, accepted.origin).await;
+                                drop(permit);
                             });
                         }
                     }

@@ -11,9 +11,10 @@ import { api } from "../api";
 import { writeClipboardText } from "../clipboard";
 import { ContextMenu } from "./ContextMenu";
 import type { AppPreferences } from "../preferences";
-import type { SavedSession, TerminalEvent } from "../types";
+import { isTerminalEvent, type SavedSession, type TerminalEvent } from "../types";
 import { decodeTerminalKeyMapping, normalizeTerminalCommand } from "../terminal-command";
 import { matchesTerminalShortcut, TerminalTriggerMatcher } from "../terminal-trigger";
+import { IS_MACOS } from "../platform";
 import { confirmDialog, hostKeyDialog } from "./DialogHost";
 import { BoundedSessionLogBuffer } from "../session-log-buffer";
 import { CumulativeTerminalOutputAcknowledger } from "../terminal-output-ack";
@@ -417,7 +418,7 @@ export function TerminalPane({
       await safePaste();
     };
 
-    const isMac = /mac|iphone|ipad/i.test(`${navigator.platform} ${navigator.userAgent}`);
+    const isMac = IS_MACOS;
     const isCopyShortcut = (event: KeyboardEvent) => isMac
       ? event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "c"
       : event.ctrlKey && event.shiftKey && !event.metaKey && !event.altKey && event.key.toLowerCase() === "c";
@@ -724,7 +725,8 @@ export function TerminalPane({
           queueOutput(output, bytes.length, acknowledgeOutput);
           return;
         }
-        const event = message as TerminalEvent;
+        if (!isTerminalEvent(message)) return;
+        const event = message;
         switch (event.type) {
           case "authChallenge":
             setAuthChallenge(event.payload);

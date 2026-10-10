@@ -1111,6 +1111,15 @@ async fn export_sessions(
     password: String,
     include_known_hosts: bool,
 ) -> CommandResult<()> {
+    export_sessions_impl(&state, target_path, password, include_known_hosts).await
+}
+
+async fn export_sessions_impl(
+    state: &AppState,
+    target_path: PathBuf,
+    password: String,
+    include_known_hosts: bool,
+) -> CommandResult<()> {
     validate_export_password(&password)?;
     let bundle = {
         let repository = Arc::clone(&state.repository);
@@ -1155,6 +1164,14 @@ async fn export_sessions(
 #[tauri::command]
 async fn import_sessions(
     state: State<'_, AppState>,
+    source_path: PathBuf,
+    password: String,
+) -> CommandResult<ImportSummary> {
+    import_sessions_impl(&state, source_path, password).await
+}
+
+async fn import_sessions_impl(
+    state: &AppState,
     source_path: PathBuf,
     password: String,
 ) -> CommandResult<ImportSummary> {
@@ -2239,5 +2256,172 @@ mod tests {
 
         assert!(validate_local_path(&link, "文件").is_err());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn scratch_app_state(label: &str) -> (AppState, PathBuf) {
+        let directory =
+            std::env::temp_dir().join(format!("xsh-import-test-{label}-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let database = directory.join("xsh.sqlite3");
+        let repository = SessionRepository::open(&database).unwrap();
+        let credentials =
+            LocalCredentialStore::open(&database, directory.join("vault.key")).unwrap();
+        (
+            AppState {
+                repository: Arc::new(repository),
+                credentials: Arc::new(credentials),
+                credential_lifecycle: tokio::sync::Mutex::new(()),
+                ssh: SshSessionManager::new(),
+                sftp: SftpManager::new(),
+            },
+            directory,
+        )
+    }
+
+    fn export_bundle_fixture(session: SavedSession) -> SessionBundle {
+        SessionBundle {
+            format: "xsh-session-bundle".into(),
+            schema_version: 1,
+            exported_at: Utc::now(),
+            groups: Vec::new(),
+            sessions: vec![session],
+            known_hosts: Vec::new(),
+        }
+    }
+
+    fn write_encrypted_export(path: &std::path::Path, password: &str, payload: &[u8]) {
+        let encrypted = encrypt_export_payload(SESSION_EXPORT_MAGIC, password, payload).unwrap();
+        std::fs::write(path, encrypted).unwrap();
+    }
+
+    #[tokio::test]
+    async fn import_sessions_v1_pack_strips_credential_references() {
+        let (state, directory) = scratch_app_state("v1");
+        let session = saved_session(
+            AuthenticationMethod::Password {
+                credential_ref: Some("xsh-local/password/legacy".into()),
+            },
+            Some(AuthenticationMethod::PrivateKey {
+                private_key_path: "~/.ssh/legacy".into(),
+                passphrase_ref: Some("xsh-local/key-passphrase/legacy".into()),
+            }),
+        );
+        let bundle = export_bundle_fixture(session);
+        let export_path = directory.join("v1.xshpack");
+        // v1 packs are the bare bundle without the credential envelope.
+        write_encrypted_export(
+            &export_path,
+            "test-password",
+            &serde_json::to_vec(&bundle).unwrap(),
+        );
+
+        let summary = import_sessions_impl(&state, export_path, "test-password".into())
+            .await
+            .expect("import v1 pack");
+
+        assert_eq!(summary.groups_created, 0);
+        assert_eq!(summary.sessions_created, 1);
+        assert_eq!(summary.credentials_imported, 0);
+        assert_eq!(summary.credentials_overwritten, 0);
+
+        let imported = state
+            .repository
+            .list_sessions()
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("imported session");
+        assert!(matches!(
+            imported.authentication,
+            AuthenticationMethod::Password {
+                credential_ref: None
+            }
+        ));
+        assert!(matches!(
+            imported.proxy_jump_authentication,
+            Some(AuthenticationMethod::PrivateKey {
+                passphrase_ref: None,
+                ..
+            })
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[tokio::test]
+    async fn import_sessions_v2_restores_credentials_and_rejects_mismatches() {
+        let (source, source_directory) = scratch_app_state("v2-source");
+        let (target, target_directory) = scratch_app_state("v2-target");
+
+        let credential_ref_from_export = source
+            .credentials
+            .create(CredentialKind::Password, "secret-value")
+            .unwrap();
+        let session = saved_session(
+            AuthenticationMethod::Password {
+                credential_ref: Some(credential_ref_from_export.clone()),
+            },
+            None,
+        );
+        let bundle = export_bundle_fixture(session.clone());
+        let credentials = source
+            .credentials
+            .export_selected(std::slice::from_ref(&credential_ref_from_export))
+            .unwrap();
+        let payload = SessionExportPayload {
+            format: SessionExportPayload::FORMAT.into(),
+            schema_version: SessionExportPayload::SCHEMA_VERSION,
+            bundle,
+            credentials,
+        };
+
+        let valid_path = source_directory.join("v2.xshpack");
+        write_encrypted_export(
+            &valid_path,
+            "test-password",
+            &serde_json::to_vec(&payload).unwrap(),
+        );
+        let summary = import_sessions_impl(&target, valid_path, "test-password".into())
+            .await
+            .expect("import v2 export");
+        assert_eq!(summary.sessions_created, 1);
+        assert_eq!(summary.credentials_imported, 1);
+        let imported = target
+            .repository
+            .list_sessions()
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("imported session");
+        assert_eq!(imported.host, session.host);
+        assert!(matches!(
+            imported.authentication,
+            AuthenticationMethod::Password { ref credential_ref } if credential_ref.as_deref() == Some(credential_ref_from_export.as_str())
+        ));
+        assert!(target.credentials.get(&credential_ref_from_export).is_ok());
+
+        // A payload whose credentials do not cover every referenced ref is
+        // rejected before anything is written.
+        let mut mismatched = payload;
+        mismatched.credentials = Vec::new();
+        mismatched.bundle.sessions = vec![saved_session(
+            AuthenticationMethod::Password {
+                credential_ref: Some("xsh-local/password/missing".into()),
+            },
+            None,
+        )];
+        let mismatch_path = source_directory.join("v2-mismatch.xshpack");
+        write_encrypted_export(
+            &mismatch_path,
+            "test-password",
+            &serde_json::to_vec(&mismatched).unwrap(),
+        );
+        let error = import_sessions_impl(&target, mismatch_path, "test-password".into())
+            .await
+            .expect_err("credential/session mismatch must fail");
+        assert!(error.contains("不匹配"));
+        assert_eq!(target.repository.list_sessions().unwrap().len(), 1);
+
+        let _ = std::fs::remove_dir_all(&source_directory);
+        let _ = std::fs::remove_dir_all(&target_directory);
     }
 }

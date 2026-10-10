@@ -10,6 +10,7 @@ import {
 } from "../quick-command-bar";
 import { containsSensitiveCommand, SENSITIVE_COMMAND_ERROR } from "../sensitive-command";
 import { confirmDialog } from "./DialogHost";
+import { IS_MACOS } from "../platform";
 import type { TerminalShortcutMode } from "../preferences";
 
 interface QuickCommandBarProps {
@@ -25,7 +26,6 @@ interface QuickCommandBarProps {
 
 type EditorState = { slot: number; item: QuickCommandItem | null; draft: QuickCommandDraft } | null;
 
-const IS_MACOS = /mac|iphone|ipad/i.test(`${navigator.platform} ${navigator.userAgent}`);
 const shortcutOptions = [
   { value: "", label: "不绑定快捷键" },
   ...Array.from({ length: 9 }, (_, index) => ({

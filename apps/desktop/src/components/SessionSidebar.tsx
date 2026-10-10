@@ -299,51 +299,67 @@ export function SessionSidebar({
     resetDragState();
   };
 
-  useEffect(() => {
-    const handleWindowPointerMove = (event: PointerEvent) => {
-      const start = pointerStartRef.current;
-      if (!start) return;
-      if (!pointerDragActiveRef.current) {
-        if (Math.hypot(event.clientX - start.x, event.clientY - start.y) < 6) return;
-        pointerDragActiveRef.current = true;
-        suppressNextClickRef.current = true;
-        const movingIds = pointerDraggedSessionIdsRef.current;
-        setDraggedSessionId(movingIds[0] ?? null);
-        setDraggedSessionIds(new Set(movingIds));
-      }
-      const targetGroupId = dropGroupIdAtPoint(event.clientX, event.clientY);
-      if (targetGroupId !== undefined) setDragOverGroupId(targetGroupId);
-      else setDragOverGroupId(null);
-    };
+  // The handlers are rebuilt each render so they always see the latest
+  // groups/sessions and App-provided callbacks; the window listeners attach
+  // once and dispatch through refs instead of churning on every parent
+  // render.
+  const handleWindowPointerMove = (event: PointerEvent) => {
+    const start = pointerStartRef.current;
+    if (!start) return;
+    if (!pointerDragActiveRef.current) {
+      if (Math.hypot(event.clientX - start.x, event.clientY - start.y) < 6) return;
+      pointerDragActiveRef.current = true;
+      suppressNextClickRef.current = true;
+      const movingIds = pointerDraggedSessionIdsRef.current;
+      setDraggedSessionId(movingIds[0] ?? null);
+      setDraggedSessionIds(new Set(movingIds));
+    }
+    const targetGroupId = dropGroupIdAtPoint(event.clientX, event.clientY);
+    if (targetGroupId !== undefined) setDragOverGroupId(targetGroupId);
+    else setDragOverGroupId(null);
+  };
 
-    const handleWindowPointerUp = (event: PointerEvent) => {
-      if (!pointerDragActiveRef.current) {
-        finishPointerDrag();
-        return;
-      }
-      const targetGroupKey = dropGroupIdAtPoint(event.clientX, event.clientY);
-      if (targetGroupKey !== undefined) {
-        suppressNextGroupClickRef.current = Boolean(
-          (event.target as HTMLElement | null)?.closest?.(".group-toggle"),
-        );
-        suppressNextClickRef.current = false;
-        moveSessionIds(
-          pointerDraggedSessionIdsRef.current,
-          targetGroupKey === "__ungrouped__" ? null : targetGroupKey,
-        );
-      } else {
-        resetDragState();
-      }
+  const handleWindowPointerUp = (event: PointerEvent) => {
+    if (!pointerDragActiveRef.current) {
       finishPointerDrag();
-    };
+      return;
+    }
+    const targetGroupKey = dropGroupIdAtPoint(event.clientX, event.clientY);
+    if (targetGroupKey !== undefined) {
+      suppressNextGroupClickRef.current = Boolean(
+        (event.target as HTMLElement | null)?.closest?.(".group-toggle"),
+      );
+      suppressNextClickRef.current = false;
+      moveSessionIds(
+        pointerDraggedSessionIdsRef.current,
+        targetGroupKey === "__ungrouped__" ? null : targetGroupKey,
+      );
+    } else {
+      resetDragState();
+    }
+    finishPointerDrag();
+  };
 
-    window.addEventListener("pointermove", handleWindowPointerMove);
-    window.addEventListener("pointerup", handleWindowPointerUp);
-    return () => {
-      window.removeEventListener("pointermove", handleWindowPointerMove);
-      window.removeEventListener("pointerup", handleWindowPointerUp);
+  const windowPointerHandlersRef = useRef({
+    move: handleWindowPointerMove,
+    up: handleWindowPointerUp,
+  });
+  useEffect(() => {
+    windowPointerHandlersRef.current = {
+      move: handleWindowPointerMove,
+      up: handleWindowPointerUp,
     };
-  }, [groups, onMoveSession, onMoveSessions, sessions]);
+  });
+  useEffect(() => {
+    const dispatchMove = (event: PointerEvent) => windowPointerHandlersRef.current.move(event);
+    const dispatchUp = (event: PointerEvent) => windowPointerHandlersRef.current.up(event);
+    window.addEventListener("pointermove", dispatchMove);
+    window.addEventListener("pointerup", dispatchUp);
+    return () => {
+      window.removeEventListener("pointermove", dispatchMove);
+      window.removeEventListener("pointerup", dispatchUp);
+    };
+  }, []);
 
   const moveDraggedSession = (event: React.DragEvent, groupId: string | null) => {
     if (!isSessionDrag(event) && draggedSessionId === null) return;

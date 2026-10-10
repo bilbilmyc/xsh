@@ -39,6 +39,7 @@ import { loadCommandLibrary, saveCommandLibrary, type CommandSnippet } from "./c
 import { loadCommandHistory, recordCommandHistory, saveCommandHistory, type CommandHistoryEntry } from "./command-history";
 import { loadQuickCommandBar, saveQuickCommandBar, type QuickCommandItem } from "./quick-command-bar";
 import { loadPreferences, savePreferences, toSftpTransferPolicy, type AppPreferences } from "./preferences";
+import { isMacOS } from "./platform";
 import {
   type NamedWorkspace,
   type WorkspacePaneLayout,
@@ -149,7 +150,7 @@ type GroupEditorState =
 
 type PaneLayout = WorkspacePaneLayout;
 
-const IS_MACOS = /Mac|iPhone|iPad|iPod/.test(navigator.platform);
+const IS_MACOS = isMacOS();
 const PANE_LAYOUT_STORAGE_KEY = "xsh.pane-layout.v1";
 const SPLIT_RATIO_STORAGE_KEY = "xsh.split-ratio.v1";
 const SIDEBAR_VISIBLE_STORAGE_KEY = "xsh.sidebar-visible.v1";
@@ -1366,8 +1367,10 @@ function App() {
     }
   };
 
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
+  // Rebuilt every render so it always sees the current tabs and overlays; the
+  // window listener dispatches through a ref and attaches once instead of
+  // being removed and re-added on every tab state change and modal toggle.
+  const onKeyDown = (event: KeyboardEvent) => {
       // On macOS, application shortcuts use Command only so Ctrl reaches the
       // remote shell unchanged. On Windows, high-conflict actions require
       // Ctrl+Shift to preserve Ctrl+T/W/B for readline, tmux, vim, and shells.
@@ -1457,15 +1460,20 @@ function App() {
       const nextIndex = (index + offset + tabs.length) % tabs.length;
       focusTab(tabs[nextIndex].id);
     };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [activeTabId, batchCommandVisible, batchEditorSessions.length, commandCenterVisible, connectionManagerVisible, diagnosticSession, editorSession, groupEditor, historyVisible, onboardingVisible, paneLayout, portForwardVisible, preferences.terminalShortcutMode, sessionFileDialog, settingsVisible, sshConfigVisible, tabContextMenu, tabs, transferManagerVisible, workspaceManagerVisible]);
+  const onKeyDownRef = useRef(onKeyDown);
+  useEffect(() => {
+    onKeyDownRef.current = onKeyDown;
+  });
+  useEffect(() => {
+    const dispatch = (event: KeyboardEvent) => onKeyDownRef.current(event);
+    window.addEventListener("keydown", dispatch);
+    return () => window.removeEventListener("keydown", dispatch);
+  }, []);
 
   // Global Escape for overlays that do not manage it themselves. The session
   // editor, settings, port-forward and command-center modals intercept Escape
   // internally (with unsaved-change guards where it matters).
-  useEffect(() => {
-    const onEscape = (event: KeyboardEvent) => {
+  const onEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       if (isDialogOpen()) return;
       if (tabContextMenu) setTabContextMenu(null);
@@ -1481,9 +1489,15 @@ function App() {
       else if (onboardingVisible) setOnboardingVisible(false);
       else if (transferManagerVisible) setTransferManagerVisible(false);
     };
-    window.addEventListener("keydown", onEscape);
-    return () => window.removeEventListener("keydown", onEscape);
-  }, [tabContextMenu, sessionFileDialog, diagnosticSession, groupEditor, batchEditorSessions.length, batchCommandVisible, historyVisible, workspaceManagerVisible, connectionManagerVisible, sshConfigVisible, onboardingVisible, transferManagerVisible]);
+  const onEscapeRef = useRef(onEscape);
+  useEffect(() => {
+    onEscapeRef.current = onEscape;
+  });
+  useEffect(() => {
+    const dispatch = (event: KeyboardEvent) => onEscapeRef.current(event);
+    window.addEventListener("keydown", dispatch);
+    return () => window.removeEventListener("keydown", dispatch);
+  }, []);
 
   return (
     <main className="app-shell">

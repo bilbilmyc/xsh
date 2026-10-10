@@ -51,7 +51,12 @@ impl TerminalOutputFlow {
         if self.available.is_closed() {
             return false;
         }
-        let mut state = self.state.lock().unwrap();
+        // The guarded state is plain counters; a panic elsewhere in the
+        // process must not poison the stream and kill the producer loop.
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.reserved_bytes = state
             .reserved_bytes
             .checked_add(bytes as u64)
@@ -66,7 +71,10 @@ impl TerminalOutputFlow {
     /// idempotent, and values beyond produced output are clamped.
     pub fn acknowledge(&self, consumed_bytes: u64) -> usize {
         let acknowledged = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let consumed_bytes = consumed_bytes.min(state.reserved_bytes);
             if consumed_bytes <= state.acknowledged_bytes {
                 return 0;
