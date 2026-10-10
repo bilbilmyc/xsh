@@ -7,9 +7,9 @@ use anyhow::{Context, bail};
 use futures::future::join_all;
 use russh::client;
 use russh::keys::{HashAlg, PrivateKeyWithHashAlg, PublicKey, load_secret_key};
+use russh_sftp::client::error::Error as SftpError;
 use russh_sftp::client::fs::File as RemoteFile;
 use russh_sftp::client::{Config as SftpSessionConfig, SftpSession};
-use russh_sftp::client::error::Error as SftpError;
 use russh_sftp::protocol::{FileType, OpenFlags, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -3102,7 +3102,10 @@ async fn run_download_reader(
                     if filled > 0 {
                         buffer.truncate(filled);
                         let _ = chunk_tx
-                            .send(DownloadReadMessage::Chunk { offset, data: buffer })
+                            .send(DownloadReadMessage::Chunk {
+                                offset,
+                                data: buffer,
+                            })
                             .await;
                     }
                     return Err(anyhow::Error::from(error).context("SFTP download read failed"));

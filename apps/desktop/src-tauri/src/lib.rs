@@ -192,7 +192,9 @@ async fn delete_known_host(
 ) -> CommandResult<()> {
     let repository = Arc::clone(&state.repository);
     run_storage_operation(move || {
-        repository.delete_known_host(&host, port).map_err(display_error)
+        repository
+            .delete_known_host(&host, port)
+            .map_err(display_error)
     })
     .await
 }
@@ -208,7 +210,9 @@ async fn trust_session_host_key(
     let known_host = validate_host_key_approval(&approval).map_err(display_error)?;
     let repository = Arc::clone(&state.repository);
     run_storage_operation(move || {
-        repository.save_known_host(known_host).map_err(display_error)
+        repository
+            .save_known_host(known_host)
+            .map_err(display_error)
     })
     .await
 }
@@ -383,8 +387,10 @@ async fn connect_terminal(
     let ssh = state.ssh.clone();
     tauri::async_runtime::spawn(async move {
         while let Some(event) = events.recv().await {
-            let connected =
-                matches!(&event, TerminalEvent::StateChanged(ConnectionState::Connected));
+            let connected = matches!(
+                &event,
+                TerminalEvent::StateChanged(ConnectionState::Connected)
+            );
             // Terminal output dominates the traffic; sending it as raw bytes
             // avoids the ~4x JSON number-array expansion and the per-element
             // decode on the webview side. Control events stay JSON.

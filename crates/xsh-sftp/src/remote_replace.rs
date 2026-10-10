@@ -337,10 +337,7 @@ async fn recover_remote_replace_with<I: RemoteReplaceIo>(
     current_source_token: &str,
 ) -> anyhow::Result<RecoveryOutcome> {
     let paths = RemoteReplacePaths::new(destination);
-    let (records, backup) = join!(
-        load_protocol_records(io, &paths),
-        io.lstat(&paths.backup)
-    );
+    let (records, backup) = join!(load_protocol_records(io, &paths), io.lstat(&paths.backup));
     let records = records?;
     let backup = backup?;
     let record = records.common()?.cloned();
