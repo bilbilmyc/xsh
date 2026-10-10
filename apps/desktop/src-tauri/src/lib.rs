@@ -1,8 +1,7 @@
 #[cfg(test)]
 use chrono::Utc;
 use serde::Serialize;
-use std::collections::HashMap;
-use std::env;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
@@ -25,7 +24,7 @@ use xsh_security::{
     SESSION_EXPORT_MAGIC, WORKSPACE_EXPORT_MAGIC, decrypt_export_payload, encrypt_export_payload,
 };
 use xsh_sftp::{SftpConnectOptions, SftpManager, SftpManagerError};
-use xsh_ssh::config::{SshConfigEntry, resolve_proxy_jump};
+use xsh_ssh::config::{SshConfigEntry, resolve_proxy_jump_async, user_home_directory};
 use xsh_ssh::{
     ConnectOptions, ForwardInfo, RuntimeAuthentication, SshAgentKey, SshDiagnosticReport,
     SshSessionManager, diagnose_connection, list_agent_keys, validate_dimensions,
@@ -168,13 +167,15 @@ async fn update_group(
 #[tauri::command]
 async fn delete_group(state: State<'_, AppState>, id: Uuid) -> CommandResult<Vec<SessionId>> {
     let _credential_lifecycle = state.credential_lifecycle.lock().await;
-    let deleted_sessions = state.repository.delete_group(id).map_err(display_error)?;
+    let repository = Arc::clone(&state.repository);
+    let deleted_sessions =
+        run_storage_operation(move || repository.delete_group(id).map_err(display_error)).await?;
     let deleted_ids = deleted_sessions.iter().map(|session| session.id).collect();
+    let mut orphaned_refs = Vec::new();
     for session in deleted_sessions {
-        for credential_ref in session_credential_references(&session) {
-            cleanup_credential_if_unused(&state, &credential_ref).await;
-        }
+        orphaned_refs.extend(session_credential_references(&session));
     }
+    cleanup_credentials_if_unused(&state, &orphaned_refs).await;
     Ok(deleted_ids)
 }
 
@@ -205,8 +206,8 @@ async fn trust_session_host_key(
     session_id: SessionId,
     approval: HostKeyApproval,
 ) -> CommandResult<()> {
-    let session = require_session(&state, session_id)?;
-    validate_session_host_key_endpoint(&session, &approval)?;
+    let session = require_session_async(&state, session_id).await?;
+    validate_session_host_key_endpoint(&session, &approval).await?;
     let known_host = validate_host_key_approval(&approval).map_err(display_error)?;
     let repository = Arc::clone(&state.repository);
     run_storage_operation(move || {
@@ -229,19 +230,23 @@ async fn list_ssh_agent_keys() -> CommandResult<Vec<SshAgentKey>> {
 }
 
 #[tauri::command]
-fn get_ssh_key_defaults() -> CommandResult<SshKeyDefaults> {
-    let home = user_home_directory().ok_or_else(|| "无法确定当前用户的主目录".to_owned())?;
-    let ssh_directory = home.join(".ssh");
-    let default_key_path = ["id_ed25519", "id_rsa", "id_ecdsa", "id_dsa"]
-        .iter()
-        .map(|name| ssh_directory.join(name))
-        .find(|path| path.is_file())
-        .map(|path| path.to_string_lossy().into_owned());
+async fn get_ssh_key_defaults() -> CommandResult<SshKeyDefaults> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let home = user_home_directory().ok_or_else(|| "无法确定当前用户的主目录".to_owned())?;
+        let ssh_directory = home.join(".ssh");
+        let default_key_path = ["id_ed25519", "id_rsa", "id_ecdsa", "id_dsa"]
+            .iter()
+            .map(|name| ssh_directory.join(name))
+            .find(|path| path.is_file())
+            .map(|path| path.to_string_lossy().into_owned());
 
-    Ok(SshKeyDefaults {
-        ssh_directory: ssh_directory.to_string_lossy().into_owned(),
-        default_key_path,
+        Ok(SshKeyDefaults {
+            ssh_directory: ssh_directory.to_string_lossy().into_owned(),
+            default_key_path,
+        })
     })
+    .await
+    .map_err(|error| format!("XSH 读取 SSH 密钥默认值线程异常：{error}"))?
 }
 
 #[tauri::command]
@@ -269,7 +274,7 @@ async fn update_session(
     draft: SessionDraft,
 ) -> CommandResult<SavedSession> {
     let _credential_lifecycle = state.credential_lifecycle.lock().await;
-    let previous = require_session(&state, id)?;
+    let previous = require_session_async(&state, id).await?;
     validate_session_draft(&state, &draft, Some(&previous)).await?;
     let repository = Arc::clone(&state.repository);
     let updated =
@@ -277,24 +282,22 @@ async fn update_session(
             .await?;
     let previous_refs = session_credential_references(&previous);
     let updated_refs = session_credential_references(&updated);
-    for credential_ref in previous_refs
+    let orphaned_refs = previous_refs
         .into_iter()
         .filter(|credential_ref| !updated_refs.iter().any(|current| current == credential_ref))
-    {
-        cleanup_credential_if_unused(&state, &credential_ref).await;
-    }
+        .collect::<Vec<_>>();
+    cleanup_credentials_if_unused(&state, &orphaned_refs).await;
     Ok(updated)
 }
 
 #[tauri::command]
 async fn delete_session(state: State<'_, AppState>, id: SessionId) -> CommandResult<()> {
     let _credential_lifecycle = state.credential_lifecycle.lock().await;
-    let session = require_session(&state, id)?;
+    let session = require_session_async(&state, id).await?;
     let repository = Arc::clone(&state.repository);
     run_storage_operation(move || repository.delete_session(id).map_err(display_error)).await?;
-    for credential_ref in session_credential_references(&session) {
-        cleanup_credential_if_unused(&state, &credential_ref).await;
-    }
+    let orphaned_refs = session_credential_references(&session);
+    cleanup_credentials_if_unused(&state, &orphaned_refs).await;
     Ok(())
 }
 
@@ -322,7 +325,9 @@ async fn delete_credential(
     credential_ref: String,
 ) -> CommandResult<()> {
     let _credential_lifecycle = state.credential_lifecycle.lock().await;
-    let sessions = state.repository.list_sessions().map_err(display_error)?;
+    let repository = Arc::clone(&state.repository);
+    let sessions =
+        run_storage_operation(move || repository.list_sessions().map_err(display_error)).await?;
     ensure_credential_unreferenced(&sessions, &credential_ref)?;
     credential_delete(Arc::clone(&state.credentials), credential_ref).await
 }
@@ -332,7 +337,7 @@ async fn diagnose_session(
     state: State<'_, AppState>,
     session_id: SessionId,
 ) -> CommandResult<SshDiagnosticReport> {
-    let session = require_session(&state, session_id)?;
+    let session = require_session_async(&state, session_id).await?;
     diagnose_connection(session.host, session.port, session.proxy_jump)
         .await
         .map_err(display_error)
@@ -347,14 +352,12 @@ async fn connect_terminal(
     on_event: Channel<InvokeResponseBody>,
 ) -> CommandResult<ConnectionId> {
     validate_dimensions(columns, rows).map_err(display_error)?;
-    let session = require_session(&state, session_id)?;
+    let session = require_session_async(&state, session_id).await?;
     let authentication = resolve_authentication(&state, &session).await?;
     let proxy_jump_authentication = resolve_proxy_jump_authentication(&state, &session).await?;
-    let known_host = state
-        .repository
-        .find_known_host(&session.host, session.port)
-        .map_err(display_error)?;
-    let proxy_jump_known_host = find_proxy_jump_known_host(&state, session.proxy_jump.as_deref())?;
+    let known_host = find_known_host_for(&state, &session.host, session.port).await?;
+    let proxy_jump_known_host =
+        find_proxy_jump_known_host(&state, session.proxy_jump.as_deref()).await?;
     let auto_start_profiles = session
         .forward_profiles
         .iter()
@@ -428,6 +431,21 @@ async fn connect_terminal(
 
 #[tauri::command]
 async fn terminal_write(
+    state: State<'_, AppState>,
+    connection_id: ConnectionId,
+    data: String,
+) -> CommandResult<()> {
+    state
+        .ssh
+        .send_input(connection_id, data.into_bytes())
+        .await
+        .map_err(display_error)
+}
+
+/// Rare path for bytes that cannot round-trip UTF-8 (xterm `onBinary`, e.g.
+/// a bracketed paste of binary clipboard content).
+#[tauri::command]
+async fn terminal_write_binary(
     state: State<'_, AppState>,
     connection_id: ConnectionId,
     data: Vec<u8>,
@@ -560,34 +578,45 @@ async fn list_forwards(
 }
 
 #[tauri::command]
-fn diagnose_local_port(bind_host: String, bind_port: u16) -> CommandResult<LocalPortDiagnostic> {
-    let bind_host = bind_host.trim().to_owned();
-    if bind_host.is_empty() {
-        return Err("监听地址不能为空".into());
-    }
-    if bind_port == 0 {
-        return Ok(LocalPortDiagnostic {
-            status: "available".into(),
-            detail: "端口 0 会由系统自动分配".into(),
-        });
-    }
-    match std::net::TcpListener::bind((bind_host.as_str(), bind_port)) {
-        Ok(listener) => {
-            drop(listener);
-            Ok(LocalPortDiagnostic {
-                status: "available".into(),
-                detail: format!("{bind_host}:{bind_port} 当前可监听"),
-            })
+async fn diagnose_local_port(
+    bind_host: String,
+    bind_port: u16,
+) -> CommandResult<LocalPortDiagnostic> {
+    // Binding probes can stall on firewalled or slow machines; keep the bind
+    // off the webview main thread.
+    tauri::async_runtime::spawn_blocking(move || {
+        let bind_host = bind_host.trim().to_owned();
+        if bind_host.is_empty() {
+            return Err("监听地址不能为空".into());
         }
-        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => Ok(LocalPortDiagnostic {
-            status: "occupied".into(),
-            detail: format!("{bind_host}:{bind_port} 已被本机其他程序占用"),
-        }),
-        Err(error) => Ok(LocalPortDiagnostic {
-            status: "unavailable".into(),
-            detail: format!("无法监听 {bind_host}:{bind_port}：{error}"),
-        }),
-    }
+        if bind_port == 0 {
+            return Ok(LocalPortDiagnostic {
+                status: "available".into(),
+                detail: "端口 0 会由系统自动分配".into(),
+            });
+        }
+        match std::net::TcpListener::bind((bind_host.as_str(), bind_port)) {
+            Ok(listener) => {
+                drop(listener);
+                Ok(LocalPortDiagnostic {
+                    status: "available".into(),
+                    detail: format!("{bind_host}:{bind_port} 当前可监听"),
+                })
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+                Ok(LocalPortDiagnostic {
+                    status: "occupied".into(),
+                    detail: format!("{bind_host}:{bind_port} 已被本机其他程序占用"),
+                })
+            }
+            Err(error) => Ok(LocalPortDiagnostic {
+                status: "unavailable".into(),
+                detail: format!("无法监听 {bind_host}:{bind_port}：{error}"),
+            }),
+        }
+    })
+    .await
+    .map_err(|error| format!("XSH 本地端口诊断线程异常：{error}"))?
 }
 
 #[tauri::command]
@@ -657,14 +686,12 @@ async fn connect_sftp(
     state: State<'_, AppState>,
     session_id: SessionId,
 ) -> CommandResult<SftpConnectResponse> {
-    let session = require_session(&state, session_id)?;
+    let session = require_session_async(&state, session_id).await?;
     let authentication = resolve_authentication(&state, &session).await?;
     let proxy_jump_authentication = resolve_proxy_jump_authentication(&state, &session).await?;
-    let known_host = state
-        .repository
-        .find_known_host(&session.host, session.port)
-        .map_err(display_error)?;
-    let proxy_jump_known_host = find_proxy_jump_known_host(&state, session.proxy_jump.as_deref())?;
+    let known_host = find_known_host_for(&state, &session.host, session.port).await?;
+    let proxy_jump_known_host =
+        find_proxy_jump_known_host(&state, session.proxy_jump.as_deref()).await?;
     match state
         .sftp
         .connect(SftpConnectOptions {
@@ -869,35 +896,43 @@ async fn prepare_remote_edit_path(app: AppHandle, remote_name: String) -> Comman
 }
 
 #[tauri::command]
-fn create_local_directory(path: PathBuf) -> CommandResult<()> {
-    validate_local_path(&path, "本地目录路径")?;
-    std::fs::create_dir_all(path).map_err(display_error)
+async fn create_local_directory(path: PathBuf) -> CommandResult<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        validate_local_path(&path, "本地目录路径")?;
+        std::fs::create_dir_all(path).map_err(display_error)
+    })
+    .await
+    .map_err(|error| format!("XSH 创建本地目录线程异常：{error}"))?
 }
 
 #[tauri::command]
-fn open_local_path(path: PathBuf) -> CommandResult<()> {
-    validate_local_path(&path, "本地路径")?;
-    if !path.exists() {
-        return Err(format!("本地文件不存在：{}", path.display()));
-    }
-    let metadata = std::fs::metadata(&path).map_err(display_error)?;
-    if !metadata.is_file() && !metadata.is_dir() {
-        return Err("指定路径不是普通文件或目录".into());
-    }
-    #[cfg(target_os = "macos")]
-    let mut command = Command::new("open");
-    #[cfg(target_os = "windows")]
-    let mut command = Command::new("explorer.exe");
-    #[cfg(target_os = "linux")]
-    let mut command = Command::new("xdg-open");
-    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-    return Err("当前平台不支持使用系统默认程序打开文件".to_owned());
+async fn open_local_path(path: PathBuf) -> CommandResult<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        validate_local_path(&path, "本地路径")?;
+        if !path.exists() {
+            return Err(format!("本地文件不存在：{}", path.display()));
+        }
+        let metadata = std::fs::metadata(&path).map_err(display_error)?;
+        if !metadata.is_file() && !metadata.is_dir() {
+            return Err("指定路径不是普通文件或目录".into());
+        }
+        #[cfg(target_os = "macos")]
+        let mut command = Command::new("open");
+        #[cfg(target_os = "windows")]
+        let mut command = Command::new("explorer.exe");
+        #[cfg(target_os = "linux")]
+        let mut command = Command::new("xdg-open");
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+        return Err("当前平台不支持使用系统默认程序打开文件".to_owned());
 
-    command
-        .arg(path)
-        .spawn()
-        .map_err(|error| format!("无法打开本地文件：{error}"))?;
-    Ok(())
+        command
+            .arg(path)
+            .spawn()
+            .map_err(|error| format!("无法打开本地文件：{error}"))?;
+        Ok(())
+    })
+    .await
+    .map_err(|error| format!("XSH 打开本地文件线程异常：{error}"))?
 }
 
 #[tauri::command]
@@ -1077,10 +1112,15 @@ async fn export_sessions(
     include_known_hosts: bool,
 ) -> CommandResult<()> {
     validate_export_password(&password)?;
-    let bundle = state
-        .repository
-        .export_bundle(include_known_hosts)
-        .map_err(display_error)?;
+    let bundle = {
+        let repository = Arc::clone(&state.repository);
+        run_storage_operation(move || {
+            repository
+                .export_bundle(include_known_hosts)
+                .map_err(display_error)
+        })
+        .await?
+    };
     let credential_refs = bundle
         .sessions
         .iter()
@@ -1105,8 +1145,10 @@ async fn export_sessions(
         credentials,
     };
     let payload = serde_json::to_vec(&payload).map_err(display_error)?;
-    let encrypted =
-        encrypt_export_payload(SESSION_EXPORT_MAGIC, &password, &payload).map_err(display_error)?;
+    let encrypted = run_export_crypto_operation(move || {
+        encrypt_export_payload(SESSION_EXPORT_MAGIC, &password, &payload).map_err(display_error)
+    })
+    .await?;
     write_export_file(&target_path, encrypted).await
 }
 
@@ -1118,8 +1160,10 @@ async fn import_sessions(
 ) -> CommandResult<ImportSummary> {
     validate_export_password(&password)?;
     let encrypted = read_export_file(&source_path).await?;
-    let json = decrypt_export_payload(SESSION_EXPORT_MAGIC, &password, &encrypted)
-        .map_err(display_error)?;
+    let json = run_export_crypto_operation(move || {
+        decrypt_export_payload(SESSION_EXPORT_MAGIC, &password, &encrypted).map_err(display_error)
+    })
+    .await?;
     let (bundle, credentials) = match serde_json::from_slice::<SessionExportPayload>(&json) {
         Ok(payload) => {
             if payload.format != SessionExportPayload::FORMAT
@@ -1268,8 +1312,12 @@ async fn export_workspaces(
     if payload.len() > 5 * 1024 * 1024 {
         return Err("工作区导出文件不能超过 5 MiB".into());
     }
-    let encrypted = encrypt_export_payload(WORKSPACE_EXPORT_MAGIC, &password, payload.as_bytes())
-        .map_err(display_error)?;
+    let payload_bytes = payload.into_bytes();
+    let encrypted = run_export_crypto_operation(move || {
+        encrypt_export_payload(WORKSPACE_EXPORT_MAGIC, &password, &payload_bytes)
+            .map_err(display_error)
+    })
+    .await?;
     write_export_file(&target_path, encrypted).await
 }
 
@@ -1277,8 +1325,10 @@ async fn export_workspaces(
 async fn import_workspaces(source_path: PathBuf, password: String) -> CommandResult<String> {
     validate_export_password(&password)?;
     let encrypted = read_export_file(&source_path).await?;
-    let payload = decrypt_export_payload(WORKSPACE_EXPORT_MAGIC, &password, &encrypted)
-        .map_err(display_error)?;
+    let payload = run_export_crypto_operation(move || {
+        decrypt_export_payload(WORKSPACE_EXPORT_MAGIC, &password, &encrypted).map_err(display_error)
+    })
+    .await?;
     String::from_utf8(payload).map_err(|_| "工作区文件内容不是有效文本".into())
 }
 
@@ -1342,37 +1392,35 @@ async fn read_export_file(path: &PathBuf) -> CommandResult<Vec<u8>> {
         .map_err(|error| format!("无法读取加密导出文件：{error}"))
 }
 
-fn find_proxy_jump_known_host(
+async fn find_proxy_jump_known_host(
     state: &AppState,
     proxy_jump: Option<&str>,
 ) -> CommandResult<Option<KnownHost>> {
     let Some(proxy_jump) = proxy_jump else {
         return Ok(None);
     };
-    let proxy = resolve_proxy_jump(proxy_jump).map_err(display_error)?;
-    proxy
-        .map(|proxy| {
-            state
-                .repository
-                .find_known_host(&proxy.host, proxy.port)
-                .map_err(display_error)
-        })
-        .transpose()
-        .map(|value| value.flatten())
+    let proxy = resolve_proxy_jump_async(proxy_jump)
+        .await
+        .map_err(display_error)?;
+    let Some(proxy) = proxy else {
+        return Ok(None);
+    };
+    find_known_host_for(state, &proxy.host, proxy.port).await
 }
 
-fn validate_session_host_key_endpoint(
+async fn validate_session_host_key_endpoint(
     session: &SavedSession,
     approval: &HostKeyApproval,
 ) -> CommandResult<()> {
     let (expected_host, expected_port) = match approval.role {
         HostKeyRole::Target => (session.host.as_str(), session.port),
         HostKeyRole::ProxyJump => {
-            let proxy = session
+            let proxy_jump = session
                 .proxy_jump
                 .as_deref()
                 .ok_or_else(|| "该会话未配置 ProxyJump，不能确认此 Host Key".to_owned())?;
-            let proxy = resolve_proxy_jump(proxy)
+            let proxy = resolve_proxy_jump_async(proxy_jump)
+                .await
                 .map_err(display_error)?
                 .ok_or_else(|| "该会话的 ProxyJump 配置为空，不能确认此 Host Key".to_owned())?;
             if approval.host != proxy.host || approval.port != proxy.port {
@@ -1394,12 +1442,35 @@ fn validate_session_host_key_endpoint(
     Ok(())
 }
 
-fn require_session(state: &AppState, session_id: SessionId) -> CommandResult<SavedSession> {
-    state
-        .repository
-        .get_session(session_id)
-        .map_err(display_error)?
-        .ok_or_else(|| format!("session not found: {session_id}"))
+async fn require_session_async(
+    state: &AppState,
+    session_id: SessionId,
+) -> CommandResult<SavedSession> {
+    let repository = Arc::clone(&state.repository);
+    run_storage_operation(move || {
+        repository
+            .get_session(session_id)
+            .map_err(display_error)?
+            .ok_or_else(|| format!("session not found: {session_id}"))
+    })
+    .await
+}
+
+/// Known-host lookups hit SQLite (and its fsync on commit), so they must ride
+/// `run_storage_operation` like every other storage read on async paths.
+async fn find_known_host_for(
+    state: &AppState,
+    host: &str,
+    port: u16,
+) -> CommandResult<Option<KnownHost>> {
+    let repository = Arc::clone(&state.repository);
+    let host = host.to_owned();
+    run_storage_operation(move || {
+        repository
+            .find_known_host(&host, port)
+            .map_err(display_error)
+    })
+    .await
 }
 
 async fn run_credential_operation<T, F>(operation: F) -> CommandResult<T>
@@ -1430,6 +1501,23 @@ where
     .await
     .map_err(|_| "XSH 本地存储操作超时，请稍后重试".to_owned())?
     .map_err(|error| format!("XSH 本地存储操作线程异常：{error}"))?
+}
+
+/// Export/import file crypto derives its key with Argon2id (~19 MiB working
+/// set, tens to hundreds of milliseconds); it must stay off async workers the
+/// same way vault and SQLite operations do.
+async fn run_export_crypto_operation<T, F>(operation: F) -> CommandResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> CommandResult<T> + Send + 'static,
+{
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        tauri::async_runtime::spawn_blocking(operation),
+    )
+    .await
+    .map_err(|_| "XSH 导出文件加密操作超时，请稍后重试".to_owned())?
+    .map_err(|error| format!("XSH 导出文件加密线程异常：{error}"))?
 }
 
 async fn run_credential_mutation<T, F>(operation: F) -> CommandResult<T>
@@ -1535,12 +1623,37 @@ async fn resolve_authentication_method(
     }
 }
 
-async fn cleanup_credential_if_unused(state: &State<'_, AppState>, credential_ref: &str) {
-    let Ok(sessions) = state.repository.list_sessions() else {
+async fn cleanup_credentials_if_unused(state: &State<'_, AppState>, credential_refs: &[String]) {
+    if credential_refs.is_empty() {
         return;
+    }
+    let repository = Arc::clone(&state.repository);
+    let sessions = match run_storage_operation(move || {
+        repository.list_sessions().map_err(display_error)
+    })
+    .await
+    {
+        Ok(sessions) => sessions,
+        Err(error) => {
+            tracing::warn!(%error, "无法列出会话以检查未引用凭据，跳过本轮清理");
+            return;
+        }
     };
-    if !saved_sessions_reference_credential(&sessions, credential_ref) {
-        let _ = credential_delete(Arc::clone(&state.credentials), credential_ref.to_owned()).await;
+    let mut checked = HashSet::new();
+    let orphaned = credential_refs
+        .iter()
+        .filter(|credential_ref| {
+            checked.insert((*credential_ref).as_str())
+                && !saved_sessions_reference_credential(&sessions, credential_ref)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    for credential_ref in orphaned {
+        if let Err(error) =
+            credential_delete(Arc::clone(&state.credentials), credential_ref.clone()).await
+        {
+            tracing::warn!(%error, credential = %credential_ref, "清理未引用的 XSH 凭据失败");
+        }
     }
 }
 
@@ -1811,15 +1924,6 @@ fn show_main_window<R: tauri::Runtime>(app: &AppHandle<R>) {
     }
 }
 
-fn user_home_directory() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        env::var_os("USERPROFILE").map(PathBuf::from)
-    }
-    #[cfg(not(windows))]
-    { env::var_os("HOME").map(PathBuf::from) }.or_else(|| env::var_os("HOME").map(PathBuf::from))
-}
-
 fn expand_user_path(path: &std::path::Path) -> PathBuf {
     let value = path.to_string_lossy();
     if value == "~" {
@@ -1911,6 +2015,7 @@ pub fn run() {
             diagnose_session,
             connect_terminal,
             terminal_write,
+            terminal_write_binary,
             terminal_acknowledge_output,
             terminal_respond_auth,
             start_local_forward,
@@ -2052,8 +2157,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn host_key_approval_endpoint_must_match_its_session_role() {
+    #[tokio::test]
+    async fn host_key_approval_endpoint_must_match_its_session_role() {
         let mut session = saved_session(
             AuthenticationMethod::Agent {
                 identity_fingerprint: None,
@@ -2067,6 +2172,7 @@ mod tests {
                 &session,
                 &host_key_approval(HostKeyRole::Target, "example.com", 22)
             )
+            .await
             .is_ok()
         );
         assert!(
@@ -2074,6 +2180,7 @@ mod tests {
                 &session,
                 &host_key_approval(HostKeyRole::ProxyJump, "jump.example.com", 2222)
             )
+            .await
             .is_ok()
         );
         assert!(
@@ -2081,6 +2188,7 @@ mod tests {
                 &session,
                 &host_key_approval(HostKeyRole::Target, "jump.example.com", 2222)
             )
+            .await
             .is_err()
         );
         assert!(
@@ -2088,6 +2196,7 @@ mod tests {
                 &session,
                 &host_key_approval(HostKeyRole::ProxyJump, "example.com", 22)
             )
+            .await
             .is_err()
         );
     }

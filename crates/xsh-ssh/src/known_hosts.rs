@@ -8,9 +8,8 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use russh::keys::{HashAlg, parse_public_key_base64};
-use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use xsh_domain::KnownHost;
 
 /// Read the first exact matching host key from the user's OpenSSH file.
@@ -19,7 +18,7 @@ use xsh_domain::KnownHost;
 /// `known_hosts` file should not prevent XSH from connecting. The returned
 /// error still includes the path so callers can decide how to present it.
 pub fn read_user_known_host(host: &str, port: u16) -> Result<Option<KnownHost>> {
-    let Some(home) = home_directory() else {
+    let Some(home) = super::config::user_home_directory() else {
         return Ok(None);
     };
     read_from(home.join(".ssh").join("known_hosts"), host, port)
@@ -109,15 +108,6 @@ fn is_exact_host_match(candidate: &str, host: &str, bracketed_host: &str, port: 
         return port == 22;
     }
     candidate == bracketed_host
-}
-
-fn home_directory() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        env::var_os("USERPROFILE").map(PathBuf::from)
-    }
-    #[cfg(not(windows))]
-    { env::var_os("HOME").map(PathBuf::from) }.or_else(|| env::var_os("HOME").map(PathBuf::from))
 }
 
 #[cfg(test)]

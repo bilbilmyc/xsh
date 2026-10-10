@@ -45,7 +45,8 @@ interface TerminalPaneProps {
 type OutputAcknowledge = (bytes: number) => void;
 
 interface PendingTerminalOutput {
-  data: Uint8Array;
+  text: string;
+  bytes: number;
   acknowledge: OutputAcknowledge;
 }
 
@@ -130,7 +131,7 @@ export function TerminalPane({
     let flushBytesSinceSample = 0;
     let flushDurationSinceSample = 0;
     let lastOutputSampleAt = performance.now();
-    let pendingInput: number[] = [];
+    let pendingInput = "";
     let connectGeneration = 0;
     let reconnectAttempt = 0;
     let wasConnected = false;
@@ -246,10 +247,12 @@ export function TerminalPane({
       pendingOutputHead = 0;
     };
     const writeOutput = (
-      data: Uint8Array,
+      text: string,
       acknowledgements: Map<OutputAcknowledge, number>,
     ) => {
-      terminal.write(data, () => {
+      // Writing the already-decoded text skips xterm's own UTF-8 pass over
+      // the same bytes; acknowledgements stay byte-based via chunk records.
+      terminal.write(text, () => {
         for (const [acknowledge, bytes] of acknowledgements) acknowledge(bytes);
       });
     };
@@ -258,46 +261,36 @@ export function TerminalPane({
       if (disposed) return;
       const startedAt = performance.now();
       const budget = drainAll ? Number.MAX_SAFE_INTEGER : outputFrameBudgetBytes;
-      let bytesToWrite = Math.min(pendingOutputBytes, budget);
-      if (bytesToWrite <= 0) {
+      if (pendingOutputBytes <= 0) {
         reportOutputStats();
         return;
       }
 
-      const firstChunk = pendingOutput[pendingOutputHead];
-      if (firstChunk && firstChunk.data.length <= bytesToWrite && pendingOutputHead === pendingOutput.length - 1) {
-        writeOutput(firstChunk.data, new Map([[firstChunk.acknowledge, firstChunk.data.length]]));
+      // Whole chunks only: backend chunks sit far below the frame budget, so
+      // a frame overshoots by at most one chunk, and byte accounting stays
+      // exactly aligned with chunk boundaries (what the flow window counts).
+      const acknowledgements = new Map<OutputAcknowledge, number>();
+      const parts: string[] = [];
+      let flushedBytes = 0;
+      while (pendingOutputHead < pendingOutput.length) {
+        const chunk = pendingOutput[pendingOutputHead];
+        if (!drainAll && flushedBytes > 0 && flushedBytes + chunk.bytes > budget) break;
+        parts.push(chunk.text);
+        acknowledgements.set(
+          chunk.acknowledge,
+          (acknowledgements.get(chunk.acknowledge) ?? 0) + chunk.bytes,
+        );
+        flushedBytes += chunk.bytes;
         pendingOutputHead += 1;
-        pendingOutputBytes -= firstChunk.data.length;
-        bytesToWrite = firstChunk.data.length;
-      } else {
-        const merged = new Uint8Array(bytesToWrite);
-        const acknowledgements = new Map<OutputAcknowledge, number>();
-        let offset = 0;
-        while (offset < bytesToWrite) {
-          const chunk = pendingOutput[pendingOutputHead];
-          if (!chunk) break;
-          const chunkBytes = Math.min(chunk.data.length, bytesToWrite - offset);
-          merged.set(chunk.data.subarray(0, chunkBytes), offset);
-          acknowledgements.set(
-            chunk.acknowledge,
-            (acknowledgements.get(chunk.acknowledge) ?? 0) + chunkBytes,
-          );
-          offset += chunkBytes;
-          pendingOutputBytes -= chunkBytes;
-          if (chunkBytes === chunk.data.length) {
-            pendingOutputHead += 1;
-          } else {
-            chunk.data = chunk.data.subarray(chunkBytes);
-          }
-        }
-        bytesToWrite = offset;
-        if (bytesToWrite > 0) writeOutput(merged.subarray(0, bytesToWrite), acknowledgements);
+      }
+      pendingOutputBytes -= flushedBytes;
+      if (parts.length > 0) {
+        writeOutput(parts.length === 1 ? parts[0] : parts.join(""), acknowledgements);
       }
 
       compactPendingOutput();
       flushCountSinceSample += 1;
-      flushBytesSinceSample += bytesToWrite;
+      flushBytesSinceSample += flushedBytes;
       flushDurationSinceSample += performance.now() - startedAt;
       reportOutputStats();
       if (!disposed && pendingOutputBytes > 0 && !drainAll && visibleRef.current) {
@@ -323,30 +316,44 @@ export function TerminalPane({
     // While the pane is hidden, output is only logged (session log + triggers
     // still run) and NOT acknowledged, so the backend's flow window pauses the
     // stream; switching back to the pane drains what accumulated.
-    const queueOutput = (chunk: Uint8Array, acknowledge: OutputAcknowledge) => {
-      if (chunk.length === 0) return;
-      pendingOutput.push({ data: chunk, acknowledge });
-      pendingOutputBytes += chunk.length;
-      outputBytesSinceSample += chunk.length;
+    const queueOutput = (text: string, bytes: number, acknowledge: OutputAcknowledge) => {
+      if (bytes === 0) return;
+      pendingOutput.push({ text, bytes, acknowledge });
+      pendingOutputBytes += bytes;
+      outputBytesSinceSample += bytes;
       outputChunksSinceSample += 1;
       reportOutputStats();
       if (visibleRef.current) scheduleOutputFlush();
     };
 
+    // Input rides JSON as a plain string (≈1x size); the legacy number[]
+    // form cost ~4x per byte on every keystroke and paste. Coalescing keeps
+    // the per-keystroke invoke rate bounded.
     const flushInput = () => {
       inputTimer = undefined;
       const connectionId = connectionIdRef.current;
-      if (!connectionId || pendingInput.length === 0) return;
+      if (!connectionId || pendingInput.length === 0) {
+        pendingInput = "";
+        return;
+      }
       const data = pendingInput;
-      pendingInput = [];
+      pendingInput = "";
       void api.terminalWrite(connectionId, data).catch((error) => {
         terminal.writeln(`\r\n\x1b[31m输入发送失败：${String(error)}\x1b[0m`);
       });
     };
-    const queueBytes = (bytes: Uint8Array) => {
-      pendingInput.push(...bytes);
+    const queueText = (text: string) => {
+      pendingInput += text;
       if (pendingInput.length >= 4096) flushInput();
       else if (inputTimer === undefined) inputTimer = window.setTimeout(flushInput, 8);
+    };
+    const queueBinary = (bytes: Uint8Array) => {
+      flushInput();
+      const connectionId = connectionIdRef.current;
+      if (!connectionId) return;
+      void api.terminalWriteBinary(connectionId, Array.from(bytes)).catch((error) => {
+        terminal.writeln(`\r\n\x1b[31m输入发送失败：${String(error)}\x1b[0m`);
+      });
     };
 
     let lastCopyAt = 0;
@@ -438,7 +445,7 @@ export function TerminalPane({
       if (mapping && event.type === "keydown") {
         event.preventDefault();
         event.stopImmediatePropagation();
-        queueBytes(new TextEncoder().encode(decodeTerminalKeyMapping(mapping.text)));
+        queueText(decodeTerminalKeyMapping(mapping.text));
         return false;
       }
       const copy = isCopyShortcut(event);
@@ -570,10 +577,10 @@ export function TerminalPane({
       }, 120);
     });
     const dataDisposable = terminal.onData((data) => {
-      queueBytes(new TextEncoder().encode(data));
+      queueText(data);
     });
     const binaryDisposable = terminal.onBinary((data) => {
-      queueBytes(Uint8Array.from(data, (character) => character.charCodeAt(0)));
+      queueBinary(Uint8Array.from(data, (character) => character.charCodeAt(0)));
     });
     const resizeDisposable = terminal.onResize(({ cols, rows }) => {
       if (resizeTimer) window.clearTimeout(resizeTimer);
@@ -701,7 +708,7 @@ export function TerminalPane({
         if (message instanceof ArrayBuffer || message instanceof Uint8Array) {
           const bytes = message instanceof Uint8Array ? message : new Uint8Array(message);
           const output = outputDecoder.decode(bytes, { stream: true });
-          sessionLog.append(output);
+          sessionLog.append(output, bytes.length);
           const triggers = session.terminal.triggers ?? [];
           if (triggers.length > 0) {
             for (const match of triggerMatcher.match(output, triggers)) {
@@ -714,7 +721,7 @@ export function TerminalPane({
               });
             }
           }
-          queueOutput(bytes, acknowledgeOutput);
+          queueOutput(output, bytes.length, acknowledgeOutput);
           return;
         }
         const event = message as TerminalEvent;
@@ -942,7 +949,7 @@ export function TerminalPane({
     lastCommandIdRef.current = command.id;
     const terminal = terminalRef.current;
     const text = normalizeTerminalCommand(command.text);
-    void api.terminalWrite(connectionId, Array.from(new TextEncoder().encode(text)))
+    void api.terminalWrite(connectionId, text)
       .then(() => {
         terminal?.focus();
         onCommandResult({ id: command.id, ok: true, batchRunId: command.batchRunId, targetTabId: command.targetTabId });

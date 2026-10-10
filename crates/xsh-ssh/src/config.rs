@@ -67,7 +67,7 @@ impl SshConfigEntry {
     /// to `Include`d files without touching the main config need a restart to
     /// be picked up. Async callers should prefer [`Self::read_user_config_async`].
     pub fn read_user_config() -> Result<Vec<Self>> {
-        let home = home_directory()
+        let home = user_home_directory()
             .ok_or_else(|| anyhow!("could not determine the user home directory"))?;
         let path = home.join(".ssh").join("config");
         let signature = user_config_signature(&path);
@@ -163,6 +163,15 @@ pub fn resolve_proxy_jump(value: &str) -> Result<Option<ProxyJumpTarget>> {
     }))
 }
 
+/// Blocking-safe variant of [`resolve_proxy_jump`] for async callers: the
+/// first call after a config edit walks `Include` globs on the filesystem.
+pub async fn resolve_proxy_jump_async(value: &str) -> Result<Option<ProxyJumpTarget>> {
+    let value = value.to_owned();
+    tokio::task::spawn_blocking(move || resolve_proxy_jump(&value))
+        .await
+        .context("SSH ProxyJump resolution task failed")?
+}
+
 fn parse_jump_address(value: &str) -> Result<(String, u16)> {
     if let Some(rest) = value.strip_prefix('[') {
         let Some((host, port)) = rest.split_once(']') else {
@@ -193,7 +202,9 @@ fn parse_jump_address(value: &str) -> Result<(String, u16)> {
     Ok((value.to_owned(), 22))
 }
 
-fn home_directory() -> Option<PathBuf> {
+/// The one true home-directory probe; the Tauri layer and every xsh-ssh
+/// module use this so USERPROFILE/HOME fallbacks cannot drift apart.
+pub fn user_home_directory() -> Option<PathBuf> {
     #[cfg(windows)]
     {
         env::var_os("USERPROFILE").map(PathBuf::from)
@@ -368,13 +379,13 @@ fn current_username() -> Option<String> {
 
 fn expand_path(value: &str) -> PathBuf {
     if value == "~" {
-        return home_directory().unwrap_or_else(|| PathBuf::from(value));
+        return user_home_directory().unwrap_or_else(|| PathBuf::from(value));
     }
     let rest = value
         .strip_prefix("~/")
         .or_else(|| value.strip_prefix("~\\"));
     if let Some(rest) = rest
-        && let Some(home) = home_directory()
+        && let Some(home) = user_home_directory()
     {
         return home.join(rest);
     }

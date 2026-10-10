@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent } from "react";
 import { Channel } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open, save } from "@tauri-apps/plugin-dialog";
@@ -30,7 +30,7 @@ import {
   isActiveTransferStatus,
   isTransferOwnedByConnection,
 } from "../sftp-transfer-scope";
-import { formatTransferWaitingState, sortTransfersForDisplay } from "../transfer-queue";
+import { SftpTransferStore, formatTransferWaitingState, sortTransfersForDisplay } from "../transfer-queue";
 import type { RemoteEntry, SavedSession, TransferEvent } from "../types";
 
 interface SftpPanelProps {
@@ -75,7 +75,6 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
   const [anchorPath, setAnchorPath] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [transfers, setTransfers] = useState<Record<string, TransferEvent>>({});
   const [pendingUploads, setPendingUploads] = useState<PendingUpload[]>([]);
   const [draggingFiles, setDraggingFiles] = useState(false);
   const [listContextMenu, setListContextMenu] = useState<{ x: number; y: number; entry: RemoteEntry } | null>(null);
@@ -89,10 +88,9 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
   const uploadConflictResolverRef = useRef<((choice: UploadConflictChoice | null) => void) | null>(null);
   const enqueueUploadsRef = useRef<(paths: string[]) => Promise<void>>(async () => undefined);
 
-  const transferItems = useMemo(
-    () => sortTransfersForDisplay(Object.values(transfers)),
-    [transfers],
-  );
+  const transferStoreRef = useRef<SftpTransferStore | null>(null);
+  if (transferStoreRef.current === null) transferStoreRef.current = new SftpTransferStore();
+  const transferStore = transferStoreRef.current;
   const selectedEntries = useMemo(
     () => entries.filter((entry) => selectedPaths.has(entry.path)),
     [entries, selectedPaths],
@@ -176,7 +174,7 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
 
   useEffect(() => {
     if (!connectionId) {
-      setTransfers({});
+      transferStore.reset();
       return;
     }
     let disposed = false;
@@ -184,7 +182,7 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
       try {
         const next = await api.listTransfers();
         if (!disposed) {
-          setTransfers(indexTransfersForConnection(next.transfers, connectionId));
+          transferStore.replaceAll(indexTransfersForConnection(next.transfers, connectionId));
         }
       } catch {
         // A disconnected panel must not surface background polling errors.
@@ -196,7 +194,7 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
       disposed = true;
       window.clearInterval(timer);
     };
-  }, [connectionId]);
+  }, [connectionId, transferStore]);
 
   useEffect(() => {
     let disposed = false;
@@ -244,7 +242,7 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
 
   const updateTransfer = (event: TransferEvent) => {
     if (!isTransferOwnedByConnection(event, connectionId)) return;
-    setTransfers((current) => ({ ...current, [event.transferId]: event }));
+    transferStore.upsert(event);
   };
 
   const controlTransfer = async (
@@ -584,11 +582,7 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
       setError("该传输任务不属于当前 SFTP 连接，无法在此重试");
       return;
     }
-    setTransfers((current) => {
-      const next = { ...current };
-      delete next[transfer.transferId];
-      return next;
-    });
+    transferStore.remove(transfer.transferId);
     try {
       if (transfer.direction === "upload") {
         await waitForTransfer((channel) =>
@@ -607,24 +601,18 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
   };
 
   const removeTransfer = async (transferId: string) => {
-    if (!connectionId || transfers[transferId]?.connectionId !== connectionId) return;
+    if (!connectionId || transferStore.get(transferId)?.connectionId !== connectionId) return;
     await api.removeTransfer(transferId);
-    setTransfers((current) => {
-      const next = { ...current };
-      delete next[transferId];
-      return next;
-    });
+    transferStore.remove(transferId);
   };
 
   const clearFinishedTransfers = async () => {
     if (!connectionId) return;
-    const finished = transferItems.filter((transfer) =>
+    const finished = transferStore.list().filter((transfer) =>
       isTransferOwnedByConnection(transfer, connectionId)
       && !isActiveTransferStatus(transfer.status));
     await Promise.all(finished.map((transfer) => api.removeTransfer(transfer.transferId).catch(() => undefined)));
-    setTransfers((current) => Object.fromEntries(
-      Object.entries(current).filter(([, transfer]) => isActiveTransferStatus(transfer.status)),
-    ));
+    transferStore.retainActiveOnly();
   };
 
   const cancelActiveTransfers = async () => {
@@ -632,14 +620,11 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
     const pendingCount = pendingUploads.length;
     uploadQueueCancelEpochRef.current += 1;
     cancelWaitingUploadSlots();
-    const active = transferItems.filter((transfer) =>
+    const active = transferStore.list().filter((transfer) =>
       isTransferOwnedByConnection(transfer, connectionId)
       && isActiveTransferStatus(transfer.status));
     const updates = await Promise.all(active.map((transfer) => api.cancelTransfer(transfer.transferId).catch(() => null)));
-    setTransfers((current) => ({
-      ...current,
-      ...Object.fromEntries(updates.filter((transfer): transfer is TransferEvent => transfer !== null).map((transfer) => [transfer.transferId, transfer])),
-    }));
+    transferStore.upsertAll(updates.filter((transfer): transfer is TransferEvent => transfer !== null));
     setPendingUploads([]);
     onToast?.(`已请求取消 ${active.length + pendingCount} 个传输任务。`);
   };
@@ -845,73 +830,18 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
           ]}
         />
       )}
-      {(transferItems.length > 0 || pendingUploads.length > 0 || remoteEdit) && (
-        <div className="transfer-list">
-      {remoteEdit && (
-            <div className="remote-edit-card">
-              <div className="transfer-title">远程编辑</div>
-              <div className="remote-edit-copy">
-                <strong title={remoteEdit.localPath}>{remoteEdit.fileName}</strong>
-                <small>{remoteEdit.status === "downloading" ? "正在下载…" : remoteEdit.status === "uploading" ? "正在重新上传…" : "已下载，编辑后点击重新上传"}</small>
-              </div>
-              <div className="remote-edit-actions">
-                <button onClick={() => void reopenRemoteEdit()} disabled={remoteEdit.status !== "ready"}>打开副本</button>
-                <button className="primary-button" onClick={() => void uploadEditedFile()} disabled={remoteEdit.status !== "ready"}>重新上传</button>
-              </div>
-            </div>
-          )}
-          {(transferItems.length > 0 || pendingUploads.length > 0) && (
-            <>
-              <div className="transfer-title transfer-title-row">
-                <span>传输任务{pendingUploads.length ? ` · 待提交 ${pendingUploads.length}` : ""}</span>
-                <span className="transfer-list-actions">
-                  {(pendingUploads.length > 0 || transferItems.some((transfer) => isActiveTransferStatus(transfer.status))) && <button onClick={() => void cancelActiveTransfers()}>取消全部</button>}
-                  {transferItems.some((transfer) => !isActiveTransferStatus(transfer.status)) && <button onClick={() => void clearFinishedTransfers()}>清理已结束</button>}
-                </span>
-              </div>
-              {pendingUploads.map((task) => (
-                <div className="pending-upload" key={task.id} title={task.localPath}>待提交 · {task.localPath.split(/[\/]/).pop()}</div>
-              ))}
-              {transferItems.map((transfer) => {
-                const percent = transfer.totalBytes ? Math.min(100, Math.round((transfer.transferredBytes / transfer.totalBytes) * 100)) : 0;
-                const waiting = formatTransferWaitingState(transfer);
-                return (
-                  <div className="transfer-item" key={transfer.transferId}>
-                    <div className="transfer-copy">
-                      <span>{transfer.direction === "upload" ? "上传" : "下载"} · {transfer.remotePath.split("/").pop()}</span>
-                      <small className={`transfer-status ${transfer.status}`} title={transfer.error ?? undefined}>
-                        {formatTransferStatus(transfer.status)}{waiting ? ` · ${waiting}` : ""} · {percent}% · {formatBytes(transfer.transferredBytes)}{transfer.totalBytes ? ` / ${formatBytes(transfer.totalBytes)}` : ""}{transfer.speedBytesPerSecond !== null && transfer.status === "running" ? ` · ${formatSpeed(transfer.speedBytesPerSecond)}` : ""}
-                      </small>
-                      {transfer.error && <small className="transfer-error" title={transfer.error}>{transfer.error}</small>}
-                    </div>
-                    <div className="progress-track"><div className={transfer.status} style={{ width: `${percent}%` }} /></div>
-                    <div className="transfer-actions">
-                      {(transfer.status === "queued" || transfer.status === "running") && (
-                        <>
-                          <button onClick={() => void controlTransfer(transfer, "pause")} title="暂停传输"><Pause size={12} /></button>
-                          <button onClick={() => void controlTransfer(transfer, "cancel")} title="取消传输"><X size={12} /></button>
-                        </>
-                      )}
-                      {transfer.status === "paused" && (
-                        <>
-                          <button onClick={() => void controlTransfer(transfer, "resume")} title="继续传输"><Play size={12} /></button>
-                          <button onClick={() => void controlTransfer(transfer, "cancel")} title="取消传输"><X size={12} /></button>
-                        </>
-                      )}
-                      {(transfer.status === "failed" || transfer.status === "cancelled") && (
-                        <button onClick={() => void retryTransfer(transfer)} title="重试传输"><RefreshCw size={12} /></button>
-                      )}
-                      {(transfer.status === "completed" || transfer.status === "failed" || transfer.status === "cancelled") && (
-                        <button onClick={() => void removeTransfer(transfer.transferId)} title="移除任务"><Trash2 size={12} /></button>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </>
-          )}
-        </div>
-      )}
+      <SftpTransferSection
+        store={transferStore}
+        pendingUploads={pendingUploads}
+        remoteEdit={remoteEdit}
+        onControlTransfer={(transfer, action) => void controlTransfer(transfer, action)}
+        onRetry={(transfer) => void retryTransfer(transfer)}
+        onRemove={(transferId) => void removeTransfer(transferId)}
+        onCancelActive={() => void cancelActiveTransfers()}
+        onClearFinished={() => void clearFinishedTransfers()}
+        onReopenRemoteEdit={() => void reopenRemoteEdit()}
+        onUploadEditedFile={() => void uploadEditedFile()}
+      />
       {uploadConflict && (
         <UploadConflictModal
           fileName={uploadConflict.fileName}
@@ -934,6 +864,111 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
 
 function isValidRemoteName(value: string) {
   return Boolean(value) && value !== "." && value !== ".." && !/[\\/]/.test(value);
+}
+
+interface SftpTransferSectionProps {
+  store: SftpTransferStore;
+  pendingUploads: PendingUpload[];
+  remoteEdit: RemoteEditState | null;
+  onControlTransfer: (transfer: TransferEvent, action: "pause" | "resume" | "cancel") => void;
+  onRetry: (transfer: TransferEvent) => void;
+  onRemove: (transferId: string) => void;
+  onCancelActive: () => void;
+  onClearFinished: () => void;
+  onReopenRemoteEdit: () => void;
+  onUploadEditedFile: () => void;
+}
+
+/**
+ * Subscribes to the transfer store directly so per-progress re-renders stay
+ * inside this section; the rest of the SFTP panel (directory listing, toolbars)
+ * renders independently of transfer events.
+ */
+function SftpTransferSection({
+  store,
+  pendingUploads,
+  remoteEdit,
+  onControlTransfer,
+  onRetry,
+  onRemove,
+  onCancelActive,
+  onClearFinished,
+  onReopenRemoteEdit,
+  onUploadEditedFile,
+}: SftpTransferSectionProps) {
+  const transfers = useSyncExternalStore(store.subscribe, store.getSnapshot);
+  const transferItems = useMemo(
+    () => sortTransfersForDisplay(Object.values(transfers)),
+    [transfers],
+  );
+  if (transferItems.length === 0 && pendingUploads.length === 0 && !remoteEdit) return null;
+  return (
+    <div className="transfer-list">
+      {remoteEdit && (
+        <div className="remote-edit-card">
+          <div className="transfer-title">远程编辑</div>
+          <div className="remote-edit-copy">
+            <strong title={remoteEdit.localPath}>{remoteEdit.fileName}</strong>
+            <small>{remoteEdit.status === "downloading" ? "正在下载…" : remoteEdit.status === "uploading" ? "正在重新上传…" : "已下载，编辑后点击重新上传"}</small>
+          </div>
+          <div className="remote-edit-actions">
+            <button onClick={onReopenRemoteEdit} disabled={remoteEdit.status !== "ready"}>打开副本</button>
+            <button className="primary-button" onClick={onUploadEditedFile} disabled={remoteEdit.status !== "ready"}>重新上传</button>
+          </div>
+        </div>
+      )}
+      {(transferItems.length > 0 || pendingUploads.length > 0) && (
+        <>
+          <div className="transfer-title transfer-title-row">
+            <span>传输任务{pendingUploads.length ? ` · 待提交 ${pendingUploads.length}` : ""}</span>
+            <span className="transfer-list-actions">
+              {(pendingUploads.length > 0 || transferItems.some((transfer) => isActiveTransferStatus(transfer.status))) && <button onClick={onCancelActive}>取消全部</button>}
+              {transferItems.some((transfer) => !isActiveTransferStatus(transfer.status)) && <button onClick={onClearFinished}>清理已结束</button>}
+            </span>
+          </div>
+          {pendingUploads.map((task) => (
+            <div className="pending-upload" key={task.id} title={task.localPath}>待提交 · {task.localPath.split(/[\/]/).pop()}</div>
+          ))}
+          {transferItems.map((transfer) => {
+            const percent = transfer.totalBytes ? Math.min(100, Math.round((transfer.transferredBytes / transfer.totalBytes) * 100)) : 0;
+            const waiting = formatTransferWaitingState(transfer);
+            return (
+              <div className="transfer-item" key={transfer.transferId}>
+                <div className="transfer-copy">
+                  <span>{transfer.direction === "upload" ? "上传" : "下载"} · {transfer.remotePath.split("/").pop()}</span>
+                  <small className={`transfer-status ${transfer.status}`} title={transfer.error ?? undefined}>
+                    {formatTransferStatus(transfer.status)}{waiting ? ` · ${waiting}` : ""} · {percent}% · {formatBytes(transfer.transferredBytes)}{transfer.totalBytes ? ` / ${formatBytes(transfer.totalBytes)}` : ""}{transfer.speedBytesPerSecond !== null && transfer.status === "running" ? ` · ${formatSpeed(transfer.speedBytesPerSecond)}` : ""}
+                  </small>
+                  {transfer.error && <small className="transfer-error" title={transfer.error}>{transfer.error}</small>}
+                </div>
+                <div className="progress-track"><div className={transfer.status} style={{ width: `${percent}%` }} /></div>
+                <div className="transfer-actions">
+                  {(transfer.status === "queued" || transfer.status === "running") && (
+                    <>
+                      <button onClick={() => onControlTransfer(transfer, "pause")} title="暂停传输"><Pause size={12} /></button>
+                      <button onClick={() => onControlTransfer(transfer, "cancel")} title="取消传输"><X size={12} /></button>
+                    </>
+                  )}
+                  {transfer.status === "paused" && (
+                    <>
+                      <button onClick={() => onControlTransfer(transfer, "resume")} title="继续传输"><Play size={12} /></button>
+                      <button onClick={() => onControlTransfer(transfer, "cancel")} title="取消传输"><X size={12} /></button>
+                    </>
+                  )}
+                  {(transfer.status === "failed" || transfer.status === "cancelled") && (
+                    <button onClick={() => onRetry(transfer)} title="重试传输"><RefreshCw size={12} /></button>
+                  )}
+                  {(transfer.status === "completed" || transfer.status === "failed" || transfer.status === "cancelled") && (
+                    <button onClick={() => onRemove(transfer.transferId)} title="移除任务"><Trash2 size={12} /></button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </>
+      )}
+    </div>
+  );
 }
 
 function joinLocalPath(parent: string, child: string) {

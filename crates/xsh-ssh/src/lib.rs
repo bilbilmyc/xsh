@@ -3,7 +3,7 @@ pub mod known_hosts;
 mod output_flow;
 
 use anyhow::{Context, anyhow, bail};
-use config::resolve_proxy_jump;
+use config::resolve_proxy_jump_async;
 use output_flow::{TERMINAL_OUTPUT_CHUNK_BYTES, TerminalOutputFlow};
 use russh::client;
 use russh::keys::agent::AgentIdentity;
@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, lookup_host};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -233,11 +233,10 @@ pub async fn diagnose_connection(
     port: u16,
     proxy_jump: Option<String>,
 ) -> anyhow::Result<SshDiagnosticReport> {
-    let proxy = proxy_jump
-        .as_deref()
-        .map(resolve_proxy_jump)
-        .transpose()?
-        .flatten();
+    let proxy = match proxy_jump.as_deref() {
+        Some(value) => resolve_proxy_jump_async(value).await?,
+        None => None,
+    };
     let target = diagnose_endpoint(&host, port, proxy.is_none()).await;
     let proxy_report = if let Some(proxy) = proxy {
         Some(diagnose_endpoint(&proxy.host, proxy.port, true).await)
@@ -441,6 +440,23 @@ struct ManagedConnection {
     output_flow: Arc<TerminalOutputFlow>,
 }
 
+/// Removes the connection map entry when the runner task ends — including a
+/// panic, which would otherwise leak the entry forever and skew
+/// `active_connection_count`. `try_lock` keeps `drop` non-blocking and safe
+/// outside a runtime context.
+struct ConnectionEntryGuard {
+    inner: Arc<ManagerInner>,
+    connection_id: ConnectionId,
+}
+
+impl Drop for ConnectionEntryGuard {
+    fn drop(&mut self) {
+        if let Ok(mut connections) = self.inner.connections.try_lock() {
+            connections.remove(&self.connection_id);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SshSessionManager {
     inner: Arc<ManagerInner>,
@@ -465,6 +481,10 @@ impl SshSessionManager {
         );
 
         let inner = Arc::clone(&self.inner);
+        let entry_guard = ConnectionEntryGuard {
+            inner: Arc::clone(&inner),
+            connection_id,
+        };
         tokio::spawn(async move {
             if let Err(error) = run_terminal_connection(
                 options,
@@ -482,10 +502,10 @@ impl SshSessionManager {
                     .send(TerminalEvent::StateChanged(ConnectionState::Failed))
                     .await;
             }
-            inner.connections.lock().await.remove(&connection_id);
             let _ = event_tx
                 .send(TerminalEvent::StateChanged(ConnectionState::Disconnected))
                 .await;
+            drop(entry_guard);
         });
 
         ConnectionSubscription {
@@ -558,23 +578,15 @@ impl SshSessionManager {
         target_host: String,
         target_port: u16,
     ) -> anyhow::Result<ForwardInfo> {
-        let (reply, receiver) = oneshot::channel();
-        self.send(
-            connection_id,
-            SessionCommand::StartLocalForward {
-                forward_id: Uuid::new_v4(),
-                bind_host,
-                bind_port,
-                target_host,
-                target_port,
-                reply,
-            },
-        )
+        self.request(connection_id, |reply| SessionCommand::StartLocalForward {
+            forward_id: Uuid::new_v4(),
+            bind_host,
+            bind_port,
+            target_host,
+            target_port,
+            reply,
+        })
         .await
-        .map_err(|error| anyhow!(error))?;
-        receiver
-            .await
-            .map_err(|_| anyhow!("SSH 转发管理器已关闭"))?
     }
 
     pub async fn start_dynamic_forward(
@@ -583,21 +595,13 @@ impl SshSessionManager {
         bind_host: String,
         bind_port: u16,
     ) -> anyhow::Result<ForwardInfo> {
-        let (reply, receiver) = oneshot::channel();
-        self.send(
-            connection_id,
-            SessionCommand::StartDynamicForward {
-                forward_id: Uuid::new_v4(),
-                bind_host,
-                bind_port,
-                reply,
-            },
-        )
+        self.request(connection_id, |reply| SessionCommand::StartDynamicForward {
+            forward_id: Uuid::new_v4(),
+            bind_host,
+            bind_port,
+            reply,
+        })
         .await
-        .map_err(|error| anyhow!(error))?;
-        receiver
-            .await
-            .map_err(|_| anyhow!("SSH 转发管理器已关闭"))?
     }
 
     pub async fn start_remote_forward(
@@ -608,23 +612,15 @@ impl SshSessionManager {
         local_host: String,
         local_port: u16,
     ) -> anyhow::Result<ForwardInfo> {
-        let (reply, receiver) = oneshot::channel();
-        self.send(
-            connection_id,
-            SessionCommand::StartRemoteForward {
-                forward_id: Uuid::new_v4(),
-                bind_host,
-                bind_port,
-                local_host,
-                local_port,
-                reply,
-            },
-        )
+        self.request(connection_id, |reply| SessionCommand::StartRemoteForward {
+            forward_id: Uuid::new_v4(),
+            bind_host,
+            bind_port,
+            local_host,
+            local_port,
+            reply,
+        })
         .await
-        .map_err(|error| anyhow!(error))?;
-        receiver
-            .await
-            .map_err(|_| anyhow!("SSH 转发管理器已关闭"))?
     }
 
     /// Start a persisted forward using its stable profile id as the runtime id.
@@ -636,16 +632,11 @@ impl SshSessionManager {
         profile: ForwardProfile,
     ) -> anyhow::Result<ForwardInfo> {
         validate_forward_profile(&profile)?;
-        let (reply, receiver) = oneshot::channel();
-        self.send(
-            connection_id,
-            SessionCommand::StartForwardProfile { profile, reply },
-        )
+        self.request(connection_id, |reply| SessionCommand::StartForwardProfile {
+            profile,
+            reply,
+        })
         .await
-        .map_err(|error| anyhow!(error))?;
-        receiver
-            .await
-            .map_err(|_| anyhow!("SSH 转发管理器已关闭"))?
     }
 
     pub async fn stop_forward(
@@ -653,34 +644,41 @@ impl SshSessionManager {
         connection_id: ConnectionId,
         forward_id: Uuid,
     ) -> anyhow::Result<()> {
-        let (reply, receiver) = oneshot::channel();
-        self.send(
-            connection_id,
-            SessionCommand::StopForward { forward_id, reply },
-        )
+        self.request(connection_id, |reply| SessionCommand::StopForward {
+            forward_id,
+            reply,
+        })
         .await
-        .map_err(|error| anyhow!(error))?;
-        receiver
-            .await
-            .map_err(|_| anyhow!("SSH 转发管理器已关闭"))??;
-        Ok(())
     }
 
     pub async fn list_forwards(
         &self,
         connection_id: ConnectionId,
     ) -> anyhow::Result<Vec<ForwardInfo>> {
+        self.request(connection_id, |reply| SessionCommand::ListForwards {
+            reply,
+        })
+        .await
+    }
+
+    pub async fn active_connection_count(&self) -> usize {
+        self.inner.connections.lock().await.len()
+    }
+
+    /// Every forward control API is the same "oneshot reply + send to the
+    /// session loop + await" shape; this keeps the channel-closed error
+    /// mapping in one place.
+    async fn request<T, F>(&self, connection_id: ConnectionId, build: F) -> anyhow::Result<T>
+    where
+        F: FnOnce(oneshot::Sender<anyhow::Result<T>>) -> SessionCommand,
+    {
         let (reply, receiver) = oneshot::channel();
-        self.send(connection_id, SessionCommand::ListForwards { reply })
+        self.send(connection_id, build(reply))
             .await
             .map_err(|error| anyhow!(error))?;
         receiver
             .await
             .map_err(|_| anyhow!("SSH 转发管理器已关闭"))?
-    }
-
-    pub async fn active_connection_count(&self) -> usize {
-        self.inner.connections.lock().await.len()
     }
 
     async fn send(
@@ -1001,10 +999,17 @@ async fn authenticate_session(
             private_key_path,
             passphrase,
         } => {
-            let key = load_secret_key(
-                &private_key_path,
-                passphrase.as_ref().map(|value| value.as_str()),
-            )
+            // Decrypting an encrypted OpenSSH key runs the bcrypt KDF, which
+            // can block for hundreds of milliseconds; keep it off the async
+            // worker.
+            let key = tokio::task::spawn_blocking(move || {
+                load_secret_key(
+                    &private_key_path,
+                    passphrase.as_ref().map(|value| value.as_str()),
+                )
+            })
+            .await
+            .context("私钥解密任务失败")?
             .context("无法读取或解密 OpenSSH 私钥")?;
             let hash_algorithm = session
                 .best_supported_rsa_hash()
@@ -1047,12 +1052,10 @@ async fn run_terminal_connection(
         .await
         .ok();
 
-    let proxy_target = options
-        .proxy_jump
-        .as_deref()
-        .map(resolve_proxy_jump)
-        .transpose()?
-        .flatten();
+    let proxy_target = match options.proxy_jump.as_deref() {
+        Some(value) => resolve_proxy_jump_async(value).await?,
+        None => None,
+    };
     let mut proxy_session: Option<client::Handle<HostKeyHandler>> = None;
     let remote_forwards = Arc::new(Mutex::new(HashMap::new()));
     let target_handler = HostKeyHandler {
@@ -1075,58 +1078,41 @@ async fn run_terminal_connection(
             output_flow: Arc::clone(&output_flow),
             remote_forwards: Arc::clone(&remote_forwards),
         };
-        let mut jump_session = client::connect(
+        let mut jump_session = connect_jump_session(
             Arc::new(client_config(options.keepalive_seconds)),
-            (proxy.host.as_str(), proxy.port),
+            &proxy,
             proxy_handler,
         )
-        .await
-        .with_context(|| {
-            format!(
-                "failed to connect to ProxyJump {}:{}",
-                proxy.host, proxy.port
-            )
-        })?;
+        .await?;
         let proxy_username = options
             .proxy_jump_username
             .as_deref()
             .or(proxy.username.as_deref())
-            .unwrap_or(&options.username);
+            .unwrap_or(&options.username)
+            .to_owned();
         let proxy_authentication = options
             .proxy_jump_authentication
             .clone()
             .unwrap_or_else(|| options.authentication.clone());
         authenticate_session(
             &mut jump_session,
-            proxy_username,
+            &proxy_username,
             proxy_authentication,
             &mut commands,
             &event_tx,
         )
         .await
         .context("ProxyJump authentication failed")?;
-        let channel = jump_session
-            .channel_open_direct_tcpip(options.host.clone(), options.port.into(), "127.0.0.1", 0)
-            .await
-            .with_context(|| {
-                format!(
-                    "ProxyJump could not open {}:{} through {}:{}",
-                    options.host, options.port, proxy.host, proxy.port
-                )
-            })?;
-        proxy_session = Some(jump_session);
-        client::connect_stream(
+        let target_session = connect_target_via_jump(
             Arc::new(client_config(options.keepalive_seconds)),
-            channel.into_stream(),
+            &mut jump_session,
+            &options.host,
+            options.port,
             target_handler,
         )
-        .await
-        .with_context(|| {
-            format!(
-                "failed to connect to {}:{} through ProxyJump",
-                options.host, options.port
-            )
-        })?
+        .await?;
+        proxy_session = Some(jump_session);
+        target_session
     } else {
         client::connect(
             Arc::new(client_config(options.keepalive_seconds)),
@@ -1273,9 +1259,9 @@ async fn run_terminal_connection(
                             forward_profile_reconciliation(existing.as_ref(), &profile);
                         let result = async {
                             match reconciliation {
-                                ForwardProfileReconciliation::Reuse => {
-                                    Ok(existing.expect("reconciliation requires a runtime"))
-                                }
+                                ForwardProfileReconciliation::Reuse => existing.ok_or_else(|| {
+                                    anyhow!("端口转发复用失败：运行时信息缺失")
+                                }),
                                 ForwardProfileReconciliation::Start
                                 | ForwardProfileReconciliation::Restart => {
                                     if matches!(reconciliation, ForwardProfileReconciliation::Restart) {
@@ -1300,16 +1286,19 @@ async fn run_terminal_connection(
 
                                     match profile.kind {
                                         ForwardKind::Local => {
+                                            let (target_host, target_port) = match (
+                                                profile.target_host,
+                                                profile.target_port,
+                                            ) {
+                                                (Some(host), Some(port)) => (host, port),
+                                                _ => bail!("本地端口转发缺少目标地址或端口"),
+                                            };
                                             let (listener, mut info) = start_local_listener(
                                                 forward_id,
                                                 profile.bind_host,
                                                 profile.bind_port,
-                                                profile
-                                                    .target_host
-                                                    .expect("validated local target host"),
-                                                profile
-                                                    .target_port
-                                                    .expect("validated local target port"),
+                                                target_host,
+                                                target_port,
                                             )
                                             .await?;
                                             info.profile_id = Some(forward_id);
@@ -1334,12 +1323,13 @@ async fn run_terminal_connection(
                                         }
                                         ForwardKind::Remote => {
                                             let bind_host = profile.bind_host;
-                                            let local_host = profile
-                                                .target_host
-                                                .expect("validated remote target host");
-                                            let local_port = profile
-                                                .target_port
-                                                .expect("validated remote target port");
+                                            let (local_host, local_port) = match (
+                                                profile.target_host,
+                                                profile.target_port,
+                                            ) {
+                                                (Some(host), Some(port)) => (host, port),
+                                                _ => bail!("远程端口转发缺少目标地址或端口"),
+                                            };
                                             let info = session
                                                 .tcpip_forward(
                                                     bind_host.clone(),
@@ -1736,7 +1726,26 @@ async fn handle_socks5_connection(
     mut stream: TcpStream,
     origin: std::net::SocketAddr,
 ) -> anyhow::Result<()> {
-    let _ = origin;
+    let (host, target_port) = read_socks5_connect_request(&mut stream).await?;
+    let channel = session
+        .channel_open_direct_tcpip(
+            host.clone(),
+            target_port.into(),
+            origin.ip().to_string(),
+            origin.port().into(),
+        )
+        .await?;
+    stream.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await?;
+    proxy_channel_with_tcp(channel, stream).await
+}
+
+/// Reads and validates a SOCKS5 greeting plus CONNECT request, sending the
+/// no-auth method selection in between. Separated from the connection handler
+/// so the byte-level protocol is unit-testable against crafted inputs.
+async fn read_socks5_connect_request<R>(stream: &mut R) -> anyhow::Result<(String, u16)>
+where
+    R: AsyncRead + AsyncWrite + Unpin,
+{
     let mut header = [0_u8; 2];
     stream.read_exact(&mut header).await?;
     if header[0] != 5 {
@@ -1772,17 +1781,7 @@ async fn handle_socks5_connection(
     };
     let mut port = [0_u8; 2];
     stream.read_exact(&mut port).await?;
-    let target_port = u16::from_be_bytes(port);
-    let channel = session
-        .channel_open_direct_tcpip(
-            host.clone(),
-            target_port.into(),
-            origin.ip().to_string(),
-            origin.port().into(),
-        )
-        .await?;
-    stream.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await?;
-    proxy_channel_with_tcp(channel, stream).await
+    Ok((host, u16::from_be_bytes(port)))
 }
 
 fn client_config(keepalive_seconds: u64) -> client::Config {
@@ -1792,6 +1791,53 @@ fn client_config(keepalive_seconds: u64) -> client::Config {
         nodelay: true,
         ..Default::default()
     }
+}
+
+/// Connects the ProxyJump host itself. Shared by the terminal and SFTP paths
+/// so jump dialing (error contexts included) cannot drift between crates;
+/// authentication of the jump host stays with the caller.
+pub async fn connect_jump_session<J>(
+    config: Arc<client::Config>,
+    proxy: &config::ProxyJumpTarget,
+    handler: J,
+) -> anyhow::Result<client::Handle<J>>
+where
+    J: client::Handler<Error = anyhow::Error> + Send + 'static,
+{
+    client::connect(config, (proxy.host.as_str(), proxy.port), handler)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to connect to ProxyJump {}:{}",
+                proxy.host, proxy.port
+            )
+        })
+}
+
+/// Tunnels the target SSH transport to the caller-supplied handler over a
+/// direct-tcpip channel on an authenticated jump session.
+pub async fn connect_target_via_jump<J, H>(
+    config: Arc<client::Config>,
+    jump_session: &mut client::Handle<J>,
+    target_host: &str,
+    target_port: u16,
+    handler: H,
+) -> anyhow::Result<client::Handle<H>>
+where
+    J: client::Handler + Send + 'static,
+    H: client::Handler<Error = anyhow::Error> + Send + 'static,
+{
+    let channel = jump_session
+        .channel_open_direct_tcpip(target_host.to_owned(), target_port.into(), "127.0.0.1", 0)
+        .await
+        .with_context(|| {
+            format!("ProxyJump could not open {target_host}:{target_port} over the jump session")
+        })?;
+    client::connect_stream(config, channel.into_stream(), handler)
+        .await
+        .with_context(|| {
+            format!("failed to connect to {target_host}:{target_port} through ProxyJump")
+        })
 }
 
 fn normalize_startup_command(value: &str) -> String {
@@ -2271,5 +2317,80 @@ mod tests {
             events.try_send(TerminalEvent::StateChanged(ConnectionState::Connecting)),
             Err(mpsc::error::TrySendError::Full(_))
         ));
+    }
+
+    /// Feeds `payload` through a duplex and runs the SOCKS5 parser, keeping
+    /// the client half alive until parsing finishes (the parser writes the
+    /// method-selection reply back on the same stream).
+    async fn socks5_parse(payload: &[u8]) -> anyhow::Result<(String, u16)> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (mut client, mut server) = tokio::io::duplex(256);
+        client.write_all(payload).await.unwrap();
+        let parsed = read_socks5_connect_request(&mut server).await;
+        if parsed.is_ok() {
+            let mut reply = [0_u8; 2];
+            client.read_exact(&mut reply).await.unwrap();
+            assert_eq!(&reply, &[5, 0]);
+        }
+        parsed
+    }
+
+    #[tokio::test]
+    async fn socks5_parser_reads_ipv4_domain_and_ipv6_connect_requests() {
+        let mut ipv4 = vec![5, 1, 0];
+        ipv4.extend_from_slice(&[5, 1, 0, 1, 10, 0, 0, 5, 0x1f, 0x90]);
+        assert_eq!(
+            socks5_parse(&ipv4).await.unwrap(),
+            ("10.0.0.5".to_owned(), 8080)
+        );
+
+        let mut domain = vec![5, 1, 0, 5, 1, 0, 3, 11];
+        domain.extend_from_slice(b"example.com");
+        domain.extend_from_slice(&[0, 22]);
+        assert_eq!(
+            socks5_parse(&domain).await.unwrap(),
+            ("example.com".to_owned(), 22)
+        );
+
+        let mut ipv6 = vec![5, 1, 0, 5, 1, 0, 4];
+        ipv6.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        ipv6.extend_from_slice(&[0x01, 0xbb]);
+        assert_eq!(
+            socks5_parse(&ipv6).await.unwrap(),
+            ("2001:db8::1".to_owned(), 443)
+        );
+    }
+
+    #[tokio::test]
+    async fn socks5_parser_rejects_other_versions_commands_and_address_types() {
+        // SOCKS4 greeting must be rejected.
+        let socks4 = [4, 1, 0, 1, 127, 0, 0, 1, 0, 22];
+        assert!(
+            socks5_parse(&socks4)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("仅支持 SOCKS5")
+        );
+
+        // SOCKS5 BIND (cmd 2) must be rejected.
+        let bind = [5, 1, 0, 5, 2, 0, 1, 127, 0, 0, 1, 0, 22];
+        assert!(
+            socks5_parse(&bind)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("仅支持 CONNECT")
+        );
+
+        // Address type 2 is not assigned by RFC 1928.
+        let bad_address_type = [5, 1, 0, 5, 1, 0, 2, 4, 22];
+        assert!(
+            socks5_parse(&bad_address_type)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("地址类型不支持")
+        );
     }
 }

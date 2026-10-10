@@ -1,5 +1,5 @@
 use super::*;
-use russh_sftp::protocol::{Data, FileAttributes, Handle, Status, Version};
+use russh_sftp::protocol::{Attrs, Data, FileAttributes, Handle, Status, StatusCode, Version};
 use russh_sftp::server::Handler;
 use std::collections::{HashMap, HashSet};
 
@@ -415,5 +415,519 @@ async fn protocol_resume_restarts_when_remote_samples_no_longer_match() {
             .iter()
             .any(|read| read.offset == 0 && read.returned.is_some())
     );
+    session.close().await.unwrap();
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct WriteObservation {
+    path: String,
+    offset: u64,
+    length: usize,
+}
+
+type RemoteTestFiles = Arc<StdMutex<HashMap<String, Vec<u8>>>>;
+
+/// An in-memory SFTP server that records every data write. It backs the
+/// upload pipeline's protocol-level tests the same way `ReadServer` backs the
+/// download tests: real `SftpSession` traffic over an in-process duplex, with
+/// controllable failure injection.
+struct WriteServer {
+    files: RemoteTestFiles,
+    /// Reject renaming onto an existing path, like SFTP servers without the
+    /// posix-rename extension; this is what makes finalize engage the
+    /// journaled remote-replace path.
+    reject_rename_onto_existing: bool,
+    fail_after_writes: Option<usize>,
+    writes_served: usize,
+    observations: Arc<StdMutex<Vec<WriteObservation>>>,
+    open_handles: HashMap<String, String>,
+    next_handle: u64,
+}
+
+impl WriteServer {
+    fn new(
+        files: RemoteTestFiles,
+        reject_rename_onto_existing: bool,
+        fail_after_writes: Option<usize>,
+        observations: Arc<StdMutex<Vec<WriteObservation>>>,
+    ) -> Self {
+        Self {
+            files,
+            reject_rename_onto_existing,
+            fail_after_writes,
+            writes_served: 0,
+            observations,
+            open_handles: HashMap::new(),
+            next_handle: 0,
+        }
+    }
+}
+
+fn remote_file_attributes(len: u64) -> FileAttributes {
+    FileAttributes {
+        size: Some(len),
+        permissions: Some(0o100_644),
+        ..FileAttributes::empty()
+    }
+}
+
+fn ok_status(id: u32) -> Status {
+    Status {
+        id,
+        status_code: StatusCode::Ok,
+        error_message: StatusCode::Ok.to_string(),
+        language_tag: "en-US".to_owned(),
+    }
+}
+
+impl Handler for WriteServer {
+    type Error = StatusCode;
+
+    fn unimplemented(&self) -> Self::Error {
+        StatusCode::OpUnsupported
+    }
+
+    async fn init(
+        &mut self,
+        _version: u32,
+        _extensions: HashMap<String, String>,
+    ) -> Result<Version, Self::Error> {
+        Ok(Version::new())
+    }
+
+    async fn open(
+        &mut self,
+        id: u32,
+        filename: String,
+        pflags: OpenFlags,
+        _attrs: FileAttributes,
+    ) -> Result<Handle, Self::Error> {
+        let exists = self.files.lock().unwrap().contains_key(&filename);
+        if pflags.contains(OpenFlags::READ) && !exists {
+            return Err(StatusCode::NoSuchFile);
+        }
+        if pflags.contains(OpenFlags::EXCLUDE) && exists {
+            return Err(StatusCode::Failure);
+        }
+        if pflags.contains(OpenFlags::CREATE) {
+            self.files
+                .lock()
+                .unwrap()
+                .entry(filename.clone())
+                .or_default();
+        } else if !exists {
+            return Err(StatusCode::NoSuchFile);
+        }
+        let handle = format!("write-{}", self.next_handle);
+        self.next_handle += 1;
+        self.open_handles.insert(handle.clone(), filename);
+        Ok(Handle { id, handle })
+    }
+
+    async fn close(&mut self, _id: u32, handle: String) -> Result<Status, Self::Error> {
+        self.open_handles.remove(&handle);
+        Ok(ok_status(_id))
+    }
+
+    async fn read(
+        &mut self,
+        id: u32,
+        handle: String,
+        offset: u64,
+        len: u32,
+    ) -> Result<Data, Self::Error> {
+        let Some(path) = self.open_handles.get(&handle).cloned() else {
+            return Err(StatusCode::NoSuchFile);
+        };
+        let files = self.files.lock().unwrap();
+        let Some(file) = files.get(&path) else {
+            return Err(StatusCode::NoSuchFile);
+        };
+        let start = usize::try_from(offset).map_err(|_| StatusCode::Eof)?;
+        if start >= file.len() {
+            return Err(StatusCode::Eof);
+        }
+        let end = (start + len as usize).min(file.len());
+        Ok(Data {
+            id,
+            data: file[start..end].to_vec(),
+        })
+    }
+
+    async fn write(
+        &mut self,
+        id: u32,
+        handle: String,
+        offset: u64,
+        data: Vec<u8>,
+    ) -> Result<Status, Self::Error> {
+        let Some(path) = self.open_handles.get(&handle).cloned() else {
+            return Err(StatusCode::NoSuchFile);
+        };
+        self.writes_served += 1;
+        if self
+            .fail_after_writes
+            .is_some_and(|limit| self.writes_served > limit)
+        {
+            return Err(StatusCode::ConnectionLost);
+        }
+        self.observations.lock().unwrap().push(WriteObservation {
+            path: path.clone(),
+            offset,
+            length: data.len(),
+        });
+        let mut files = self.files.lock().unwrap();
+        let file = files.entry(path).or_default();
+        let end = offset as usize + data.len();
+        if file.len() < end {
+            file.resize(end, 0);
+        }
+        file[offset as usize..end].copy_from_slice(&data);
+        Ok(ok_status(id))
+    }
+
+    async fn lstat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
+        match self.files.lock().unwrap().get(&path) {
+            Some(file) => Ok(Attrs {
+                id,
+                attrs: remote_file_attributes(file.len() as u64),
+            }),
+            None => Err(StatusCode::NoSuchFile),
+        }
+    }
+
+    async fn stat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
+        self.lstat(id, path).await
+    }
+
+    async fn remove(&mut self, id: u32, filename: String) -> Result<Status, Self::Error> {
+        self.files
+            .lock()
+            .unwrap()
+            .remove(&filename)
+            .map(|_| ok_status(id))
+            .ok_or(StatusCode::NoSuchFile)
+    }
+
+    async fn rename(
+        &mut self,
+        id: u32,
+        oldpath: String,
+        newpath: String,
+    ) -> Result<Status, Self::Error> {
+        let mut files = self.files.lock().unwrap();
+        if self.reject_rename_onto_existing && files.contains_key(&newpath) {
+            return Err(StatusCode::Failure);
+        }
+        match files.remove(&oldpath) {
+            Some(data) => {
+                files.insert(newpath, data);
+                Ok(ok_status(id))
+            }
+            None => Err(StatusCode::NoSuchFile),
+        }
+    }
+}
+
+async fn connect_write_server_over(
+    files: RemoteTestFiles,
+    reject_rename_onto_existing: bool,
+    fail_after_writes: Option<usize>,
+) -> (SftpSession, Arc<StdMutex<Vec<WriteObservation>>>) {
+    let observations = Arc::new(StdMutex::new(Vec::new()));
+    let handler = WriteServer::new(
+        files,
+        reject_rename_onto_existing,
+        fail_after_writes,
+        Arc::clone(&observations),
+    );
+    let (client_stream, server_stream) = tokio::io::duplex(512 * 1024);
+    russh_sftp::server::run(server_stream, handler).await;
+    let session = SftpSession::new(client_stream)
+        .await
+        .expect("initialize in-process SFTP client");
+    (session, observations)
+}
+
+async fn connect_write_server(
+    reject_rename_onto_existing: bool,
+    fail_after_writes: Option<usize>,
+) -> (
+    SftpSession,
+    RemoteTestFiles,
+    Arc<StdMutex<Vec<WriteObservation>>>,
+) {
+    let files: RemoteTestFiles = Arc::new(StdMutex::new(HashMap::new()));
+    let (session, observations) = connect_write_server_over(
+        Arc::clone(&files),
+        reject_rename_onto_existing,
+        fail_after_writes,
+    )
+    .await;
+    (session, files, observations)
+}
+
+async fn write_local_fixture(
+    directory: &TestDirectory,
+    data: &[u8],
+) -> (PathBuf, UploadResumeMetadata) {
+    let local_path = directory.join("upload.bin");
+    tokio::fs::write(&local_path, data).await.unwrap();
+    let metadata = tokio::fs::metadata(&local_path).await.unwrap();
+    let expected = make_upload_resume_metadata(&local_path, REMOTE_PATH, &metadata);
+    (local_path, expected)
+}
+
+#[tokio::test]
+async fn protocol_upload_writes_the_full_file_and_finalizes() {
+    let data = fixture_bytes(1024 * 1024 + 300);
+    let directory = TestDirectory::new("protocol-upload").await;
+    let (local_path, expected) = write_local_fixture(&directory, &data).await;
+    let (session, files, observations) = connect_write_server(false, None).await;
+    let (_control, mut control) = watch::channel(TransferControl::Running);
+    let mut run_gate = transfer_run_gate();
+    let mut progress = Vec::new();
+
+    let status = tokio::time::timeout(
+        PROTOCOL_TEST_TIMEOUT,
+        upload_file(
+            UploadFileRequest {
+                session: &session,
+                local_path: &local_path,
+                remote_path: REMOTE_PATH,
+                overwrite: false,
+                expected_metadata: &expected,
+            },
+            &mut control,
+            &mut run_gate,
+            |transferred| progress.push(transferred),
+        ),
+    )
+    .await
+    .expect("upload protocol test timed out")
+    .expect("upload through the in-process SFTP server");
+
+    assert_eq!(status, TransferStatus::Completed);
+    assert_eq!(progress.first(), Some(&0));
+    assert_eq!(progress.last(), Some(&(data.len() as u64)));
+    {
+        let files = files.lock().unwrap();
+        assert_eq!(files.get(REMOTE_PATH).unwrap(), data.as_slice());
+        assert!(!files.contains_key(&upload_temporary_path(REMOTE_PATH)));
+        assert!(!files.contains_key(&upload_metadata_path(REMOTE_PATH)));
+        assert!(!files.contains_key(&format!("{}.tmp", upload_metadata_path(REMOTE_PATH))));
+    }
+
+    let observations = observations.lock().unwrap().clone();
+    let temporary_path = upload_temporary_path(REMOTE_PATH);
+    let data_writes: Vec<&WriteObservation> = observations
+        .iter()
+        .filter(|write| write.path == temporary_path)
+        .collect();
+    assert!(!data_writes.is_empty());
+    for (write, next) in data_writes.iter().zip(data_writes.iter().skip(1)) {
+        assert_eq!(write.offset + write.length as u64, next.offset);
+    }
+    assert_eq!(
+        data_writes
+            .last()
+            .map(|write| write.offset + write.length as u64),
+        Some(data.len() as u64)
+    );
+    session.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn protocol_upload_resumes_from_a_remote_checkpoint() {
+    const CHECKPOINT_BYTES: usize = 5 * 256 * 1024 + 123;
+
+    let data = fixture_bytes(2 * 1024 * 1024 + 65);
+    let directory = TestDirectory::new("protocol-upload-resume").await;
+    let (local_path, expected) = write_local_fixture(&directory, &data).await;
+    let (session, files, observations) = connect_write_server(false, None).await;
+    {
+        let mut files = files.lock().unwrap();
+        files.insert(
+            upload_temporary_path(REMOTE_PATH),
+            data[..CHECKPOINT_BYTES].to_vec(),
+        );
+        files.insert(
+            upload_metadata_path(REMOTE_PATH),
+            serde_json::to_vec(&expected).unwrap(),
+        );
+    }
+    let (_control, mut control) = watch::channel(TransferControl::Running);
+    let mut run_gate = transfer_run_gate();
+    let mut progress = Vec::new();
+
+    let status = tokio::time::timeout(
+        PROTOCOL_TEST_TIMEOUT,
+        upload_file(
+            UploadFileRequest {
+                session: &session,
+                local_path: &local_path,
+                remote_path: REMOTE_PATH,
+                overwrite: false,
+                expected_metadata: &expected,
+            },
+            &mut control,
+            &mut run_gate,
+            |transferred| progress.push(transferred),
+        ),
+    )
+    .await
+    .expect("upload resume protocol test timed out")
+    .expect("resume upload from a remote checkpoint");
+
+    assert_eq!(status, TransferStatus::Completed);
+    assert_eq!(progress.first(), Some(&(CHECKPOINT_BYTES as u64)));
+    assert_eq!(progress.last(), Some(&(data.len() as u64)));
+    assert_eq!(
+        files.lock().unwrap().get(REMOTE_PATH).unwrap(),
+        data.as_slice()
+    );
+
+    let observations = observations.lock().unwrap().clone();
+    assert!(
+        observations
+            .iter()
+            .filter(|write| write.path == upload_temporary_path(REMOTE_PATH))
+            .all(|write| write.offset >= CHECKPOINT_BYTES as u64)
+    );
+    session.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn protocol_upload_failure_leaves_a_resumable_checkpoint() {
+    let data = fixture_bytes(1024 * 1024 + 21);
+    let directory = TestDirectory::new("protocol-upload-failure").await;
+    let (local_path, expected) = write_local_fixture(&directory, &data).await;
+    let temporary_path = upload_temporary_path(REMOTE_PATH);
+    let metadata_path = upload_metadata_path(REMOTE_PATH);
+
+    let (failed_session, files, _failed_observations) = connect_write_server(false, Some(4)).await;
+    let (_failed_control, mut failed_control) = watch::channel(TransferControl::Running);
+    let mut failed_gate = transfer_run_gate();
+    let failure = tokio::time::timeout(
+        PROTOCOL_TEST_TIMEOUT,
+        upload_file(
+            UploadFileRequest {
+                session: &failed_session,
+                local_path: &local_path,
+                remote_path: REMOTE_PATH,
+                overwrite: false,
+                expected_metadata: &expected,
+            },
+            &mut failed_control,
+            &mut failed_gate,
+            |_| {},
+        ),
+    )
+    .await
+    .expect("upload failure protocol test timed out")
+    .expect_err("injected write failure must fail the upload");
+    drop(failed_gate);
+    assert!(
+        format!("{failure:#}").contains("Connection lost"),
+        "unexpected upload failure text: {failure:#}"
+    );
+
+    let checkpoint_bytes = files.lock().unwrap().get(&temporary_path).map(Vec::len);
+    let checkpoint_bytes = checkpoint_bytes.expect("partial upload checkpoint");
+    assert!(checkpoint_bytes > 0);
+    assert_eq!(
+        files.lock().unwrap().get(&temporary_path).unwrap(),
+        &data[..checkpoint_bytes]
+    );
+    assert!(files.lock().unwrap().contains_key(&metadata_path));
+    failed_session.close().await.unwrap();
+
+    let (resumed_session, resumed_observations) =
+        connect_write_server_over(Arc::clone(&files), false, None).await;
+    let (_resumed_control, mut resumed_control) = watch::channel(TransferControl::Running);
+    let mut resumed_gate = transfer_run_gate();
+    let mut resumed_progress = Vec::new();
+    let status = tokio::time::timeout(
+        PROTOCOL_TEST_TIMEOUT,
+        upload_file(
+            UploadFileRequest {
+                session: &resumed_session,
+                local_path: &local_path,
+                remote_path: REMOTE_PATH,
+                overwrite: false,
+                expected_metadata: &expected,
+            },
+            &mut resumed_control,
+            &mut resumed_gate,
+            |transferred| resumed_progress.push(transferred),
+        ),
+    )
+    .await
+    .expect("upload failure resume protocol test timed out")
+    .expect("resume upload after an injected write failure");
+
+    assert_eq!(status, TransferStatus::Completed);
+    assert_eq!(resumed_progress.first(), Some(&(checkpoint_bytes as u64)));
+    assert_eq!(resumed_progress.last(), Some(&(data.len() as u64)));
+    assert_eq!(
+        files.lock().unwrap().get(REMOTE_PATH).unwrap(),
+        data.as_slice()
+    );
+    let observations = resumed_observations.lock().unwrap().clone();
+    assert!(
+        observations
+            .iter()
+            .filter(|write| write.path == temporary_path)
+            .all(|write| write.offset >= checkpoint_bytes as u64)
+    );
+    resumed_session.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn protocol_upload_replace_flow_overwrites_when_rename_is_rejected() {
+    let data = fixture_bytes(512 * 1024 + 17);
+    let directory = TestDirectory::new("protocol-upload-replace").await;
+    let (local_path, expected) = write_local_fixture(&directory, &data).await;
+    let (session, files, _observations) = connect_write_server(true, None).await;
+    files
+        .lock()
+        .unwrap()
+        .insert(REMOTE_PATH.to_owned(), b"stale-destination".to_vec());
+    let (_control, mut control) = watch::channel(TransferControl::Running);
+    let mut run_gate = transfer_run_gate();
+
+    let status = tokio::time::timeout(
+        PROTOCOL_TEST_TIMEOUT,
+        upload_file(
+            UploadFileRequest {
+                session: &session,
+                local_path: &local_path,
+                remote_path: REMOTE_PATH,
+                overwrite: true,
+                expected_metadata: &expected,
+            },
+            &mut control,
+            &mut run_gate,
+            |_| {},
+        ),
+    )
+    .await
+    .expect("upload replace protocol test timed out")
+    .expect("overwrite through the journaled remote-replace flow");
+
+    assert_eq!(status, TransferStatus::Completed);
+    {
+        let files = files.lock().unwrap();
+        assert_eq!(files.get(REMOTE_PATH).unwrap(), data.as_slice());
+        let replace_paths = remote_replace::RemoteReplacePaths::new(REMOTE_PATH);
+        for artifact in replace_paths.lease_artifacts() {
+            assert!(
+                !files.contains_key(artifact),
+                "remote-replace artifact {artifact} must be cleaned up"
+            );
+        }
+        assert!(!files.contains_key(&upload_temporary_path(REMOTE_PATH)));
+        assert!(!files.contains_key(&upload_metadata_path(REMOTE_PATH)));
+    }
     session.close().await.unwrap();
 }

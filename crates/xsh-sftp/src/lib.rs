@@ -27,7 +27,7 @@ use xsh_domain::{
     TransferRuntimeSummary, TransferStatus, TransferWaitingReason,
 };
 use xsh_ssh::RuntimeAuthentication;
-use xsh_ssh::config::resolve_proxy_jump;
+use xsh_ssh::config::resolve_proxy_jump_async;
 
 #[derive(Debug)]
 pub struct SftpConnectOptions {
@@ -91,6 +91,11 @@ const DOWNLOAD_RESUME_METADATA_VERSION: u8 = 2;
 const UPLOAD_RESUME_METADATA_VERSION: u8 = 1;
 const TRANSFER_EVENT_CAPACITY: usize = 16;
 const TRANSFER_PROGRESS_INTERVAL: Duration = Duration::from_millis(150);
+/// Finished transfers stay listed (and retryable) for this long before the
+/// manager prunes them; the cap bounds the map if transfers finish faster
+/// than the UI ever cleans them up.
+const FINISHED_TRANSFER_RETENTION: Duration = Duration::from_secs(30 * 60);
+const MAX_FINISHED_TRANSFERS: usize = 200;
 const RESUME_VERIFICATION_BLOCK_BYTES: u64 = 64 * 1024;
 const RESUME_METADATA_MAX_BYTES: u64 = 64 * 1024;
 
@@ -1003,6 +1008,49 @@ struct ManagedTransfer {
     control: watch::Sender<TransferControl>,
     snapshot: Arc<StdMutex<TransferEvent>>,
     worker_finished: Arc<AtomicBool>,
+    /// Set when the worker reaches a terminal state; drives retention-based
+    /// pruning so finished transfers cannot accumulate unboundedly.
+    finished_at: Option<Instant>,
+}
+
+struct ManagedTransferParams {
+    connection_id: ConnectionId,
+    direction: TransferDirection,
+    local_path: PathBuf,
+    remote_path: String,
+    total_bytes: u64,
+    scheduler_host_key: String,
+    destination_lease: TransferDestinationLease,
+    session: Arc<SftpSession>,
+}
+
+/// Owns the per-transfer progress reporter plus the last reported byte count
+/// so the terminal event can carry it no matter how the transfer ended.
+struct TransferProgressSink {
+    reporter: TransferProgressReporter,
+    latest_transferred: u64,
+}
+
+impl TransferProgressSink {
+    fn new(
+        events: mpsc::Sender<TransferEvent>,
+        context: TerminalTransferContext,
+        snapshot: Arc<StdMutex<TransferEvent>>,
+    ) -> Self {
+        Self {
+            reporter: TransferProgressReporter::new(events, context, snapshot),
+            latest_transferred: 0,
+        }
+    }
+
+    fn report(&mut self, transferred_bytes: u64) {
+        self.latest_transferred = transferred_bytes;
+        self.reporter.report(transferred_bytes);
+    }
+
+    fn latest_transferred(&self) -> u64 {
+        self.latest_transferred
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1266,6 +1314,35 @@ impl TransferProgressReporter {
         };
         self.last_speed_sample = now;
         self.last_speed_bytes = transferred_bytes;
+        // Building the event clones three path strings; on a fast transfer
+        // this method runs thousands of times per second, so the throttle
+        // window must be checked before the event exists. Between sends, only
+        // the snapshot scalars are updated so list_transfers stays fresh.
+        let throttled = self
+            .last_sent_at
+            .is_some_and(|last_sent| now.duration_since(last_sent) < TRANSFER_PROGRESS_INTERVAL);
+        if throttled {
+            if let Ok(mut current) = self.snapshot.lock() {
+                match current.status {
+                    TransferStatus::Queued
+                    | TransferStatus::Running
+                    | TransferStatus::Paused
+                    | TransferStatus::Cancelling
+                    | TransferStatus::Cancelled => {
+                        current.transferred_bytes = transferred_bytes;
+                        current.speed_bytes_per_second = match current.status {
+                            TransferStatus::Queued | TransferStatus::Running => {
+                                speed_bytes_per_second
+                            }
+                            _ => Some(0),
+                        };
+                    }
+                    TransferStatus::Completed | TransferStatus::Failed => {}
+                }
+            }
+            return;
+        }
+        self.last_sent_at = Some(now);
         let event = {
             let Ok(mut current) = self.snapshot.lock() else {
                 return;
@@ -1285,13 +1362,6 @@ impl TransferProgressReporter {
             *current = event.clone();
             event
         };
-        if self
-            .last_sent_at
-            .is_some_and(|last_sent| now.duration_since(last_sent) < TRANSFER_PROGRESS_INTERVAL)
-        {
-            return;
-        }
-        self.last_sent_at = Some(now);
         let _ = self.events.try_send(event);
     }
 }
@@ -1426,10 +1496,17 @@ async fn authenticate_sftp_session(
             private_key_path,
             passphrase,
         } => {
-            let key = load_secret_key(
-                &private_key_path,
-                passphrase.as_ref().map(|value| value.as_str()),
-            )
+            // Decrypting an encrypted OpenSSH key runs the bcrypt KDF, which
+            // can block for hundreds of milliseconds; keep it off the async
+            // worker.
+            let key = tokio::task::spawn_blocking(move || {
+                load_secret_key(
+                    &private_key_path,
+                    passphrase.as_ref().map(|value| value.as_str()),
+                )
+            })
+            .await
+            .context("私钥解密任务失败")?
             .context("无法读取或解密 OpenSSH 私钥")?;
             let hash_algorithm = session
                 .best_supported_rsa_hash()
@@ -1508,13 +1585,12 @@ impl SftpManager {
         options: SftpConnectOptions,
     ) -> Result<SftpConnectResult, SftpManagerError> {
         let target_host_key_failure = Arc::new(Mutex::new(None));
-        let proxy_target = options
-            .proxy_jump
-            .as_deref()
-            .map(resolve_proxy_jump)
-            .transpose()
-            .map_err(SftpManagerError::Operation)?
-            .flatten();
+        let proxy_target = match options.proxy_jump.as_deref() {
+            Some(value) => resolve_proxy_jump_async(value)
+                .await
+                .map_err(SftpManagerError::Operation)?,
+            None => None,
+        };
         let target_handler = SftpHostKeyHandler {
             role: HostKeyRole::Target,
             host: options.host.clone(),
@@ -1532,9 +1608,9 @@ impl SftpManager {
                 known_host: options.proxy_jump_known_host.clone(),
                 failure: Arc::clone(&proxy_host_key_failure),
             };
-            let jump_result = client::connect(
+            let jump_result = xsh_ssh::connect_jump_session(
                 Arc::new(sftp_client_config()),
-                (proxy.host.as_str(), proxy.port),
+                &proxy,
                 proxy_handler,
             )
             .await;
@@ -1556,13 +1632,14 @@ impl SftpManager {
                 .proxy_jump_username
                 .as_deref()
                 .or(proxy.username.as_deref())
-                .unwrap_or(&options.username);
+                .unwrap_or(&options.username)
+                .to_owned();
             let proxy_authentication = options
                 .proxy_jump_authentication
                 .clone()
                 .unwrap_or_else(|| options.authentication.clone());
             let authenticated =
-                authenticate_sftp_session(&mut jump, proxy_username, proxy_authentication)
+                authenticate_sftp_session(&mut jump, &proxy_username, proxy_authentication)
                     .await
                     .context("SFTP ProxyJump authentication failed")?;
             if !authenticated {
@@ -1570,28 +1647,15 @@ impl SftpManager {
                     "the SFTP ProxyJump server rejected authentication"
                 )));
             }
-            let channel = jump
-                .channel_open_direct_tcpip(
-                    options.host.clone(),
-                    options.port.into(),
-                    "127.0.0.1",
-                    0,
-                )
-                .await
-                .with_context(|| {
-                    format!(
-                        "SFTP ProxyJump could not open {}:{} through {}:{}",
-                        options.host, options.port, proxy.host, proxy.port
-                    )
-                })?;
-            proxy_ssh = Some(jump);
-            let target_result = client::connect_stream(
+            let target_result = xsh_ssh::connect_target_via_jump(
                 Arc::new(sftp_client_config()),
-                channel.into_stream(),
+                &mut jump,
+                &options.host,
+                options.port,
                 target_handler,
             )
             .await;
-            match target_result {
+            let target = match target_result {
                 Ok(connection) => connection,
                 Err(error) => {
                     return Err(sftp_connect_error(
@@ -1604,7 +1668,9 @@ impl SftpManager {
                     )
                     .await);
                 }
-            }
+            };
+            proxy_ssh = Some(jump);
+            target
         } else {
             let target_result = client::connect(
                 Arc::new(sftp_client_config()),
@@ -1701,6 +1767,7 @@ impl SftpManager {
     }
 
     pub async fn list_transfers(&self) -> TransferListSnapshot {
+        self.prune_finished_transfers().await;
         let transfers = {
             let transfers = self.inner.transfers.lock().await;
             transfers
@@ -1756,9 +1823,11 @@ impl SftpManager {
     pub async fn remove_transfer(&self, transfer_id: TransferId) -> Result<(), SftpManagerError> {
         let connection_id = {
             let mut transfers = self.inner.transfers.lock().await;
-            let transfer = transfers
-                .get(&transfer_id)
-                .ok_or(SftpManagerError::TransferNotFound(transfer_id))?;
+            let Some(transfer) = transfers.get_mut(&transfer_id) else {
+                // Already pruned or removed; treat as success so UI cleanup
+                // flows stay idempotent.
+                return Ok(());
+            };
             if !transfer.worker_finished.load(Ordering::Acquire) {
                 return Err(SftpManagerError::Operation(anyhow::anyhow!(
                     "cannot remove an active transfer"
@@ -1773,6 +1842,61 @@ impl SftpManager {
                 .await?;
         }
         Ok(())
+    }
+
+    /// Drop finished transfers that expired or exceeded the retention cap,
+    /// then release connections those transfers were keeping alive. Active
+    /// transfers are never touched.
+    async fn prune_finished_transfers(&self) {
+        let now = Instant::now();
+        let expired_connections = {
+            let mut transfers = self.inner.transfers.lock().await;
+            if transfers.is_empty() {
+                return;
+            }
+            let mut finished: Vec<(Instant, TransferId)> = transfers
+                .iter()
+                .filter_map(|(transfer_id, transfer)| {
+                    transfer
+                        .finished_at
+                        .map(|finished_at| (finished_at, *transfer_id))
+                })
+                .collect();
+            finished.sort_unstable();
+            let evict: HashSet<TransferId> = finished
+                .iter()
+                .filter(|(finished_at, _)| {
+                    now.duration_since(*finished_at) > FINISHED_TRANSFER_RETENTION
+                })
+                .map(|(_, transfer_id)| *transfer_id)
+                .chain(
+                    finished
+                        .iter()
+                        .take(finished.len().saturating_sub(MAX_FINISHED_TRANSFERS))
+                        .map(|(_, transfer_id)| *transfer_id),
+                )
+                .collect();
+            if evict.is_empty() {
+                return;
+            }
+            let evict_connections = transfers
+                .iter()
+                .filter(|(transfer_id, _)| evict.contains(transfer_id))
+                .map(|(_, transfer)| transfer.connection_id)
+                .collect::<HashSet<_>>();
+            transfers.retain(|transfer_id, _| {
+                if evict.contains(transfer_id) {
+                    tracing::debug!(%transfer_id, "pruned a finished SFTP transfer");
+                    false
+                } else {
+                    true
+                }
+            });
+            evict_connections
+        };
+        for connection_id in expired_connections {
+            let _ = self.close_released_connection_if_idle(connection_id).await;
+        }
     }
 
     async fn update_transfer_control(
@@ -1904,11 +2028,10 @@ impl SftpManager {
                 }
             })
             .collect::<Vec<_>>();
-        entries.sort_by(|left, right| {
-            entry_rank(&left.file_type)
-                .cmp(&entry_rank(&right.file_type))
-                .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
-        });
+        // `to_lowercase` inside the comparator would allocate per comparison;
+        // the cached key keeps large directory refreshes allocation-light.
+        entries
+            .sort_by_cached_key(|entry| (entry_rank(&entry.file_type), entry.name.to_lowercase()));
         Ok(entries)
     }
 
@@ -2001,79 +2124,33 @@ impl SftpManager {
         remote_path: String,
         overwrite: bool,
     ) -> Result<TransferSubscription, SftpManagerError> {
-        let submission_sequence = self.next_submission_sequence();
         let (session, source_identity, scheduler_host_key) =
             self.transfer_connection(connection_id).await?;
         let local_metadata = tokio::fs::metadata(&local_path)
             .await
             .with_context(|| format!("failed to read {}", local_path.display()))?;
-        let total_bytes = local_metadata.len();
         let upload_metadata =
             make_upload_resume_metadata(&local_path, &remote_path, &local_metadata);
-        let destination = TransferDestination::remote(source_identity, remote_path.clone());
-        let destination_lease = self.reserve_destination(destination)?;
-        let transfer_id = Uuid::new_v4();
-        self.inner
-            .scheduler
-            .enqueue_admission(transfer_id, submission_sequence, &scheduler_host_key)
-            .map_err(SftpManagerError::Operation)?;
-        let (event_tx, event_rx) = mpsc::channel(TRANSFER_EVENT_CAPACITY);
-        let (control_tx, control_rx) = watch::channel(TransferControl::Running);
-        let context = TerminalTransferContext {
-            transfer_id,
-            connection_id,
-            endpoint: scheduler_host_key.clone(),
-            submission_sequence,
-            direction: TransferDirection::Upload,
-            local_path: local_path.clone(),
-            remote_path: remote_path.clone(),
-            total_bytes,
-        };
-        let snapshot = Arc::new(StdMutex::new(context.event(
-            TransferStatus::Queued,
-            0,
-            None,
-            None,
-        )));
-        let worker_finished = Arc::new(AtomicBool::new(false));
-        self.inner.transfers.lock().await.insert(
-            transfer_id,
-            ManagedTransfer {
+        let destination_lease = self.reserve_destination(TransferDestination::remote(
+            source_identity,
+            remote_path.clone(),
+        ))?;
+        self.submit_managed_transfer(
+            ManagedTransferParams {
                 connection_id,
-                control: control_tx,
-                snapshot: Arc::clone(&snapshot),
-                worker_finished: Arc::clone(&worker_finished),
-            },
-        );
-        let _ = event_tx.try_send(
-            snapshot
-                .lock()
-                .map(|event| event.clone())
-                .unwrap_or_else(|_| context.event(TransferStatus::Queued, 0, None, None)),
-        );
-        let manager = self.clone();
-
-        tokio::spawn(async move {
-            let destination_lease = destination_lease;
-            let mut control_rx = control_rx;
-            let mut run_gate = TransferRunGate::new(
-                manager.inner.scheduler.clone(),
-                transfer_id,
+                direction: TransferDirection::Upload,
+                local_path: local_path.clone(),
+                remote_path: remote_path.clone(),
+                total_bytes: local_metadata.len(),
                 scheduler_host_key,
-            );
-            run_gate.set_submission_sequence(context.submission_sequence);
-            run_gate.attach_status_reporter(Arc::clone(&snapshot), event_tx.clone());
-            let mut latest_transferred = 0;
-            let mut reporter = TransferProgressReporter::new(
-                event_tx.clone(),
-                context.clone(),
-                Arc::clone(&snapshot),
-            );
-            let result = async {
-                if let Some(status) = run_gate.wait_until_running(&mut control_rx).await? {
-                    return Ok(status);
-                }
-                upload_file(
+                destination_lease,
+                session,
+            },
+            move |session, control, run_gate, progress_sink| async move {
+                let mut control = control;
+                let mut run_gate = run_gate;
+                let mut progress_sink = progress_sink;
+                let result = upload_file(
                     UploadFileRequest {
                         session: &session,
                         local_path: &local_path,
@@ -2081,30 +2158,15 @@ impl SftpManager {
                         overwrite,
                         expected_metadata: &upload_metadata,
                     },
-                    &mut control_rx,
+                    &mut control,
                     &mut run_gate,
-                    |transferred| {
-                        latest_transferred = transferred;
-                        reporter.report(transferred);
-                    },
+                    |transferred| progress_sink.report(transferred),
                 )
-                .await
-            }
-            .await;
-            let terminal_event = terminal_transfer_event(context, latest_transferred, result);
-            update_transfer_snapshot(&snapshot, terminal_event.clone());
-            drop(destination_lease);
-            worker_finished.store(true, Ordering::Release);
-            let _ = event_tx.send(terminal_event).await;
-            let _ = manager
-                .close_released_connection_if_idle(connection_id)
                 .await;
-        });
-
-        Ok(TransferSubscription {
-            transfer_id,
-            events: event_rx,
-        })
+                (result, progress_sink)
+            },
+        )
+        .await
     }
 
     pub async fn download(
@@ -2114,7 +2176,6 @@ impl SftpManager {
         local_path: PathBuf,
         overwrite: bool,
     ) -> Result<TransferSubscription, SftpManagerError> {
-        let submission_sequence = self.next_submission_sequence();
         let (session, source_identity, scheduler_host_key) =
             self.transfer_connection(connection_id).await?;
         let remote_metadata = session
@@ -2123,8 +2184,79 @@ impl SftpManager {
             .context("failed to read remote file metadata")?;
         let total_bytes = remote_metadata.len();
         let modified_at_unix = remote_metadata.mtime;
-        let destination = TransferDestination::local(&local_path);
-        let destination_lease = self.reserve_destination(destination)?;
+        let destination_lease =
+            self.reserve_destination(TransferDestination::local(&local_path))?;
+        self.submit_managed_transfer(
+            ManagedTransferParams {
+                connection_id,
+                direction: TransferDirection::Download,
+                local_path: local_path.clone(),
+                remote_path: remote_path.clone(),
+                total_bytes,
+                scheduler_host_key,
+                destination_lease,
+                session,
+            },
+            move |session, control, run_gate, progress_sink| async move {
+                let session = &session;
+                let mut control = control;
+                let mut run_gate = run_gate;
+                let mut progress_sink = progress_sink;
+                let result = download_file(
+                    session,
+                    DownloadFileRequest {
+                        remote_path: &remote_path,
+                        local_path: &local_path,
+                        overwrite,
+                        total_bytes,
+                        modified_at_unix,
+                        source_identity: &source_identity,
+                    },
+                    &mut control,
+                    &mut run_gate,
+                    |transferred| progress_sink.report(transferred),
+                )
+                .await;
+                (result, progress_sink)
+            },
+        )
+        .await
+    }
+
+    /// Shared submission scaffolding for upload/download: admission queue,
+    /// transfer registry, event/control channels, and the worker tail
+    /// (terminal event, lease release, finished bookkeeping, idle-connection
+    /// close, retention pruning). `run` only contains the transfer itself and
+    /// returns the progress sink so the terminal event carries the last
+    /// reported byte count.
+    async fn submit_managed_transfer<F, Fut>(
+        &self,
+        params: ManagedTransferParams,
+        run: F,
+    ) -> Result<TransferSubscription, SftpManagerError>
+    where
+        F: FnOnce(
+                Arc<SftpSession>,
+                watch::Receiver<TransferControl>,
+                TransferRunGate,
+                TransferProgressSink,
+            ) -> Fut
+            + Send
+            + 'static,
+        Fut: std::future::Future<Output = (anyhow::Result<TransferStatus>, TransferProgressSink)>
+            + Send,
+    {
+        let ManagedTransferParams {
+            connection_id,
+            direction,
+            local_path,
+            remote_path,
+            total_bytes,
+            scheduler_host_key,
+            destination_lease,
+            session,
+        } = params;
+        let submission_sequence = self.next_submission_sequence();
         let transfer_id = Uuid::new_v4();
         self.inner
             .scheduler
@@ -2137,9 +2269,9 @@ impl SftpManager {
             connection_id,
             endpoint: scheduler_host_key.clone(),
             submission_sequence,
-            direction: TransferDirection::Download,
-            local_path: local_path.clone(),
-            remote_path: remote_path.clone(),
+            direction,
+            local_path,
+            remote_path,
             total_bytes,
         };
         let snapshot = Arc::new(StdMutex::new(context.event(
@@ -2156,6 +2288,7 @@ impl SftpManager {
                 control: control_tx,
                 snapshot: Arc::clone(&snapshot),
                 worker_finished: Arc::clone(&worker_finished),
+                finished_at: None,
             },
         );
         let _ = event_tx.try_send(
@@ -2167,7 +2300,6 @@ impl SftpManager {
         let manager = self.clone();
 
         tokio::spawn(async move {
-            let destination_lease = destination_lease;
             let mut control_rx = control_rx;
             let mut run_gate = TransferRunGate::new(
                 manager.inner.scheduler.clone(),
@@ -2176,44 +2308,26 @@ impl SftpManager {
             );
             run_gate.set_submission_sequence(context.submission_sequence);
             run_gate.attach_status_reporter(Arc::clone(&snapshot), event_tx.clone());
-            let mut latest_transferred = 0;
-            let mut reporter = TransferProgressReporter::new(
-                event_tx.clone(),
-                context.clone(),
-                Arc::clone(&snapshot),
-            );
-            let result = async {
-                if let Some(status) = run_gate.wait_until_running(&mut control_rx).await? {
-                    return Ok(status);
-                }
-                download_file(
-                    &session,
-                    DownloadFileRequest {
-                        remote_path: &remote_path,
-                        local_path: &local_path,
-                        overwrite,
-                        total_bytes,
-                        modified_at_unix,
-                        source_identity: &source_identity,
-                    },
-                    &mut control_rx,
-                    &mut run_gate,
-                    |transferred| {
-                        latest_transferred = transferred;
-                        reporter.report(transferred);
-                    },
-                )
-                .await
-            }
-            .await;
-            let terminal_event = terminal_transfer_event(context, latest_transferred, result);
+            let progress_sink =
+                TransferProgressSink::new(event_tx.clone(), context.clone(), Arc::clone(&snapshot));
+            let (result, progress_sink) = match run_gate.wait_until_running(&mut control_rx).await {
+                Err(error) => (Err(error), progress_sink),
+                Ok(Some(status)) => (Ok(status), progress_sink),
+                Ok(None) => run(session, control_rx, run_gate, progress_sink).await,
+            };
+            let terminal_event =
+                terminal_transfer_event(context, progress_sink.latest_transferred(), result);
             update_transfer_snapshot(&snapshot, terminal_event.clone());
             drop(destination_lease);
             worker_finished.store(true, Ordering::Release);
+            if let Some(transfer) = manager.inner.transfers.lock().await.get_mut(&transfer_id) {
+                transfer.finished_at = Some(Instant::now());
+            }
             let _ = event_tx.send(terminal_event).await;
             let _ = manager
                 .close_released_connection_if_idle(connection_id)
                 .await;
+            manager.prune_finished_transfers().await;
         });
 
         Ok(TransferSubscription {
@@ -2978,9 +3092,39 @@ enum DownloadReadMessage {
     Failed { error: anyhow::Error },
 }
 
+/// Buffers returned by the writer after a chunk lands on disk, so readers
+/// stop allocating a fresh 256 KiB Vec for every chunk at high throughput.
+type DownloadBufferPool = Arc<StdMutex<Vec<Vec<u8>>>>;
+const DOWNLOAD_RECYCLE_MIN_CAPACITY: usize = 64 * 1024;
+const DOWNLOAD_RECYCLE_MAX_BUFFERS: usize = 16;
+
+fn take_recycled_download_buffer(recycle: &DownloadBufferPool, needed: usize) -> Option<Vec<u8>> {
+    let mut pool = recycle.lock().ok()?;
+    while let Some(mut buffer) = pool.pop() {
+        if buffer.capacity() >= needed {
+            buffer.clear();
+            buffer.resize(needed, 0);
+            return Some(buffer);
+        }
+    }
+    None
+}
+
+fn recycle_download_buffer(recycle: &DownloadBufferPool, buffer: Vec<u8>) {
+    if buffer.capacity() < DOWNLOAD_RECYCLE_MIN_CAPACITY {
+        return;
+    }
+    if let Ok(mut pool) = recycle.lock()
+        && pool.len() < DOWNLOAD_RECYCLE_MAX_BUFFERS
+    {
+        pool.push(buffer);
+    }
+}
+
 struct DownloadPipeline {
     receiver: mpsc::Receiver<DownloadReadMessage>,
     readers: usize,
+    recycle: DownloadBufferPool,
 }
 
 async fn spawn_download_pipeline(
@@ -3028,10 +3172,12 @@ async fn spawn_download_pipeline(
     }
     let readers = opened.len();
     let (chunk_tx, receiver) = mpsc::channel::<DownloadReadMessage>(handle_count * 2);
+    let recycle: DownloadBufferPool = Arc::new(StdMutex::new(Vec::new()));
     for (offset, handle) in opened {
         let task_tx = chunk_tx.clone();
         let task_scheduler = scheduler.clone();
         let task_control = control.clone();
+        let task_recycle = Arc::clone(&recycle);
         tokio::spawn(async move {
             let outcome = run_download_reader(
                 handle,
@@ -3040,6 +3186,7 @@ async fn spawn_download_pipeline(
                 task_scheduler,
                 task_control,
                 task_tx.clone(),
+                task_recycle,
             )
             .await;
             let message = outcome.unwrap_or_else(|error| DownloadReadMessage::Failed { error });
@@ -3047,7 +3194,11 @@ async fn spawn_download_pipeline(
         });
     }
     drop(chunk_tx);
-    Ok(DownloadPipeline { receiver, readers })
+    Ok(DownloadPipeline {
+        receiver,
+        readers,
+        recycle,
+    })
 }
 
 async fn run_download_reader(
@@ -3057,6 +3208,7 @@ async fn run_download_reader(
     scheduler: TransferScheduler,
     mut control: watch::Receiver<TransferControl>,
     chunk_tx: mpsc::Sender<DownloadReadMessage>,
+    recycle: DownloadBufferPool,
 ) -> anyhow::Result<DownloadReadMessage> {
     loop {
         if offset >= total_bytes {
@@ -3085,7 +3237,8 @@ async fn run_download_reader(
             BandwidthWaitOutcome::Paused => continue,
             BandwidthWaitOutcome::Cancelled => bail!("transfer cancelled"),
         };
-        let mut buffer = vec![0_u8; permit.bytes().max(1)];
+        let mut buffer = take_recycled_download_buffer(&recycle, permit.bytes().max(1))
+            .unwrap_or_else(|| vec![0_u8; permit.bytes().max(1)]);
         let mut filled = 0_usize;
         let mut hit_end = false;
         while filled < buffer.len() {
@@ -3217,6 +3370,7 @@ async fn download_file(
     )
     .await?;
     let mut chunk_rx = pipeline.receiver;
+    let recycle = pipeline.recycle;
     let mut live_readers = pipeline.readers;
     let mut pending_chunks: HashMap<u64, Vec<u8>> = HashMap::new();
     let mut next_write_offset = transferred;
@@ -3252,10 +3406,14 @@ async fn download_file(
                     transferred += chunk.len() as u64;
                     progress(transferred);
                     match pending_chunks.remove(&next_write_offset) {
-                        Some(buffered) => chunk = buffered,
+                        Some(buffered) => {
+                            recycle_download_buffer(&recycle, chunk);
+                            chunk = buffered;
+                        }
                         None => break,
                     }
                 }
+                recycle_download_buffer(&recycle, chunk);
             }
             DownloadReadMessage::EndOfStream => {
                 live_readers -= 1;
@@ -4701,6 +4859,7 @@ mod tests {
                 connection_id,
                 control,
                 worker_finished: Arc::clone(&worker_finished),
+                finished_at: None,
                 snapshot: Arc::new(StdMutex::new(context.event(
                     TransferStatus::Running,
                     512,

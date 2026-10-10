@@ -40,9 +40,13 @@ export class BoundedSessionLogBuffer {
     this.trimmed = false;
   }
 
-  append(output: string): void {
+  /**
+   * `byteLength` lets hot callers (the terminal output path) pass the source
+   * chunk's known UTF-8 length instead of re-walking every code point here.
+   */
+  append(output: string, byteLength = utf8ByteLength(output)): void {
     if (!output) return;
-    const bytes = utf8ByteLength(output);
+    const bytes = byteLength;
     if (bytes === 0) return;
     this.chunks.push({ text: output, bytes });
     this.outputBytes += bytes;

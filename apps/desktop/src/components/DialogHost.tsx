@@ -162,6 +162,24 @@ function useTopDialog(): DialogRequest | null {
   return pending.length > 0 ? pending[pending.length - 1] : null;
 }
 
+/**
+ * Capturing keydown listener attached once for the dialog's lifetime. Without
+ * it the listener was removed and re-added on every render — PromptDialog
+ * re-renders on every keystroke, churning the listener per character typed.
+ * The handler itself stays fresh through the ref.
+ */
+function useDialogKeydown(handler: (event: KeyboardEvent) => void) {
+  const handlerRef = useRef(handler);
+  useEffect(() => {
+    handlerRef.current = handler;
+  });
+  useEffect(() => {
+    const dispatch = (event: KeyboardEvent) => handlerRef.current(event);
+    window.addEventListener("keydown", dispatch, true);
+    return () => window.removeEventListener("keydown", dispatch, true);
+  }, []);
+}
+
 function ConfirmDialog({ request }: { request: ConfirmRequest }) {
   const onKeydown = (event: KeyboardEvent) => {
     if (event.key === "Escape") {
@@ -174,10 +192,7 @@ function ConfirmDialog({ request }: { request: ConfirmRequest }) {
       request.resolve(true);
     }
   };
-  useEffect(() => {
-    window.addEventListener("keydown", onKeydown, true);
-    return () => window.removeEventListener("keydown", onKeydown, true);
-  });
+  useDialogKeydown(onKeydown);
   return (
     <div className="modal-backdrop dialog-backdrop" onMouseDown={() => {
       finish(request);
@@ -236,10 +251,7 @@ function PromptDialog({ request }: { request: PromptRequest }) {
       submit();
     }
   };
-  useEffect(() => {
-    window.addEventListener("keydown", onKeydown, true);
-    return () => window.removeEventListener("keydown", onKeydown, true);
-  });
+  useDialogKeydown(onKeydown);
   return (
     <div className="modal-backdrop dialog-backdrop" onMouseDown={cancel}>
       <section
@@ -302,10 +314,7 @@ function HostKeyDialog({ request }: { request: HostKeyRequest }) {
       request.resolve(true);
     }
   };
-  useEffect(() => {
-    window.addEventListener("keydown", onKeydown, true);
-    return () => window.removeEventListener("keydown", onKeydown, true);
-  });
+  useDialogKeydown(onKeydown);
   return (
     <div className="modal-backdrop dialog-backdrop" role="presentation" onMouseDown={() => {
       finish(request);
@@ -355,10 +364,7 @@ function ColorDialog({ request }: { request: ColorRequest }) {
       request.resolve(null);
     }
   };
-  useEffect(() => {
-    window.addEventListener("keydown", onKeydown, true);
-    return () => window.removeEventListener("keydown", onKeydown, true);
-  });
+  useDialogKeydown(onKeydown);
   return (
     <div className="modal-backdrop dialog-backdrop" onMouseDown={() => {
       finish(request);

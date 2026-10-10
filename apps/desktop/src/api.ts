@@ -79,8 +79,10 @@ export const api = {
       rows,
       onEvent,
     }),
-  terminalWrite: (connectionId: Uuid, data: number[]) =>
+  terminalWrite: (connectionId: Uuid, data: string) =>
     invoke<void>("terminal_write", { connectionId, data }),
+  terminalWriteBinary: (connectionId: Uuid, data: number[]) =>
+    invoke<void>("terminal_write_binary", { connectionId, data }),
   terminalAcknowledgeOutput: (connectionId: Uuid, consumedBytes: number) =>
     invoke<void>("terminal_acknowledge_output", { connectionId, consumedBytes }),
   terminalRespondAuth: (connectionId: Uuid, challengeId: Uuid, responses: string[]) =>

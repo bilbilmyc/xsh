@@ -2,6 +2,32 @@ import type { TerminalTrigger } from "./types";
 
 const MAX_MATCH_BUFFER = 8_192;
 const ANSI_ESCAPE = /\x1b\[[0-?]*[ -/]*[@-~]/g;
+const REGEX_CACHE_LIMIT = 256;
+const compiledRegexCache = new Map<string, RegExp>();
+
+/**
+ * Compiling a trigger regex on every output chunk is the dominant cost of
+ * trigger matching when large output streams past, so compiled expressions
+ * are cached by pattern+flags. `lastIndex` is reset because the exec loop in
+ * `findMatch` leaves it wherever the last scan ended.
+ */
+function compiledTriggerRegex(pattern: string, caseSensitive: boolean): RegExp | null {
+  const flags = caseSensitive ? "g" : "gi";
+  const key = `${flags}:${pattern}`;
+  const cached = compiledRegexCache.get(key);
+  if (cached) {
+    cached.lastIndex = 0;
+    return cached;
+  }
+  try {
+    const expression = new RegExp(pattern, flags);
+    if (compiledRegexCache.size >= REGEX_CACHE_LIMIT) compiledRegexCache.clear();
+    compiledRegexCache.set(key, expression);
+    return expression;
+  } catch {
+    return null;
+  }
+}
 
 export interface TerminalTriggerMatch {
   trigger: TerminalTrigger;
@@ -52,17 +78,14 @@ export function matchesTerminalShortcut(event: KeyboardEvent, shortcut: string):
 
 function findMatch(source: string, trigger: TerminalTrigger, appendedAt: number): string | null {
   if (trigger.matchMode === "regex") {
-    try {
-      const expression = new RegExp(trigger.pattern, trigger.caseSensitive ? "g" : "gi");
-      let match: RegExpExecArray | null;
-      while ((match = expression.exec(source)) !== null) {
-        if (match.index + match[0].length > appendedAt) return match[0];
-        if (match[0].length === 0) expression.lastIndex += 1;
-      }
-      return null;
-    } catch {
-      return null;
+    const expression = compiledTriggerRegex(trigger.pattern, trigger.caseSensitive);
+    if (!expression) return null;
+    let match: RegExpExecArray | null;
+    while ((match = expression.exec(source)) !== null) {
+      if (match.index + match[0].length > appendedAt) return match[0];
+      if (match[0].length === 0) expression.lastIndex += 1;
     }
+    return null;
   }
   const expected = trigger.caseSensitive ? trigger.pattern : trigger.pattern.toLocaleLowerCase();
   const haystack = trigger.caseSensitive ? source : source.toLocaleLowerCase();

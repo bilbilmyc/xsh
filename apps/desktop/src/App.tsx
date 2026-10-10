@@ -269,8 +269,6 @@ function App() {
   const [pendingTerminalCommands, setPendingTerminalCommands] = useState<Record<string, TerminalCommandRequest>>({});
   const [paneLayout, setPaneLayout] = useState<PaneLayout>(() => loadPaneLayout());
   const [splitRatio, setSplitRatio] = useState(() => loadSplitRatio());
-  const splitRatioRef = useRef(splitRatio);
-  splitRatioRef.current = splitRatio;
   const [secondaryTabId, setSecondaryTabId] = useState<string | null>(null);
   const [sidebarVisible, setSidebarVisible] = useState(() => loadSidebarVisible());
   const [onboardingVisible, setOnboardingVisible] = useState(false);
@@ -311,6 +309,7 @@ function App() {
     };
   }, []);
   const terminalStageRef = useRef<HTMLDivElement>(null);
+  const splitDividerRef = useRef<HTMLDivElement>(null);
   const tabsRef = useRef<TerminalTab[]>([]);
   const pendingSessionOpenRef = useRef(new Map<string, TerminalTab>());
   const activeTabIdRef = useRef<string | null>(null);
@@ -428,32 +427,50 @@ function App() {
     window.localStorage.setItem(PANE_LAYOUT_STORAGE_KEY, next);
   };
 
-  const updateSplitRatio = (next: number, persist = true) => {
+  const updateSplitRatio = (next: number) => {
     const normalized = Math.min(MAX_SPLIT_RATIO, Math.max(MIN_SPLIT_RATIO, Math.round(next * 10) / 10));
     setSplitRatio(normalized);
-    // Persisting synchronously on every pointermove blocks the main thread
-    // while dragging; the caller persists once on pointerup instead.
-    if (persist) window.localStorage.setItem(SPLIT_RATIO_STORAGE_KEY, String(normalized));
+    window.localStorage.setItem(SPLIT_RATIO_STORAGE_KEY, String(normalized));
   };
 
   const beginSplitResize = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (paneLayout === "single" || !terminalStageRef.current) return;
+    if (paneLayout === "single" || !terminalStageRef.current || !splitDividerRef.current) return;
     event.preventDefault();
     const stage = terminalStageRef.current;
+    const divider = splitDividerRef.current;
     const pointerId = event.pointerId;
     event.currentTarget.setPointerCapture(pointerId);
     document.body.classList.add("resizing-terminal-split");
 
+    const applyRatio = (ratio: number) => {
+      // Direct style writes keep the drag off React state; committing per
+      // pointermove re-rendered the entire app at pointer frequency. React
+      // skips identical inline styles on later renders, so the committed
+      // state (set once on pointerup) stays authoritative.
+      if (paneLayout === "vertical") {
+        stage.style.gridTemplateColumns = `minmax(0, ${ratio}fr) minmax(0, ${100 - ratio}fr)`;
+        divider.style.left = `${ratio}%`;
+      } else {
+        stage.style.gridTemplateRows = `minmax(0, ${ratio}fr) minmax(0, ${100 - ratio}fr)`;
+        divider.style.top = `${ratio}%`;
+      }
+    };
     const move = (moveEvent: PointerEvent) => {
       const rect = stage.getBoundingClientRect();
       const next = paneLayout === "vertical"
         ? ((moveEvent.clientX - rect.left) / Math.max(rect.width, 1)) * 100
         : ((moveEvent.clientY - rect.top) / Math.max(rect.height, 1)) * 100;
-      updateSplitRatio(next, false);
+      applyRatio(Math.min(MAX_SPLIT_RATIO, Math.max(MIN_SPLIT_RATIO, next)));
     };
     const finish = () => {
       document.body.classList.remove("resizing-terminal-split");
-      window.localStorage.setItem(SPLIT_RATIO_STORAGE_KEY, String(splitRatioRef.current));
+      const raw = parseFloat(paneLayout === "vertical" ? divider.style.left : divider.style.top);
+      if (Number.isFinite(raw)) {
+        const normalized = Math.min(MAX_SPLIT_RATIO, Math.max(MIN_SPLIT_RATIO, Math.round(raw * 10) / 10));
+        applyRatio(normalized);
+        window.localStorage.setItem(SPLIT_RATIO_STORAGE_KEY, String(normalized));
+        setSplitRatio(normalized);
+      }
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", finish);
       window.removeEventListener("pointercancel", finish);
@@ -1647,6 +1664,7 @@ function App() {
             </Suspense>
             {paneLayout !== "single" && secondaryTabId && (
               <div
+                ref={splitDividerRef}
                 className={`split-divider ${paneLayout}`}
                 style={paneLayout === "vertical" ? { left: `${splitRatio}%` } : { top: `${splitRatio}%` }}
                 role="separator"
