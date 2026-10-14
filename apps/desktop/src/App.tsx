@@ -1625,10 +1625,6 @@ function App() {
   return (
     <main className="app-shell">
       <header className="app-header" data-tauri-drag-region>
-        <div className="brand-block">
-          <div className="brand-mark">X</div>
-          <div><strong>XSH</strong><span>SSH 工作台</span></div>
-        </div>
         <div className="header-actions">
           <button className="icon-button" title={`${sidebarVisible ? "隐藏" : "显示"}会话侧栏 · macOS ⌘B / Windows Ctrl+Shift+B`} onClick={toggleSidebar} aria-label={sidebarVisible ? "隐藏会话侧栏" : "显示会话侧栏"}>
             {sidebarVisible ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}
@@ -1655,8 +1651,8 @@ function App() {
           <button className="toolbar-button" onClick={openRemoteDesktopEditor} title="新建 VNC/RDP 远程桌面连接（经 SSH 加密隧道）"><Monitor size={15} />新建远程桌面</button>
           <button className="icon-button" title="设置" onClick={() => setSettingsVisible(true)}><Settings size={16} /></button>
           <button className="icon-button" title="工作区管理" onClick={() => setWorkspaceManagerVisible(true)}><MoreHorizontal size={17} /></button>
-          <WindowControls />
         </div>
+        <WindowControls />
       </header>
 
       <div className={`workspace ${sidebarVisible ? "" : "sidebar-hidden"}`}>

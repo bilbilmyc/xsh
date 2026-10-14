@@ -176,49 +176,6 @@ select {
   color: #44576b;
 }
 
-.brand-block {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 155px;
-}
-
-.brand-mark {
-  width: 28px;
-  height: 28px;
-  display: grid;
-  place-items: center;
-  border: 1px solid rgba(89, 209, 236, 0.42);
-  border-radius: 7px;
-  color: #dcf9ff;
-  background: linear-gradient(145deg, #1ba3c4, #17667d);
-  box-shadow: 0 5px 16px rgba(13, 148, 178, 0.2), 0 1px 0 rgba(255, 255, 255, 0.16) inset;
-  font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 15px;
-  font-weight: 700;
-}
-
-.brand-block > div:last-child {
-  display: flex;
-  flex-direction: column;
-  line-height: 1.05;
-}
-
-.brand-block strong {
-  color: var(--text-strong);
-  font-size: var(--font-lg);
-  letter-spacing: 0.08em;
-}
-
-.brand-block span {
-  margin-top: 4px;
-  color: var(--faint);
-  font-size: var(--font-2xs);
-  font-weight: 400;
-  letter-spacing: 0.09em;
-  text-transform: uppercase;
-}
-
 .header-actions {
   display: flex;
   align-items: center;
@@ -5180,13 +5137,6 @@ body.resizing-terminal-split .split-divider.horizontal * { cursor: row-resize !i
 :root[data-theme="light"] .app-header {
   background: linear-gradient(180deg, #ffffff 0%, #f4f8fa 100%);
   box-shadow: 0 1px 0 rgba(27, 58, 72, 0.04) inset;
-}
-
-:root[data-theme="light"] .brand-mark {
-  border-color: rgba(8, 126, 164, 0.3);
-  color: #effcff;
-  background: linear-gradient(145deg, #0e9fc1, #087ea4);
-  box-shadow: 0 5px 16px rgba(8, 126, 164, 0.16), 0 1px 0 rgba(255, 255, 255, 0.65) inset;
 }
 
 :root[data-theme="light"] .toolbar-button,
