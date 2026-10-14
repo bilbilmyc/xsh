@@ -774,15 +774,10 @@ select {
   min-height: 0;
   flex: 1;
   display: grid;
-  grid-template-rows: 38px minmax(0, 1fr);
+  /* Only the terminal stage remains here; the tab strip moved into the app
+   * header, so a single filling row replaces the old 38px + 1fr pair. */
+  grid-template-rows: minmax(0, 1fr);
   background: #0b0f14;
-}
-
-.tab-strip {
-  min-width: 0;
-  display: flex;
-  border-bottom: 1px solid var(--line);
-  background: #101720;
 }
 
 .tabs-scroll {
@@ -2917,7 +2912,6 @@ body {
 :root[data-theme="light"] .app-shell,
 :root[data-theme="light"] .app-header,
 :root[data-theme="light"] .session-sidebar,
-:root[data-theme="light"] .tab-strip,
 :root[data-theme="light"] .status-bar,
 :root[data-theme="light"] .terminal-stage,
 :root[data-theme="light"] .welcome-panel,
@@ -2928,7 +2922,6 @@ body {
 
 :root[data-theme="light"] .app-header,
 :root[data-theme="light"] .session-sidebar,
-:root[data-theme="light"] .tab-strip,
 :root[data-theme="light"] .status-bar {
   background: #f7f9fb;
 }
@@ -3018,13 +3011,11 @@ body {
 
 :root[data-theme="graphite"] .app-header,
 :root[data-theme="graphite"] .session-sidebar,
-:root[data-theme="graphite"] .tab-strip,
 :root[data-theme="graphite"] .status-bar { background: #15181b; }
 :root[data-theme="graphite"] .terminal-stage,
 :root[data-theme="graphite"] .welcome-panel { background-color: #111315; }
 :root[data-theme="dusk"] .app-header,
 :root[data-theme="dusk"] .session-sidebar,
-:root[data-theme="dusk"] .tab-strip,
 :root[data-theme="dusk"] .status-bar { background: #15131f; }
 :root[data-theme="dusk"] .terminal-stage,
 :root[data-theme="dusk"] .welcome-panel { background-color: #100f18; }
@@ -3367,7 +3358,9 @@ body {
 
 /* V2.0.1: Xshell-style bottom quick command bar. */
 .terminal-workspace {
-  grid-template-rows: 38px minmax(0, 1fr) auto;
+  /* Tab strip lives in the app header now: terminal stage fills, quick
+   * command bar takes its natural height below. */
+  grid-template-rows: minmax(0, 1fr) auto;
 }
 
 .quick-command-bar {
