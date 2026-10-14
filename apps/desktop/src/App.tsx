@@ -3,6 +3,7 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow, type Window as TauriWindow } from "@tauri-apps/api/window";
 import {
   Activity,
+  ArrowDownUp,
   BellRing,
   Command,
   Columns2,
@@ -1629,8 +1630,9 @@ function App() {
           <button className="icon-button" title={`${sidebarVisible ? "隐藏" : "显示"}会话侧栏 · macOS ⌘B / Windows Ctrl+Shift+B`} onClick={toggleSidebar} aria-label={sidebarVisible ? "隐藏会话侧栏" : "显示会话侧栏"}>
             {sidebarVisible ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}
           </button>
-          <button className="toolbar-button" onClick={importSessions}><Upload size={14} />导入</button>
-          <button className="toolbar-button" onClick={exportSessions}><Download size={14} />导出</button>
+          <button className="toolbar-button" onClick={openSshSessionEditor} title="新建 SSH 会话"><Plus size={14} />新建会话</button>
+          <button className="toolbar-button" onClick={importSessions} title="从文件导入会话"><Upload size={14} />导入</button>
+          <button className="toolbar-button" onClick={exportSessions} title="导出会话到文件"><Download size={14} />导出</button>
           <button
             className="toolbar-button"
             onClick={() => {
@@ -1641,16 +1643,104 @@ function App() {
           >
             <FileKey size={14} />SSH 配置
           </button>
-          <button className={`toolbar-button connection-manager-trigger ${tabs.length > 0 ? "has-connections" : ""}`} onClick={() => setConnectionManagerVisible(true)} title="查看和管理所有活动连接">
-            <Activity size={14} />连接 {tabs.filter((tab) => tab.state === "connected").length}/{tabs.length}
+          <span className="toolbar-group-divider" />
+          <button className="icon-button connection-manager-trigger" onClick={() => setConnectionManagerVisible(true)} title={`连接管理 · 已连接 ${tabs.filter((tab) => tab.state === "connected").length}/${tabs.length}`}>
+            <Activity size={16} />
           </button>
-          <button className="toolbar-button" onClick={() => setTransferManagerVisible(true)} title="查看后台传输任务"><Activity size={14} />传输</button>
-          <button className="toolbar-button command-center-trigger" onClick={() => setCommandCenterVisible(true)}><Command size={14} />命令中心</button>
-          <button className="toolbar-button" onClick={() => setHistoryVisible(true)}><History size={14} />历史</button>
-          <button className="toolbar-button" onClick={openSshSessionEditor}><Plus size={15} />新建会话</button>
-          <button className="toolbar-button" onClick={openRemoteDesktopEditor} title="新建 VNC/RDP 远程桌面连接（经 SSH 加密隧道）"><Monitor size={15} />新建远程桌面</button>
+          <button className="icon-button" onClick={() => setTransferManagerVisible(true)} title="后台传输任务"><ArrowDownUp size={16} /></button>
+          <button className="icon-button command-center-trigger" onClick={() => setCommandCenterVisible(true)} title="命令中心"><Command size={16} /></button>
+          <button className="icon-button" onClick={() => setHistoryVisible(true)} title="命令历史"><History size={16} /></button>
+          <span className="toolbar-group-divider" />
+          <button className="icon-button" onClick={openRemoteDesktopEditor} title="新建 VNC/RDP 远程桌面连接（经 SSH 加密隧道）"><Monitor size={16} /></button>
           <button className="icon-button" title="设置" onClick={() => setSettingsVisible(true)}><Settings size={16} /></button>
           <button className="icon-button" title="工作区管理" onClick={() => setWorkspaceManagerVisible(true)}><MoreHorizontal size={17} /></button>
+        </div>
+        <div className="header-tabs">
+          <div className="tabs-scroll">
+            {tabs.map((tab) => (
+              <button
+                key={tab.id}
+                className={`terminal-tab ${activeTabId === tab.id ? "active" : ""} ${draggedTabId === tab.id ? "dragging" : ""} ${tab.locked ? "locked" : ""} ${tab.color ? "has-custom-color" : ""} ${tab.alert ? "triggered" : ""}`}
+                style={tab.color ? { "--tab-accent": tab.color } as CSSProperties : undefined}
+                draggable
+                title={`${getTabLabel(tab)} · ${connectionStateLabel(tab.state)}${tab.locked ? " · 已锁定" : ""}${tab.alert ? ` · 触发：${tab.alert.label}（${tab.alert.count}）` : ""}\n${tab.session.username}@${tab.session.host}:${tab.session.port}\n拖拽标签可调整顺序，双击可重命名`}
+                onClick={() => focusTab(tab.id)}
+                onDoubleClick={(event) => {
+                  event.preventDefault();
+                  renameTab(tab);
+                }}
+                onDragStart={(event) => {
+                  setDraggedTabId(tab.id);
+                  event.dataTransfer.effectAllowed = "move";
+                  event.dataTransfer.setData("text/plain", tab.id);
+                }}
+                onDragOver={(event) => {
+                  event.preventDefault();
+                  event.dataTransfer.dropEffect = "move";
+                }}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  const sourceId = event.dataTransfer.getData("text/plain") || draggedTabId;
+                  if (sourceId) reorderTabs(sourceId, tab.id);
+                  setDraggedTabId(null);
+                }}
+                onDragEnd={() => setDraggedTabId(null)}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setTabContextMenu({ x: event.clientX, y: event.clientY, tabId: tab.id });
+                }}
+                onAuxClick={(event) => {
+                  if (event.button === 1 && !tab.locked) {
+                    event.preventDefault();
+                    closeTab(tab.id);
+                  }
+                }}
+              >
+                <span className={`connection-dot ${tab.state}`} />
+                <span>{getTabLabel(tab)}</span>
+                {tab.alert && <span className="tab-trigger" title={`${tab.alert.label} · 已命中 ${tab.alert.count} 次`}><BellRing size={11} /></span>}
+                {tab.locked ? (
+                  <span className="tab-lock" title="标签已锁定"><Lock size={11} /></span>
+                ) : (
+                  <span
+                    className="tab-close"
+                    onClick={(event) => { event.stopPropagation(); closeTab(tab.id); }}
+                    onDoubleClick={(event) => event.stopPropagation()}
+                  ><X size={12} /></span>
+                )}
+              </button>
+            ))}
+            <button className="tab-new-button" onClick={() => setEditorSession(null)} title="新建会话标签"><Plus size={15} /></button>
+          </div>
+          <div className="pane-controls" title="终端布局">
+            <button className={paneLayout === "single" ? "active" : ""} onClick={() => updatePaneLayout("single")} title="单终端"><Square size={13} /></button>
+            <button className={paneLayout === "vertical" ? "active" : ""} onClick={() => updatePaneLayout("vertical")} title="左右分屏"><Columns2 size={13} /></button>
+            <button className={paneLayout === "horizontal" ? "active" : ""} onClick={() => updatePaneLayout("horizontal")} title="上下分屏 · macOS ⌘⌥J / Windows Ctrl+Alt+J"><Rows2 size={13} /></button>
+            {paneLayout !== "single" && (
+              <select value={secondaryTabId ?? ""} onChange={(event) => setSecondaryTabId(event.target.value || null)} title="选择分屏会话">
+                <option value="">选择第二个会话</option>
+                {tabs.filter((tab) => tab.id !== activeTabId).map((tab) => <option key={tab.id} value={tab.id}>{getTabLabel(tab)}</option>)}
+              </select>
+            )}
+            <button className={broadcastEnabled ? "active" : ""} onClick={() => setBroadcastEnabled((value) => !value)} title={broadcastEnabled ? "关闭命令广播" : "开启命令广播"}>广播</button>
+            <button onClick={() => setBatchCommandVisible(true)} title="选择目标并逐会话汇总批量命令结果"><SendHorizontal size={13} />批量命令</button>
+          </div>
+          {activeTab && connectionIds[activeTab.id] && activeTab.session.kind !== "remoteDesktop" && (
+            <button className={`sftp-toggle ${portForwardVisible ? "active" : ""}`} onClick={() => setPortForwardVisible((value) => !value)} title="端口转发">
+              <Globe2 size={14} />转发
+            </button>
+          )}
+          {activeTab && connectionIds[activeTab.id] && activeTab.session.kind !== "remoteDesktop" && (
+            <button className={`sftp-toggle ${remoteDesktopVisible ? "active" : ""}`} onClick={() => setRemoteDesktopVisible((value) => !value)} title="VNC / RDP 远程桌面">
+              <Monitor size={14} />远程
+            </button>
+          )}
+          {activeTab && activeTab.session.kind !== "remoteDesktop" && (
+            <button className={`sftp-toggle ${sftpVisible ? "active" : ""}`} onClick={() => setSftpVisible((value) => !value)}>
+              <Files size={14} />SFTP
+            </button>
+          )}
         </div>
         <WindowControls />
       </header>
@@ -1681,94 +1771,6 @@ function App() {
         />}
 
         <section className="terminal-workspace">
-          <div className="tab-strip">
-            <div className="tabs-scroll">
-              {tabs.map((tab) => (
-                <button
-                  key={tab.id}
-                  className={`terminal-tab ${activeTabId === tab.id ? "active" : ""} ${draggedTabId === tab.id ? "dragging" : ""} ${tab.locked ? "locked" : ""} ${tab.color ? "has-custom-color" : ""} ${tab.alert ? "triggered" : ""}`}
-                  style={tab.color ? { "--tab-accent": tab.color } as CSSProperties : undefined}
-                  draggable
-                  title={`${getTabLabel(tab)} · ${connectionStateLabel(tab.state)}${tab.locked ? " · 已锁定" : ""}${tab.alert ? ` · 触发：${tab.alert.label}（${tab.alert.count}）` : ""}\n${tab.session.username}@${tab.session.host}:${tab.session.port}\n拖拽标签可调整顺序，双击可重命名`}
-                  onClick={() => focusTab(tab.id)}
-                  onDoubleClick={(event) => {
-                    event.preventDefault();
-                    renameTab(tab);
-                  }}
-                  onDragStart={(event) => {
-                    setDraggedTabId(tab.id);
-                    event.dataTransfer.effectAllowed = "move";
-                    event.dataTransfer.setData("text/plain", tab.id);
-                  }}
-                  onDragOver={(event) => {
-                    event.preventDefault();
-                    event.dataTransfer.dropEffect = "move";
-                  }}
-                  onDrop={(event) => {
-                    event.preventDefault();
-                    const sourceId = event.dataTransfer.getData("text/plain") || draggedTabId;
-                    if (sourceId) reorderTabs(sourceId, tab.id);
-                    setDraggedTabId(null);
-                  }}
-                  onDragEnd={() => setDraggedTabId(null)}
-                  onContextMenu={(event) => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    setTabContextMenu({ x: event.clientX, y: event.clientY, tabId: tab.id });
-                  }}
-                  onAuxClick={(event) => {
-                    if (event.button === 1 && !tab.locked) {
-                      event.preventDefault();
-                      closeTab(tab.id);
-                    }
-                  }}
-                >
-                  <span className={`connection-dot ${tab.state}`} />
-                  <span>{getTabLabel(tab)}</span>
-                  {tab.alert && <span className="tab-trigger" title={`${tab.alert.label} · 已命中 ${tab.alert.count} 次`}><BellRing size={11} /></span>}
-                  {tab.locked ? (
-                    <span className="tab-lock" title="标签已锁定"><Lock size={11} /></span>
-                  ) : (
-                    <span
-                      className="tab-close"
-                      onClick={(event) => { event.stopPropagation(); closeTab(tab.id); }}
-                      onDoubleClick={(event) => event.stopPropagation()}
-                    ><X size={12} /></span>
-                  )}
-                </button>
-              ))}
-              <button className="tab-new-button" onClick={() => setEditorSession(null)} title="新建会话标签"><Plus size={15} /></button>
-            </div>
-            <div className="pane-controls" title="终端布局">
-              <button className={paneLayout === "single" ? "active" : ""} onClick={() => updatePaneLayout("single")} title="单终端"><Square size={13} /></button>
-              <button className={paneLayout === "vertical" ? "active" : ""} onClick={() => updatePaneLayout("vertical")} title="左右分屏"><Columns2 size={13} /></button>
-              <button className={paneLayout === "horizontal" ? "active" : ""} onClick={() => updatePaneLayout("horizontal")} title="上下分屏 · macOS ⌘⌥J / Windows Ctrl+Alt+J"><Rows2 size={13} /></button>
-              {paneLayout !== "single" && (
-                <select value={secondaryTabId ?? ""} onChange={(event) => setSecondaryTabId(event.target.value || null)} title="选择分屏会话">
-                  <option value="">选择第二个会话</option>
-                  {tabs.filter((tab) => tab.id !== activeTabId).map((tab) => <option key={tab.id} value={tab.id}>{getTabLabel(tab)}</option>)}
-                </select>
-              )}
-              <button className={broadcastEnabled ? "active" : ""} onClick={() => setBroadcastEnabled((value) => !value)} title={broadcastEnabled ? "关闭命令广播" : "开启命令广播"}>广播</button>
-              <button onClick={() => setBatchCommandVisible(true)} title="选择目标并逐会话汇总批量命令结果"><SendHorizontal size={13} />批量命令</button>
-            </div>
-            {activeTab && connectionIds[activeTab.id] && activeTab.session.kind !== "remoteDesktop" && (
-              <button className={`sftp-toggle ${portForwardVisible ? "active" : ""}`} onClick={() => setPortForwardVisible((value) => !value)} title="端口转发">
-                <Globe2 size={14} />转发
-              </button>
-            )}
-            {activeTab && connectionIds[activeTab.id] && activeTab.session.kind !== "remoteDesktop" && (
-              <button className={`sftp-toggle ${remoteDesktopVisible ? "active" : ""}`} onClick={() => setRemoteDesktopVisible((value) => !value)} title="VNC / RDP 远程桌面">
-                <Monitor size={14} />远程
-              </button>
-            )}
-            {activeTab && activeTab.session.kind !== "remoteDesktop" && (
-              <button className={`sftp-toggle ${sftpVisible ? "active" : ""}`} onClick={() => setSftpVisible((value) => !value)}>
-                <Files size={14} />SFTP
-              </button>
-            )}
-          </div>
-
           <div
             ref={terminalStageRef}
             className={`terminal-stage ${paneLayout !== "single" ? `split-${paneLayout}` : ""}`}

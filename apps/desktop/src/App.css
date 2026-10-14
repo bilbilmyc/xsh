@@ -177,9 +177,83 @@ select {
 }
 
 .header-actions {
+  flex: none;
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+/* Session tabs live in the header between the toolbar and the window
+ * controls, XShell-style: the strip fills the leftover width instead of
+ * wasting a drag-only dead zone in the middle. */
+.header-tabs {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 6px 0 10px;
+}
+
+.header-tabs .tabs-scroll {
+  flex: 1;
+  min-width: 0;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.header-tabs .terminal-tab {
+  min-width: 96px;
+  max-width: 200px;
+  height: 32px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: #94a7ba;
+  background: transparent;
+}
+
+.header-tabs .terminal-tab:hover {
+  background: #17222e;
+  color: #c3d1dd;
+}
+
+.header-tabs .pane-controls {
+  padding-left: 8px;
+  border-left: 1px solid var(--line-soft);
+}
+
+.header-tabs .terminal-tab.active {
+  border-color: rgba(57, 184, 214, 0.28);
+  background: #1b2c3d;
+  box-shadow: none;
+}
+
+.header-tabs .terminal-tab.has-custom-color {
+  box-shadow: none;
+}
+
+.header-tabs .terminal-tab.has-custom-color.active {
+  border-color: var(--tab-accent);
+}
+
+:root[data-theme="light"] .header-tabs .terminal-tab:hover {
+  background: #e9eef2;
+}
+
+:root[data-theme="light"] .header-tabs .terminal-tab.active {
+  border-color: rgba(8, 126, 164, 0.35);
+  background: #dde7ee;
+  box-shadow: none;
+}
+
+.toolbar-group-divider {
+  flex: none;
+  width: 1px;
+  height: 18px;
+  margin: 0 7px;
+  background: var(--line);
 }
 
 .toolbar-button,
