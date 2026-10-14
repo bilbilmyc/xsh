@@ -313,12 +313,38 @@ select {
 .sidebar-view-tools {
   min-width: 0;
   display: grid;
-  grid-template-columns: 14px minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: 14px minmax(0, 1fr) minmax(0, 1fr) auto;
   align-items: center;
   gap: 5px;
   padding: 6px 10px 7px;
   border-bottom: 1px solid var(--line-soft);
   color: var(--faint);
+}
+
+.sidebar-view-tools .multi-select-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--line-soft);
+  border-radius: 4px;
+  color: #a7b7c5;
+  background: var(--panel);
+  font-size: var(--font-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.sidebar-view-tools .multi-select-toggle:hover {
+  color: var(--accent-strong);
+  border-color: rgba(57, 184, 214, 0.35);
+}
+
+.sidebar-view-tools .multi-select-toggle.active {
+  color: var(--accent-strong);
+  border-color: rgba(57, 184, 214, 0.5);
+  background: var(--accent-bg);
 }
 
 .sidebar-view-tools select {
@@ -472,13 +498,13 @@ select {
   position: relative;
   width: 100%;
   min-width: 0;
-  min-height: 36px;
+  min-height: 30px;
   display: grid;
   grid-template-columns: 6px 14px minmax(0, 1fr) max-content;
   align-items: center;
   gap: 5px;
   margin: 0;
-  padding: 3px 6px;
+  padding: 2px 6px;
   overflow: hidden;
   border: 1px solid transparent;
   border-radius: 6px;
@@ -487,6 +513,32 @@ select {
   color: #8596a7;
   background: transparent;
   text-align: left;
+}
+
+.session-row.selecting {
+  grid-template-columns: 14px 6px 14px minmax(0, 1fr) max-content;
+  cursor: pointer;
+}
+
+.row-checkbox {
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #3a4b5c;
+  border-radius: 3px;
+  color: #06121a;
+  background: #0d151d;
+}
+
+.session-row.selecting:hover .row-checkbox {
+  border-color: #466076;
+}
+
+.row-checkbox.checked {
+  border-color: var(--accent);
+  background: var(--accent);
 }
 
 .session-row:hover {
@@ -524,30 +576,16 @@ select {
 
 .session-row-copy {
   min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-}
-
-.session-row-copy strong,
-.session-row-copy small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .session-row-copy strong {
   color: inherit;
   font-size: var(--font-xs);
-  line-height: 14px;
+  line-height: 16px;
   font-weight: 600;
-}
-
-.session-row-copy small {
-  color: #5f7182;
-  font-family: "SFMono-Regular", "Cascadia Code", Consolas, monospace;
-  font-size: var(--font-2xs);
-  line-height: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .favorite-icon {
@@ -2930,7 +2968,6 @@ body {
 .sidebar-section-title { font-size: var(--font-xs); color: #8e9eac; font-weight: 650; }
 .group-toggle { font-size: var(--font-md); font-weight: 600; }
 .session-row-copy strong { font-size: var(--font-md); font-weight: 650; line-height: 1.25; }
-.session-row-copy small { font-size: var(--font-xs); color: #9aaab7; font-weight: 500; line-height: 1.35; }
 .sidebar-hint,
 .status-bar { font-size: var(--font-sm); color: #92a6b5; font-weight: 550; }
 .welcome-panel h1 { font-size: var(--font-display); font-weight: 680; }
@@ -3547,8 +3584,10 @@ body {
 
 .pane-controls button {
   min-width: 30px;
-  display: grid;
-  place-items: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
   padding: 0 5px;
   cursor: pointer;
 }
@@ -5133,7 +5172,6 @@ body.resizing-terminal-split .split-divider.horizontal * { cursor: row-resize !i
 }
 
 :root[data-theme="light"] .sidebar-section-title,
-:root[data-theme="light"] .session-row-copy small,
 :root[data-theme="light"] .sidebar-hint,
 :root[data-theme="light"] .status-bar {
   color: #617886;
@@ -6072,15 +6110,6 @@ body.resizing-terminal-split .split-divider.horizontal * { cursor: row-resize !i
 .context-menu-item.active {
   background: rgba(57, 184, 214, 0.14);
 }
-.session-row-address {
-  color: #6d7f90;
-  font-size: 10.5px;
-  line-height: 1.35;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-:root[data-theme="light"] .session-row-address { color: #7c8a97; }
 
 /* Long lists: let the engine skip layout/paint for offscreen rows instead of
    paying full cost for thousand-entry directories and session lists. */

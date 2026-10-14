@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  Check,
   ChevronDown,
   ChevronRight,
   Folder,
   FolderPlus,
+  ListChecks,
   Monitor,
   MoreHorizontal,
   Pencil,
@@ -97,6 +99,7 @@ export function SessionSidebar({
   const [dragOverGroupId, setDragOverGroupId] = useState<string | null>(null);
   const [selectedSessionIds, setSelectedSessionIds] = useState<Set<string>>(new Set());
   const [selectionAnchorId, setSelectionAnchorId] = useState<string | null>(null);
+  const [multiSelectMode, setMultiSelectMode] = useState(false);
   const [batchGroupId, setBatchGroupId] = useState("");
   const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
   const [isResizing, setIsResizing] = useState(false);
@@ -110,6 +113,8 @@ export function SessionSidebar({
   const suppressNextClickRef = useRef(false);
   const suppressNextGroupClickRef = useRef(false);
   const resizeStartRef = useRef<{ x: number; width: number } | null>(null);
+  const resizeWidthRef = useRef<number | null>(null);
+  const asideRef = useRef<HTMLElement | null>(null);
   const dragFeedbackTimerRef = useRef<number | null>(null);
   const recentSessionsRef = useRef(recentSessions);
   const doubleClickStateRef = useRef<{ sessionId: string; wasOpen: boolean; timer: number } | null>(null);
@@ -418,6 +423,17 @@ export function SessionSidebar({
     setSelectionAnchorId(null);
   };
 
+  const exitMultiSelectMode = () => {
+    setMultiSelectMode(false);
+    clearSelection();
+  };
+
+  const selectAllVisible = () => {
+    const visibleIds = visibleSessions.map((candidate) => candidate.id);
+    setSelectedSessionIds(new Set(visibleIds));
+    setSelectionAnchorId(visibleIds.length > 0 ? visibleIds[visibleIds.length - 1] : null);
+  };
+
   const handleGroupClick = (event: React.MouseEvent, groupId: string) => {
     if (suppressNextGroupClickRef.current) {
       event.preventDefault();
@@ -441,13 +457,21 @@ export function SessionSidebar({
     const start = resizeStartRef.current;
     if (!start) return;
     event.preventDefault();
-    setSidebarWidth(clampSidebarWidth(start.width + event.clientX - start.x));
+    const next = clampSidebarWidth(start.width + event.clientX - start.x);
+    resizeWidthRef.current = next;
+    // Direct style writes keep the resize off React state; committing per
+    // pointermove re-rendered every session row at pointer frequency.
+    if (asideRef.current) asideRef.current.style.width = `${next}px`;
   };
 
   const finishSidebarResize = (event: React.PointerEvent<HTMLDivElement>) => {
     if (!resizeStartRef.current) return;
     resizeStartRef.current = null;
     setIsResizing(false);
+    if (resizeWidthRef.current !== null) {
+      setSidebarWidth(resizeWidthRef.current);
+      resizeWidthRef.current = null;
+    }
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
@@ -471,9 +495,10 @@ export function SessionSidebar({
   };
 
   const handleSidebarKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
-    if (event.key === "Escape" && selectedSessionIds.size > 0) {
+    if (event.key === "Escape" && (selectedSessionIds.size > 0 || multiSelectMode)) {
       event.preventDefault();
-      clearSelection();
+      if (multiSelectMode) exitMultiSelectMode();
+      else clearSelection();
       return;
     }
     const target = event.target as HTMLElement;
@@ -502,14 +527,14 @@ export function SessionSidebar({
       if (anchorIndex >= 0 && targetIndex >= 0) {
         const [start, end] = anchorIndex <= targetIndex ? [anchorIndex, targetIndex] : [targetIndex, anchorIndex];
         const range = visibleSessions.slice(start, end + 1).map((candidate) => candidate.id);
-        setSelectedSessionIds((current) => new Set(additive ? [...current, ...range] : range));
+        setSelectedSessionIds((current) => new Set(additive || multiSelectMode ? [...current, ...range] : range));
       } else {
         setSelectedSessionIds(new Set([session.id]));
       }
       setSelectionAnchorId(session.id);
       return;
     }
-    if (additive) {
+    if (additive || multiSelectMode) {
       setSelectedSessionIds((current) => {
         const next = new Set(current);
         if (next.has(session.id)) next.delete(session.id);
@@ -546,7 +571,7 @@ export function SessionSidebar({
   };
 
   const handleSessionDoubleClick = (event: React.MouseEvent, session: SavedSession) => {
-    if (event.metaKey || event.ctrlKey || event.shiftKey || selectedSessionIds.size > 0) return;
+    if (multiSelectMode || event.metaKey || event.ctrlKey || event.shiftKey || selectedSessionIds.size > 0) return;
     event.preventDefault();
     const pending = doubleClickStateRef.current;
     const wasOpen = pending?.sessionId === session.id
@@ -563,31 +588,30 @@ export function SessionSidebar({
     const activity = activityBySessionId[session.id];
     const activityState = primaryActivityState(activity);
     const activityDescription = formatActivitySummary(activity);
+    const isSelected = selectedSessionIds.has(session.id);
     return (
     <button
       key={session.id}
-      className={`session-row ${activeSessionId === session.id ? "active" : ""} ${selectedSessionIds.has(session.id) ? "selected" : ""} ${draggedSessionIds.has(session.id) ? "dragging" : ""}`}
+      className={`session-row ${multiSelectMode ? "selecting" : ""} ${activeSessionId === session.id ? "active" : ""} ${isSelected ? "selected" : ""} ${draggedSessionIds.has(session.id) ? "dragging" : ""}`}
       onPointerDown={(event) => beginPointerDrag(event, session)}
       onClick={(event) => handleSessionClick(event, session)}
       onDoubleClick={(event) => handleSessionDoubleClick(event, session)}
       onContextMenu={(event) => showSessionMenu(event, session)}
-      aria-pressed={selectedSessionIds.has(session.id)}
+      aria-pressed={isSelected}
       aria-label={`${session.name}，${session.kind === "remoteDesktop" && session.remoteDesktop?.transport === "direct"
         ? `${session.remoteDesktop.kind === "vnc" ? "VNC" : "RDP"} 直连 · ${session.remoteDesktop.targetHost}:${session.remoteDesktop.targetPort ?? (session.remoteDesktop.kind === "vnc" ? 5900 : 3389)}`
         : `${session.username}@${session.host}:${session.port}`}${activityDescription ? `，${activityDescription}` : ""}`}
-      title={`${session.username}@${session.host}:${session.port}${activityDescription ? `\n${activityDescription}` : ""}\nCommand/Ctrl 多选 · Shift 范围选择 · 拖拽到目录可批量移动`}
+      title={`${session.name}\n${session.username}@${session.host}:${session.port}${activityDescription ? `\n${activityDescription}` : ""}`}
     >
+      {multiSelectMode && (
+        <span className={`row-checkbox ${isSelected ? "checked" : ""}`} aria-hidden="true">
+          {isSelected && <Check size={12} />}
+        </span>
+      )}
       <span className={`environment-dot ${session.environment ?? "development"}`} />
       {session.kind === "remoteDesktop" ? <Monitor size={14} className="session-kind-icon" /> : <Server size={14} />}
       <span className="session-row-copy">
         <strong>{session.name}</strong>
-        <small className="session-row-address">
-          {session.kind === "remoteDesktop" && session.remoteDesktop
-            ? session.remoteDesktop.transport === "direct"
-              ? `${session.remoteDesktop.kind === "vnc" ? "VNC" : "RDP"} 直连 · ${session.remoteDesktop.targetHost}:${session.remoteDesktop.targetPort ?? (session.remoteDesktop.kind === "vnc" ? 5900 : 3389)}`
-              : `${session.remoteDesktop.kind === "vnc" ? "VNC" : "RDP"} · ${session.username}@${session.host}${session.port === 22 ? "" : `:${session.port}`}`
-            : `${session.username}@${session.host}${session.port === 22 ? "" : `:${session.port}`}`}
-        </small>
       </span>
       <span className="session-row-indicators" aria-hidden="true">
         {activity && (
@@ -702,6 +726,7 @@ export function SessionSidebar({
 
   return (
     <aside
+      ref={asideRef}
       className={`session-sidebar ${isResizing ? "resizing" : ""}`}
       style={{ width: `${sidebarWidth}px` }}
       onKeyDown={handleSidebarKeyDown}
@@ -729,10 +754,19 @@ export function SessionSidebar({
             <option value="status">连接状态</option>
             <option value="name">名称</option>
           </select>
+          <button
+            className={`multi-select-toggle ${multiSelectMode ? "active" : ""}`}
+            onClick={() => (multiSelectMode ? exitMultiSelectMode() : setMultiSelectMode(true))}
+            title={multiSelectMode ? "退出多选（Esc）" : "多选会话，批量删除 / 移动 / 收藏"}
+            aria-pressed={multiSelectMode}
+          >
+            <ListChecks size={13} />多选
+          </button>
         </div>
-        {selectedSessions.length > 0 && (
+        {(multiSelectMode || selectedSessions.length > 0) && (
           <div className="session-batch-toolbar" aria-label="会话批量操作">
             <strong role="status">{selectedSessions.length} 已选</strong>
+            <button onClick={selectAllVisible} title="全选当前列表" aria-label="全选当前列表"><ListChecks size={13} /></button>
             <select
               value={batchGroupId}
               title="批量移动到目录"
@@ -752,7 +786,7 @@ export function SessionSidebar({
             <button onClick={() => void onSetFavorite(selectedSessions, true)} title="批量收藏" aria-label="批量收藏"><Star size={13} /></button>
             <button onClick={() => void onSetFavorite(selectedSessions, false)} title="批量取消收藏" aria-label="批量取消收藏"><Star size={13} fill="currentColor" /></button>
             <button className="danger" onClick={() => void onDeleteSessions(selectedSessions)} title="批量删除" aria-label="批量删除"><Trash2 size={13} /></button>
-            <button onClick={clearSelection} title="清除选择" aria-label="清除选择"><X size={13} /></button>
+            <button onClick={() => (multiSelectMode ? exitMultiSelectMode() : clearSelection())} title={multiSelectMode ? "退出多选（Esc）" : "清除选择"} aria-label={multiSelectMode ? "退出多选" : "清除选择"}><X size={13} /></button>
           </div>
         )}
       </div>
@@ -805,7 +839,9 @@ export function SessionSidebar({
         </section>
       </div>
       <div className={`sidebar-hint ${dragFeedback ? "drag-feedback" : ""}`} role="status">
-        {dragFeedback ?? `${visibleSessions.length}/${sessions.length} 个会话 · Command/Ctrl 多选 · Shift 连选 · Esc 清除`}
+        {dragFeedback ?? (multiSelectMode
+          ? `多选模式：点击勾选 · Shift 连选 · 已选 ${selectedSessions.length} 个 · Esc 退出`
+          : `${visibleSessions.length}/${sessions.length} 个会话 · 多选模式可批量删除 · Ctrl 多选 · Shift 连选`)}
       </div>
       {contextTarget && (
         <ContextMenu

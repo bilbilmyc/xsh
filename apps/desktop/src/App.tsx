@@ -539,7 +539,11 @@ function App() {
       setSecondaryTabId(currentActiveTabId);
     }
     setActiveTabId(tabId);
-    setTabs((current) => current.map((tab) => tab.id === tabId && tab.alert ? { ...tab, alert: undefined } : tab));
+    // Returning the same array when no tab has an alert keeps an ordinary tab
+    // switch from re-rendering every pane and the whole sidebar.
+    setTabs((current) => current.some((tab) => tab.id === tabId && tab.alert)
+      ? current.map((tab) => tab.id === tabId && tab.alert ? { ...tab, alert: undefined } : tab)
+      : current);
   }, []);
 
   const focusOtherSplitPane = () => {
@@ -637,6 +641,10 @@ function App() {
 
   const handleTerminalStateChange = useCallback((tabId: string, state: string) => {
     setTabs((current) => {
+      const stateUnchanged = current.every((tab) => tab.id !== tabId || tab.state === state);
+      const canPromoteQueued = !isConnectionInFlight(state) && current.some((tab) => tab.state === "queued");
+      // Same reducer result: skip the array copy and the app-wide re-render.
+      if (stateUnchanged && !canPromoteQueued) return current;
       const next = current.map((tab) => tab.id === tabId ? { ...tab, state } : tab);
       if (isConnectionInFlight(state)) return next;
       let available = MAX_CONCURRENT_CONNECTIONS - next.filter((tab) => isConnectionInFlight(tab.state)).length;
@@ -1684,7 +1692,7 @@ function App() {
                 </select>
               )}
               <button className={broadcastEnabled ? "active" : ""} onClick={() => setBroadcastEnabled((value) => !value)} title={broadcastEnabled ? "关闭命令广播" : "开启命令广播"}>广播</button>
-              <button onClick={() => setBatchCommandVisible(true)} title="选择目标并逐会话汇总批量命令结果"><SendHorizontal size={13} />批量</button>
+              <button onClick={() => setBatchCommandVisible(true)} title="选择目标并逐会话汇总批量命令结果"><SendHorizontal size={13} />批量命令</button>
             </div>
             {activeTab && connectionIds[activeTab.id] && activeTab.session.kind !== "remoteDesktop" && (
               <button className={`sftp-toggle ${portForwardVisible ? "active" : ""}`} onClick={() => setPortForwardVisible((value) => !value)} title="端口转发">
