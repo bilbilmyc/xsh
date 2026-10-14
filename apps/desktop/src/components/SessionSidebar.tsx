@@ -4,6 +4,7 @@ import {
   ChevronRight,
   Folder,
   FolderPlus,
+  Monitor,
   MoreHorizontal,
   Pencil,
   Search,
@@ -36,6 +37,7 @@ interface SessionSidebarProps {
   onDiagnose: (session: SavedSession) => void;
   onEdit: (session: SavedSession) => void;
   onCreateSession: () => void;
+  onCreateRemoteDesktop: () => void;
   onCreateGroup: (parentId: string | null) => void;
   onDuplicate: (session: SavedSession) => void;
   onToggleFavorite: (session: SavedSession) => void;
@@ -72,6 +74,7 @@ export function SessionSidebar({
   onDiagnose,
   onEdit,
   onCreateSession,
+  onCreateRemoteDesktop,
   onCreateGroup,
   onDuplicate,
   onToggleFavorite,
@@ -569,14 +572,22 @@ export function SessionSidebar({
       onDoubleClick={(event) => handleSessionDoubleClick(event, session)}
       onContextMenu={(event) => showSessionMenu(event, session)}
       aria-pressed={selectedSessionIds.has(session.id)}
-      aria-label={`${session.name}，${session.username}@${session.host}:${session.port}${activityDescription ? `，${activityDescription}` : ""}`}
+      aria-label={`${session.name}，${session.kind === "remoteDesktop" && session.remoteDesktop?.transport === "direct"
+        ? `${session.remoteDesktop.kind === "vnc" ? "VNC" : "RDP"} 直连 · ${session.remoteDesktop.targetHost}:${session.remoteDesktop.targetPort ?? (session.remoteDesktop.kind === "vnc" ? 5900 : 3389)}`
+        : `${session.username}@${session.host}:${session.port}`}${activityDescription ? `，${activityDescription}` : ""}`}
       title={`${session.username}@${session.host}:${session.port}${activityDescription ? `\n${activityDescription}` : ""}\nCommand/Ctrl 多选 · Shift 范围选择 · 拖拽到目录可批量移动`}
     >
       <span className={`environment-dot ${session.environment ?? "development"}`} />
-      <Server size={14} />
+      {session.kind === "remoteDesktop" ? <Monitor size={14} className="session-kind-icon" /> : <Server size={14} />}
       <span className="session-row-copy">
         <strong>{session.name}</strong>
-        <small className="session-row-address">{session.username}@{session.host}{session.port === 22 ? "" : `:${session.port}`}</small>
+        <small className="session-row-address">
+          {session.kind === "remoteDesktop" && session.remoteDesktop
+            ? session.remoteDesktop.transport === "direct"
+              ? `${session.remoteDesktop.kind === "vnc" ? "VNC" : "RDP"} 直连 · ${session.remoteDesktop.targetHost}:${session.remoteDesktop.targetPort ?? (session.remoteDesktop.kind === "vnc" ? 5900 : 3389)}`
+              : `${session.remoteDesktop.kind === "vnc" ? "VNC" : "RDP"} · ${session.username}@${session.host}${session.port === 22 ? "" : `:${session.port}`}`
+            : `${session.username}@${session.host}${session.port === 22 ? "" : `:${session.port}`}`}
+        </small>
       </span>
       <span className="session-row-indicators" aria-hidden="true">
         {activity && (
@@ -655,6 +666,7 @@ export function SessionSidebar({
   if (contextTarget?.type === "sidebar") {
     contextItems = [
       { label: "新建会话主机", onClick: onCreateSession },
+      { label: "新建远程桌面（VNC/RDP）", onClick: onCreateRemoteDesktop },
       { label: "新建目录", onClick: () => onCreateGroup(null) },
     ];
   } else if (contextTarget?.type === "session") {

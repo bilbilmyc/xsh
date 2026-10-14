@@ -16,6 +16,7 @@
 - SFTP 远端兼容替换的 journal/installed marker 恢复、rename/rollback 故障注入和有归属证明的 orphan backup 清理
 - SFTP 全局/单主机公平并发调度、暂停重排、上传/下载独立聚合限速和后台传输管理
 - 绑定目标/ProxyJump 端点与完整公钥的结构化 Host Key 确认
+- VNC/RDP 远程桌面：一等远程桌面会话类型（独立的新建入口、专用编辑器、连接后打开远程桌面控制面板而非终端），SSH 仅作为加密通道；隧道用临时本地端口，查看器支持 Windows mstsc、macOS `vnc://`/`rdp://` 和自定义命令模板，连接后自动启动；SSH 会话也可按需附加远程桌面配置
 - 会话目录创建、重命名、删除、单项/批量拖拽整理，会话批量移动/收藏/删除、环境/自动重连/标签批量编辑，以及同名或相同连接目标保存前提示
 - macOS 免费个人版打包、Windows 构建脚本和跨平台 CI
 
@@ -31,4 +32,4 @@
 
 ## 明确不做
 
-SSH1、Telnet、Rlogin、RDP、X11 forwarding、ZMODEM、Kerberos、PKCS#11、云同步和团队共享凭据暂不进入当前版本。
+SSH1、Telnet、Rlogin、X11 forwarding、ZMODEM、Kerberos、PKCS#11、云同步和团队共享凭据暂不进入当前版本。（VNC/RDP 已通过 SSH 隧道 + 本机查看器方案提供，见“已完成”；内嵌网页版远程桌面客户端仍不做。）

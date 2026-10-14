@@ -5,8 +5,9 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 use uuid::Uuid;
 use xsh_domain::{
-    AuthenticationMethod, ForwardProfile, GroupId, KnownHost, SavedSession, SessionBundle,
-    SessionDraft, SessionGroup, SessionGroupDraft, SessionId, TerminalProfile,
+    AuthenticationMethod, ForwardProfile, GroupId, KnownHost, RemoteDesktopProfile, SavedSession,
+    SessionBundle, SessionDraft, SessionGroup, SessionGroupDraft, SessionId, SessionKind,
+    TerminalProfile,
 };
 
 const INITIAL_MIGRATION: &str = include_str!("../migrations/0001_initial.sql");
@@ -136,7 +137,7 @@ impl SessionRepository {
                  SELECT id, group_id, name, host, port, username, proxy_jump, proxy_jump_username,
                  proxy_jump_authentication_json, authentication_json, terminal_json, initial_directory, startup_command,
                  keepalive_seconds, auto_reconnect,
-                 environment, color, notes, favorite, created_at, updated_at, forward_profiles_json
+                 environment, color, notes, favorite, created_at, updated_at, forward_profiles_json, remote_desktop_json, kind
                  FROM sessions
                  WHERE group_id IN (SELECT id FROM descendants)
                  ORDER BY favorite DESC, name COLLATE NOCASE ASC",
@@ -191,7 +192,7 @@ impl SessionRepository {
             "SELECT id, group_id, name, host, port, username, proxy_jump, proxy_jump_username,
              proxy_jump_authentication_json, authentication_json, terminal_json, initial_directory, startup_command,
              keepalive_seconds, auto_reconnect,
-             environment, color, notes, favorite, created_at, updated_at, forward_profiles_json
+             environment, color, notes, favorite, created_at, updated_at, forward_profiles_json, remote_desktop_json, kind
              FROM sessions ORDER BY favorite DESC, name COLLATE NOCASE ASC",
         )?;
         let raw = statement
@@ -216,7 +217,7 @@ impl SessionRepository {
                 "SELECT id, group_id, name, host, port, username, proxy_jump, proxy_jump_username,
                  proxy_jump_authentication_json, authentication_json, terminal_json, initial_directory, startup_command,
                  keepalive_seconds, auto_reconnect,
-                 environment, color, notes, favorite, created_at, updated_at, forward_profiles_json
+                 environment, color, notes, favorite, created_at, updated_at, forward_profiles_json, remote_desktop_json, kind
                  FROM sessions WHERE id = ?1",
                 params![id.to_string()],
                 map_session_row,
@@ -241,6 +242,8 @@ impl SessionRepository {
             authentication: draft.authentication,
             terminal: draft.terminal,
             forward_profiles: draft.forward_profiles,
+            remote_desktop: draft.remote_desktop,
+            kind: draft.kind,
             initial_directory: draft.initial_directory,
             startup_command: draft.startup_command,
             keepalive_seconds: draft.keepalive_seconds,
@@ -278,6 +281,8 @@ impl SessionRepository {
             authentication: draft.authentication,
             terminal: draft.terminal,
             forward_profiles: draft.forward_profiles,
+            remote_desktop: draft.remote_desktop,
+            kind: draft.kind,
             initial_directory: draft.initial_directory,
             startup_command: draft.startup_command,
             keepalive_seconds: draft.keepalive_seconds,
@@ -298,7 +303,7 @@ impl SessionRepository {
              proxy_jump_authentication_json = ?9, authentication_json = ?10, terminal_json = ?11,
              initial_directory = ?12, startup_command = ?13, keepalive_seconds = ?14, auto_reconnect = ?15,
              environment = ?16, color = ?17, notes = ?18, favorite = ?19,
-             updated_at = ?20, forward_profiles_json = ?21 WHERE id = ?1",
+             updated_at = ?20, forward_profiles_json = ?21, remote_desktop_json = ?22, kind = ?23 WHERE id = ?1",
             session_params(&session)?,
         )?;
         if changed == 0 {
@@ -475,7 +480,25 @@ fn map_session_row(row: &Row<'_>) -> rusqlite::Result<SavedSession> {
             .map(|value| serde_json::from_str::<Vec<ForwardProfile>>(&value).map_err(to_sql_error))
             .transpose()?
             .unwrap_or_default(),
+        remote_desktop: row
+            .get::<_, Option<String>>(22)?
+            .map(|value| serde_json::from_str::<RemoteDesktopProfile>(&value).map_err(to_sql_error))
+            .transpose()?,
+        kind: row
+            .get::<_, Option<String>>(23)?
+            .map(|value| parse_session_kind(&value))
+            .unwrap_or_default(),
     })
+}
+
+/// The `kind` column may hold either the JSON form (`"ssh"`, written by this
+/// code) or the bare ALTER TABLE default (`ssh`) inherited by pre-existing
+/// rows when the column was added; both must read back losslessly.
+fn parse_session_kind(raw: &str) -> SessionKind {
+    match raw.trim().trim_matches('"') {
+        "remoteDesktop" => SessionKind::RemoteDesktop,
+        _ => SessionKind::Ssh,
+    }
 }
 
 fn insert_session(connection: &Connection, session: &SavedSession) -> Result<()> {
@@ -484,8 +507,8 @@ fn insert_session(connection: &Connection, session: &SavedSession) -> Result<()>
          (id, group_id, name, host, port, username, proxy_jump, proxy_jump_username,
          proxy_jump_authentication_json, authentication_json, terminal_json, initial_directory, startup_command,
           keepalive_seconds, auto_reconnect, environment, color, notes, favorite, created_at, updated_at,
-          forward_profiles_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+          forward_profiles_json, remote_desktop_json, kind)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
         params![
             session.id.to_string(),
             session.group_id.map(|id| id.to_string()),
@@ -513,12 +536,18 @@ fn insert_session(connection: &Connection, session: &SavedSession) -> Result<()>
             session.created_at.to_rfc3339(),
             session.updated_at.to_rfc3339(),
             serde_json::to_string(&session.forward_profiles)?,
+            session
+                .remote_desktop
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
+            serde_json::to_string(&session.kind)?,
         ],
     )?;
     Ok(())
 }
 
-fn session_params(session: &SavedSession) -> Result<[rusqlite::types::Value; 21]> {
+fn session_params(session: &SavedSession) -> Result<[rusqlite::types::Value; 23]> {
     use rusqlite::types::Value;
     Ok([
         Value::Text(session.id.to_string()),
@@ -578,6 +607,13 @@ fn session_params(session: &SavedSession) -> Result<[rusqlite::types::Value; 21]
         Value::Integer(i64::from(session.favorite)),
         Value::Text(session.updated_at.to_rfc3339()),
         Value::Text(serde_json::to_string(&session.forward_profiles)?),
+        session
+            .remote_desktop
+            .as_ref()
+            .map(|profile| serde_json::to_string(profile).map(Value::Text))
+            .transpose()?
+            .unwrap_or(Value::Null),
+        Value::Text(serde_json::to_string(&session.kind)?),
     ])
 }
 
@@ -606,6 +642,14 @@ fn ensure_session_columns(connection: &Connection) -> Result<()> {
         (
             "forward_profiles_json",
             "ALTER TABLE sessions ADD COLUMN forward_profiles_json TEXT NOT NULL DEFAULT '[]'",
+        ),
+        (
+            "remote_desktop_json",
+            "ALTER TABLE sessions ADD COLUMN remote_desktop_json TEXT",
+        ),
+        (
+            "kind",
+            "ALTER TABLE sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'ssh'",
         ),
     ] {
         if !columns.iter().any(|column| column == name) {
@@ -674,6 +718,7 @@ mod tests {
 
     fn draft(group_id: Option<GroupId>) -> SessionDraft {
         SessionDraft {
+            kind: SessionKind::Ssh,
             group_id,
             name: "Production API".into(),
             host: "10.0.0.10".into(),
@@ -687,6 +732,7 @@ mod tests {
             },
             terminal: TerminalProfile::default(),
             forward_profiles: Vec::new(),
+            remote_desktop: None,
             initial_directory: Some("/srv/app".into()),
             startup_command: Some("uname -a".into()),
             keepalive_seconds: 30,
@@ -803,6 +849,103 @@ mod tests {
             bundle.sessions[0].forward_profiles,
             updated.forward_profiles
         );
+    }
+
+    #[test]
+    fn remote_desktop_profile_round_trips_and_clears() {
+        let repository = SessionRepository::in_memory().unwrap();
+        let remote_desktop = RemoteDesktopProfile {
+            kind: xsh_domain::RemoteDesktopKind::Vnc,
+            transport: xsh_domain::RemoteDesktopTransport::SshTunnel,
+            target_host: "127.0.0.1".into(),
+            target_port: Some(5_901),
+            auto_start: true,
+            launch_viewer: false,
+            viewer_command: Some("vncviewer {host}::{port}".into()),
+            username: Some("administrator".into()),
+            credential_ref: Some("xsh-local/password/rd".into()),
+            forward_profile_id: Some(Uuid::from_u128(11)),
+        };
+        let mut session_draft = draft(None);
+        session_draft.remote_desktop = Some(remote_desktop.clone());
+
+        let created = repository.create_session(session_draft).unwrap();
+        assert_eq!(created.remote_desktop, Some(remote_desktop.clone()));
+        assert_eq!(
+            repository
+                .get_session(created.id)
+                .unwrap()
+                .unwrap()
+                .remote_desktop,
+            Some(remote_desktop)
+        );
+
+        let cleared = repository.update_session(created.id, draft(None)).unwrap();
+        assert_eq!(cleared.remote_desktop, None);
+        assert_eq!(
+            repository
+                .get_session(created.id)
+                .unwrap()
+                .unwrap()
+                .remote_desktop,
+            None
+        );
+    }
+
+    #[test]
+    fn remote_desktop_sessions_round_trip_their_kind() {
+        let repository = SessionRepository::in_memory().unwrap();
+        let mut session_draft = draft(None);
+        session_draft.kind = SessionKind::RemoteDesktop;
+        session_draft.remote_desktop = Some(RemoteDesktopProfile {
+            kind: xsh_domain::RemoteDesktopKind::Rdp,
+            transport: xsh_domain::RemoteDesktopTransport::SshTunnel,
+            target_host: "127.0.0.1".into(),
+            target_port: None,
+            auto_start: true,
+            launch_viewer: true,
+            viewer_command: None,
+            username: None,
+            credential_ref: None,
+            forward_profile_id: Some(Uuid::from_u128(21)),
+        });
+
+        let created = repository.create_session(session_draft).unwrap();
+        assert_eq!(created.kind, SessionKind::RemoteDesktop);
+        assert_eq!(
+            repository.get_session(created.id).unwrap().unwrap().kind,
+            SessionKind::RemoteDesktop
+        );
+    }
+
+    #[test]
+    fn session_kind_accepts_bare_and_json_column_values() {
+        let repository = SessionRepository::in_memory().unwrap();
+        let created = repository.create_session(draft(None)).unwrap();
+
+        // Fresh rows carry the JSON form; the ALTER TABLE default leaves
+        // bare text on pre-existing rows once the column is added.
+        for raw in ["\"ssh\"", "ssh", "\"remoteDesktop\"", "remoteDesktop"] {
+            {
+                let connection = repository.connection().unwrap();
+                connection
+                    .execute(
+                        "UPDATE sessions SET kind = ?1 WHERE id = ?2",
+                        params![raw, created.id.to_string()],
+                    )
+                    .unwrap();
+            }
+            let expected = if raw.contains("remoteDesktop") {
+                SessionKind::RemoteDesktop
+            } else {
+                SessionKind::Ssh
+            };
+            assert_eq!(
+                repository.get_session(created.id).unwrap().unwrap().kind,
+                expected,
+                "raw column value {raw:?} must read back as {expected:?}"
+            );
+        }
     }
 
     #[test]

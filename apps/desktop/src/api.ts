@@ -6,6 +6,9 @@ import type {
   ForwardInfo,
   ForwardProfile,
   ImportSummary,
+  RemoteDesktopLaunch,
+  RemoteDesktopProfile,
+  RemoteDesktopWsBridge,
   SshConfigEntry,
   SshAgentKey,
   SshDiagnosticReport,
@@ -103,6 +106,16 @@ export const api = {
     invoke<LocalPortDiagnostic>("diagnose_local_port", { bindHost, bindPort }),
   getForwardHealth: (connectionId: Uuid, forwardId: Uuid) =>
     invoke<ForwardHealth>("get_forward_health", { connectionId, forwardId }),
+  startRemoteDesktop: (connectionId: Uuid, profile: RemoteDesktopProfile, launchViewer: boolean) =>
+    invoke<RemoteDesktopLaunch>("start_remote_desktop", { connectionId, profile, launchViewer }),
+  openRemoteDesktopViewer: (profile: RemoteDesktopProfile) =>
+    invoke<string>("open_remote_desktop_viewer", { profile }),
+  openRemoteDesktopWsBridge: (host: string, port: number) =>
+    invoke<RemoteDesktopWsBridge>("open_remote_desktop_ws_bridge", { host, port }),
+  closeRemoteDesktopWsBridge: (port: number) =>
+    invoke<void>("close_remote_desktop_ws_bridge", { port }),
+  getRemoteDesktopPassword: (credentialRef: string) =>
+    invoke<string>("get_remote_desktop_password", { credentialRef }),
 
   terminalResize: (connectionId: Uuid, columns: number, rows: number) =>
     invoke<void>("terminal_resize", { connectionId, columns, rows }),

@@ -28,6 +28,7 @@ Build a local-first SSH2 desktop client for macOS and Windows that covers the da
 - Command center and Xshell-style quick-command bar with groups, search, platform-safe keyboard shortcuts, drag ordering, and `\r`/`\n`/`\t` escapes.
 - Password, private-key, encrypted-key, SSH Agent, and keyboard-interactive authentication.
 - Known Hosts management, diagnostics, ProxyJump, and local/remote/dynamic port forwarding.
+- VNC/RDP remote desktop as a first-class session kind with an explicit transport: `direct` launches the viewer straight at the target address like a plain VNC/RDP client (no SSH fields at all), `SSH tunnel` routes traffic through an encrypted SSH server (ephemeral local forward, viewer auto-opens and restores on reconnect). Dedicated editor (VNC/RDP target first) and a control-panel tab on connect (no terminal). Viewer support: Windows `mstsc`, macOS `vnc://`/`rdp://` URL schemes, or a per-session command template with `{host}`/`{port}` placeholders. Plain SSH sessions may attach an optional tunneled remote-desktop profile for ad-hoc use from the toolbar.
 - SFTP directory operations, remote editing, multi-select bulk actions, two-worker upload queue, retries, cancellation, and task cleanup.
 - Password-protected session export carries the credentials referenced by those sessions; `.xshbackup` remains available for a separate full credential-vault backup.
 - macOS personal build and Windows build/CI preparation.
@@ -53,4 +54,4 @@ pnpm run build:macos:personal
 
 ## Deferred
 
-SSH1, Telnet, Rlogin, serial ports, RDP, X11 forwarding, ZMODEM, Kerberos, PKCS#11, cloud synchronization, shared team credentials, and a general-purpose end-user scripting runtime.
+SSH1, Telnet, Rlogin, serial ports, X11 forwarding, ZMODEM, Kerberos, PKCS#11, cloud synchronization, shared team credentials, and a general-purpose end-user scripting runtime. (VNC/RDP is provided via the SSH-tunnel + local-viewer feature above; an embedded in-app remote-desktop client remains deferred.)

@@ -15,12 +15,14 @@ tauri-build = { version = "2.5.6", features = [] }
 
 [dependencies]
 chrono.workspace = true
+futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tauri = { version = "2.11.5", features = ["tray-icon"] }
 tauri-plugin-clipboard-manager = "2.3.2"
 tauri-plugin-dialog = "2.6.0"
 tokio.workspace = true
+tokio-tungstenite = "0.26"
 tracing.workspace = true
 uuid.workspace = true
 xsh-domain = { path = "../../../crates/xsh-domain" }
@@ -29,3 +31,6 @@ xsh-sftp = { path = "../../../crates/xsh-sftp" }
 xsh-ssh = { path = "../../../crates/xsh-ssh" }
 xsh-storage = { path = "../../../crates/xsh-storage" }
 zeroize.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }

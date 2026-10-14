@@ -161,10 +161,149 @@ pub struct ForwardProfile {
     pub auto_start: bool,
 }
 
+/// What a saved session primarily connects to. Remote-desktop sessions use
+/// the SSH server only as the encrypted transport for a VNC/RDP tunnel.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum SessionKind {
+    #[default]
+    Ssh,
+    RemoteDesktop,
+}
+
+/// Remote-desktop protocol tunneled over an SSH local forward.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum RemoteDesktopKind {
+    Vnc,
+    Rdp,
+}
+
+impl RemoteDesktopKind {
+    /// Port the protocol listens on by default on the SSH server side.
+    pub fn default_target_port(self) -> u16 {
+        match self {
+            Self::Vnc => 5900,
+            Self::Rdp => 3389,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Vnc => "VNC",
+            Self::Rdp => "RDP",
+        }
+    }
+}
+
+/// How the desktop viewer reaches the VNC/RDP service: directly over the
+/// network like a plain VNC/RDP client, or through an encrypted SSH tunnel.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum RemoteDesktopTransport {
+    Direct,
+    /// Encrypted via an SSH local forward; the default for profiles created
+    /// before the field existed.
+    #[default]
+    SshTunnel,
+}
+
+/// Per-session remote-desktop settings: how to reach the VNC/RDP service
+/// (directly or over an SSH tunnel) plus how to open the local viewer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteDesktopProfile {
+    pub kind: RemoteDesktopKind,
+    /// Transport for the viewer connection. `SshTunnel` also drives the
+    /// auto-start hook in `connect_terminal`.
+    #[serde(default)]
+    pub transport: RemoteDesktopTransport,
+    /// Host of the VNC/RDP service: the address the viewer ultimately
+    /// connects to (directly, or as seen from the SSH server in tunnel mode).
+    #[serde(default = "default_remote_desktop_target_host")]
+    pub target_host: String,
+    /// `None` falls back to the protocol default port for the kind.
+    #[serde(default)]
+    pub target_port: Option<u16>,
+    /// Start the tunnel automatically once the SSH connection is established.
+    #[serde(default)]
+    pub auto_start: bool,
+    /// Also open the desktop viewer when the tunnel starts automatically.
+    #[serde(default)]
+    pub launch_viewer: bool,
+    /// Optional viewer command template, e.g.
+    /// `C:\Program Files\TigerVNC\vncviewer.exe {host}::{port}`. Platforms
+    /// without a built-in viewer require this.
+    #[serde(default)]
+    pub viewer_command: Option<String>,
+    /// Optional login user for the remote desktop (RDP account, or the VNC
+    /// account on servers that ask for one).
+    #[serde(default)]
+    pub username: Option<String>,
+    /// Opaque XSH credential-vault reference for the remote-desktop login
+    /// password; resolved only at viewer-launch time.
+    #[serde(default)]
+    pub credential_ref: Option<String>,
+    /// Stable id reused as the runtime forward id so reconnects reconcile
+    /// the tunnel instead of stacking listeners.
+    #[serde(default)]
+    pub forward_profile_id: Option<Uuid>,
+}
+
+impl RemoteDesktopProfile {
+    pub fn resolved_target_port(&self) -> u16 {
+        self.target_port
+            .filter(|port| *port > 0)
+            .unwrap_or_else(|| self.kind.default_target_port())
+    }
+
+    /// The remote-desktop tunnel is a plain ephemeral local forward under the
+    /// hood, which keeps reconciliation and health checks shared with
+    /// user-managed port-forward profiles.
+    pub fn forward_profile(&self) -> ForwardProfile {
+        ForwardProfile {
+            id: self.forward_profile_id.unwrap_or_else(Uuid::new_v4),
+            name: format!("{} Remote Desktop", self.kind.label()),
+            group: None,
+            kind: ForwardKind::Local,
+            bind_host: default_remote_desktop_target_host(),
+            bind_port: 0,
+            target_host: Some(self.target_host.clone()),
+            target_port: Some(self.resolved_target_port()),
+            auto_start: false,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.target_host.trim().is_empty() {
+            return Err("远程桌面目标主机不能为空".into());
+        }
+        if let Some(port) = self.target_port
+            && port == 0
+        {
+            return Err("远程桌面目标端口无效".into());
+        }
+        if let Some(command) = self.viewer_command.as_deref()
+            && command.trim().is_empty()
+        {
+            return Err("远程桌面查看器命令不能为空白".into());
+        }
+        Ok(())
+    }
+}
+
+fn default_remote_desktop_target_host() -> String {
+    "127.0.0.1".into()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SavedSession {
     pub id: SessionId,
+    /// What this session primarily connects to; remote-desktop sessions ride
+    /// an SSH connection as transport but present as VNC/RDP connections.
+    #[serde(default)]
+    pub kind: SessionKind,
     pub group_id: Option<GroupId>,
     pub name: String,
     pub host: String,
@@ -184,6 +323,9 @@ pub struct SavedSession {
     pub terminal: TerminalProfile,
     #[serde(default)]
     pub forward_profiles: Vec<ForwardProfile>,
+    /// Optional VNC/RDP remote-desktop tunnel settings for this session.
+    #[serde(default)]
+    pub remote_desktop: Option<RemoteDesktopProfile>,
     pub initial_directory: Option<String>,
     /// Optional command sent once after the interactive shell is ready.
     #[serde(default)]
@@ -202,6 +344,8 @@ pub struct SavedSession {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionDraft {
+    #[serde(default)]
+    pub kind: SessionKind,
     pub group_id: Option<GroupId>,
     pub name: String,
     pub host: String,
@@ -223,6 +367,8 @@ pub struct SessionDraft {
     pub terminal: TerminalProfile,
     #[serde(default)]
     pub forward_profiles: Vec<ForwardProfile>,
+    #[serde(default)]
+    pub remote_desktop: Option<RemoteDesktopProfile>,
     pub initial_directory: Option<String>,
     /// Optional command sent once after the interactive shell is ready.
     #[serde(default)]
@@ -685,7 +831,116 @@ mod tests {
         )
         .unwrap();
         assert!(draft.forward_profiles.is_empty());
+        assert!(draft.remote_desktop.is_none());
+        assert_eq!(draft.kind, SessionKind::Ssh);
         assert_eq!(draft.terminal, TerminalProfile::default());
+    }
+
+    #[test]
+    fn session_kind_round_trips_and_legacy_defaults_to_ssh() {
+        let json = serde_json::json!({
+            "groupId": null,
+            "kind": "remoteDesktop",
+            "name": "rd",
+            "host": "example.com",
+            "port": 22,
+            "username": "ops",
+            "authentication": {"type": "agent", "identityFingerprint": null},
+            "initialDirectory": null,
+            "keepaliveSeconds": 30,
+            "autoReconnect": true,
+            "environment": null,
+            "color": null,
+            "notes": null,
+            "remoteDesktop": {
+                "kind": "rdp",
+                "targetHost": "10.0.0.8",
+                "targetPort": 3389,
+                "autoStart": true,
+                "launchViewer": true,
+                "viewerCommand": null,
+                "forwardProfileId": null
+            }
+        });
+        let draft: SessionDraft = serde_json::from_value(json).unwrap();
+        assert_eq!(draft.kind, SessionKind::RemoteDesktop);
+        assert_eq!(draft.remote_desktop.unwrap().kind, RemoteDesktopKind::Rdp);
+
+        let legacy: SessionDraft = serde_json::from_str(
+            r#"{"name":"legacy","host":"h","port":22,"username":"u",
+                "authentication":{"type":"agent","identityFingerprint":null},
+                "keepaliveSeconds":30}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.kind, SessionKind::Ssh);
+        assert_eq!(
+            serde_json::to_value(SessionKind::RemoteDesktop).unwrap(),
+            serde_json::json!("remoteDesktop")
+        );
+    }
+
+    #[test]
+    fn remote_desktop_profile_defaults_and_round_trip() {
+        let profile: RemoteDesktopProfile = serde_json::from_str(r#"{"kind":"vnc"}"#).unwrap();
+        assert_eq!(profile.target_host, "127.0.0.1");
+        // Profiles persisted before the field existed are SSH tunnels.
+        assert_eq!(profile.transport, RemoteDesktopTransport::SshTunnel);
+        assert_eq!(profile.resolved_target_port(), 5900);
+        assert!(!profile.auto_start);
+        assert!(!profile.launch_viewer);
+        assert_eq!(profile.forward_profile_id, None);
+
+        let direct: RemoteDesktopProfile = serde_json::from_str(
+            r#"{"kind":"rdp","transport":"direct","targetPort":3390,"autoStart":true,"launchViewer":true,
+                "viewerCommand":"remmina -c rdp://{host}:{port}",
+                "forwardProfileId":"00000000-0000-0000-0000-000000000007"}"#,
+        )
+        .unwrap();
+        assert_eq!(direct.transport, RemoteDesktopTransport::Direct);
+        assert_eq!(direct.resolved_target_port(), 3390);
+        assert_eq!(direct.forward_profile_id, Some(Uuid::from_u128(7)));
+
+        let json = serde_json::to_value(&profile).unwrap();
+        assert_eq!(json["kind"], "vnc");
+        assert_eq!(json["transport"], "sshTunnel");
+        assert_eq!(json["targetHost"], "127.0.0.1");
+        assert_eq!(
+            serde_json::from_value::<RemoteDesktopProfile>(json).unwrap(),
+            profile
+        );
+    }
+
+    #[test]
+    fn remote_desktop_forward_profile_is_ephemeral_local_tunnel() {
+        let profile = RemoteDesktopProfile {
+            kind: RemoteDesktopKind::Rdp,
+            transport: RemoteDesktopTransport::SshTunnel,
+            target_host: "10.0.0.8".into(),
+            target_port: None,
+            auto_start: false,
+            launch_viewer: false,
+            viewer_command: None,
+            username: None,
+            credential_ref: None,
+            forward_profile_id: Some(Uuid::from_u128(42)),
+        };
+        let forward = profile.forward_profile();
+        assert_eq!(forward.id, Uuid::from_u128(42));
+        assert_eq!(forward.kind, ForwardKind::Local);
+        assert_eq!(forward.bind_host, "127.0.0.1");
+        assert_eq!(forward.bind_port, 0);
+        assert_eq!(forward.target_host.as_deref(), Some("10.0.0.8"));
+        assert_eq!(forward.target_port, Some(3389));
+        assert!(!forward.auto_start);
+
+        let minimal: RemoteDesktopProfile = serde_json::from_str(r#"{"kind":"vnc"}"#).unwrap();
+        assert!(minimal.validate().is_ok());
+        let mut invalid = minimal.clone();
+        invalid.target_host = "  ".into();
+        assert!(invalid.validate().is_err());
+        let mut zero_port = minimal;
+        zero_port.target_port = Some(0);
+        assert!(zero_port.validate().is_err());
     }
 
     #[test]

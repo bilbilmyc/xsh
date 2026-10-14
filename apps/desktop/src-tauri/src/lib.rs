@@ -15,9 +15,9 @@ use tauri::{AppHandle, Manager, State, WindowEvent};
 use uuid::Uuid;
 use xsh_domain::{
     AuthenticationMethod, ConnectionId, ConnectionState, ForwardProfile, HostKeyApproval,
-    HostKeyRole, KnownHost, RemoteEntry, SavedSession, SessionBundle, SessionDraft, SessionGroup,
-    SessionGroupDraft, SessionId, SftpTransferPolicy, TerminalEvent, TransferEvent, TransferId,
-    TransferListSnapshot,
+    HostKeyRole, KnownHost, RemoteDesktopKind, RemoteDesktopProfile, RemoteEntry, SavedSession,
+    SessionBundle, SessionDraft, SessionGroup, SessionGroupDraft, SessionId, SftpTransferPolicy,
+    TerminalEvent, TransferEvent, TransferId, TransferListSnapshot,
 };
 use xsh_security::{
     BackupImportSummary, CredentialKind, CredentialRecord, CredentialStore, LocalCredentialStore,
@@ -38,6 +38,9 @@ struct AppState {
     credential_lifecycle: tokio::sync::Mutex<()>,
     ssh: SshSessionManager,
     sftp: SftpManager,
+    /// Live in-app viewer bridges (noVNC): loopback WebSocket listeners that
+    /// proxy binary frames to the tunnel/direct TCP target, keyed by port.
+    ws_bridges: tokio::sync::Mutex<HashMap<u16, tauri::async_runtime::JoinHandle<()>>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -364,6 +367,11 @@ async fn connect_terminal(
         .filter(|profile| profile.auto_start)
         .cloned()
         .collect::<Vec<_>>();
+    let auto_start_remote_desktop = session
+        .remote_desktop
+        .clone()
+        .filter(|profile| profile.auto_start)
+        .filter(|profile| profile.transport == xsh_domain::RemoteDesktopTransport::SshTunnel);
     let subscription = state
         .ssh
         .connect(ConnectOptions {
@@ -388,6 +396,7 @@ async fn connect_terminal(
     let connection_id = subscription.connection_id;
     let mut events = subscription.events;
     let ssh = state.ssh.clone();
+    let credential_store = Arc::clone(&state.credentials);
     tauri::async_runtime::spawn(async move {
         while let Some(event) = events.recv().await {
             let connected = matches!(
@@ -412,15 +421,29 @@ async fn connect_terminal(
                 let _ = ssh.disconnect(connection_id).await;
                 break;
             }
-            if connected && !auto_start_profiles.is_empty() {
+            if connected && (!auto_start_profiles.is_empty() || auto_start_remote_desktop.is_some())
+            {
                 let ssh = ssh.clone();
+                let credentials = Arc::clone(&credential_store);
                 let profiles = auto_start_profiles.clone();
+                let remote_desktop = auto_start_remote_desktop.clone();
                 tauri::async_runtime::spawn(async move {
                     for profile in profiles {
                         if let Err(error) = ssh.start_forward_profile(connection_id, profile).await
                         {
                             tracing::warn!(%error, %connection_id, "自动启动持久化端口转发失败");
                         }
+                    }
+                    if let Some(profile) = remote_desktop
+                        && let Err(error) = start_remote_desktop_automatically(
+                            &ssh,
+                            &credentials,
+                            connection_id,
+                            &profile,
+                        )
+                        .await
+                    {
+                        tracing::warn!(%error, %connection_id, "自动启动远程桌面隧道失败");
                     }
                 });
             }
@@ -652,6 +675,421 @@ async fn get_forward_health(
         status: status.into(),
         detail,
     })
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteDesktopViewerLaunch {
+    command: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteDesktopLaunch {
+    forward: ForwardInfo,
+    viewer: Option<RemoteDesktopViewerLaunch>,
+}
+
+#[tauri::command]
+async fn start_remote_desktop(
+    state: State<'_, AppState>,
+    connection_id: ConnectionId,
+    profile: RemoteDesktopProfile,
+    launch_viewer: bool,
+) -> CommandResult<RemoteDesktopLaunch> {
+    profile.validate().map_err(display_error)?;
+    let forward = state
+        .ssh
+        .start_forward_profile(connection_id, profile.forward_profile())
+        .await
+        .map_err(display_error)?;
+    let viewer = if launch_viewer {
+        let credentials = resolve_remote_desktop_credentials(&state, &profile).await?;
+        match launch_remote_desktop_viewer(
+            &profile,
+            &forward.bind_host,
+            forward.bind_port,
+            credentials.as_ref(),
+        )
+        .await
+        {
+            Ok(command) => Some(RemoteDesktopViewerLaunch { command }),
+            Err(error) => {
+                return Err(format!(
+                    "隧道已启动（{}:{}），但查看器启动失败：{error}",
+                    forward.bind_host, forward.bind_port
+                ));
+            }
+        }
+    } else {
+        None
+    };
+    Ok(RemoteDesktopLaunch { forward, viewer })
+}
+
+/// Direct (untunneled) viewer launch: no SSH connection involved, the viewer
+/// connects straight to the configured VNC/RDP address.
+#[tauri::command]
+async fn open_remote_desktop_viewer(
+    state: State<'_, AppState>,
+    profile: RemoteDesktopProfile,
+) -> CommandResult<String> {
+    profile.validate().map_err(display_error)?;
+    let credentials = resolve_remote_desktop_credentials(&state, &profile).await?;
+    launch_remote_desktop_viewer(
+        &profile,
+        &profile.target_host,
+        profile.resolved_target_port(),
+        credentials.as_ref(),
+    )
+    .await
+}
+
+/// Login identity for the desktop itself (VNC password / RDP account),
+/// decrypted from the XSH credential vault only at launch time.
+struct RemoteDesktopViewerCredentials {
+    username: Option<String>,
+    password: Option<zeroize::Zeroizing<String>>,
+}
+
+async fn resolve_remote_desktop_credentials(
+    state: &AppState,
+    profile: &RemoteDesktopProfile,
+) -> CommandResult<Option<RemoteDesktopViewerCredentials>> {
+    let Some(credential_ref) = profile.credential_ref.as_deref() else {
+        return Ok(profile
+            .username
+            .as_ref()
+            .map(|username| RemoteDesktopViewerCredentials {
+                username: Some(username.clone()),
+                password: None,
+            }));
+    };
+    let store = Arc::clone(&state.credentials);
+    let credential_ref = credential_ref.to_owned();
+    let password = run_credential_operation(move || {
+        use xsh_security::CredentialStore as _;
+        store.get(&credential_ref).map_err(display_error)
+    })
+    .await
+    .map_err(|error| format!("XSH 读取远程桌面凭据线程异常：{error}"))?;
+    Ok(Some(RemoteDesktopViewerCredentials {
+        username: profile.username.clone(),
+        password: Some(password),
+    }))
+}
+
+/// Starts the auto-start remote-desktop tunnel after a connection is
+/// established and optionally opens the viewer, mirroring the manual path.
+async fn start_remote_desktop_automatically(
+    ssh: &SshSessionManager,
+    credentials: &Arc<LocalCredentialStore>,
+    connection_id: ConnectionId,
+    profile: &RemoteDesktopProfile,
+) -> Result<(), String> {
+    let forward = ssh
+        .start_forward_profile(connection_id, profile.forward_profile())
+        .await
+        .map_err(display_error)?;
+    if profile.launch_viewer {
+        let viewer_credentials = match profile.credential_ref.as_deref() {
+            Some(credential_ref) => {
+                let store = Arc::clone(credentials);
+                let credential_ref = credential_ref.to_owned();
+                let password = run_credential_operation(move || {
+                    use xsh_security::CredentialStore as _;
+                    store.get(&credential_ref).map_err(display_error)
+                })
+                .await
+                .map_err(|error| format!("XSH 读取远程桌面凭据线程异常：{error}"))?;
+                Some(RemoteDesktopViewerCredentials {
+                    username: profile.username.clone(),
+                    password: Some(password),
+                })
+            }
+            None => profile
+                .username
+                .as_ref()
+                .map(|username| RemoteDesktopViewerCredentials {
+                    username: Some(username.clone()),
+                    password: None,
+                }),
+        };
+        launch_remote_desktop_viewer(
+            profile,
+            &forward.bind_host,
+            forward.bind_port,
+            viewer_credentials.as_ref(),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn launch_remote_desktop_viewer(
+    profile: &RemoteDesktopProfile,
+    bind_host: &str,
+    bind_port: u16,
+    credentials: Option<&RemoteDesktopViewerCredentials>,
+) -> Result<String, String> {
+    let parts = resolve_remote_desktop_viewer_command(
+        profile.kind,
+        bind_host,
+        bind_port,
+        profile.viewer_command.as_deref(),
+        credentials,
+    )?;
+    // Spawning can block on slow machines (AV scans, missing-binary probing);
+    // keep the process creation off the async runtime like `open_local_path`.
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut command = Command::new(&parts[0]);
+        command.args(&parts[1..]);
+        command
+            .spawn()
+            .map_err(|error| format!("无法启动 {}：{error}", parts[0]))?;
+        Ok(parts.join(" "))
+    })
+    .await
+    .map_err(|error| format!("XSH 启动远程桌面查看器线程异常：{error}"))?
+}
+
+/// Resolves the viewer command line: an explicit template wins, otherwise
+/// the platform default applies. RDP on Windows can use a DPAPI-protected
+/// one-shot .rdp file so the stored login opens the desktop without a prompt.
+fn resolve_remote_desktop_viewer_command(
+    kind: RemoteDesktopKind,
+    host: &str,
+    port: u16,
+    viewer_command: Option<&str>,
+    credentials: Option<&RemoteDesktopViewerCredentials>,
+) -> Result<Vec<String>, String> {
+    let _ = credentials;
+    if let Some(template) = viewer_command
+        .map(str::trim)
+        .filter(|template| !template.is_empty())
+    {
+        if !template.contains("{port}") {
+            return Err(
+                "查看器命令模板必须包含 {port} 占位符，例如 vncviewer {host}::{port}".into(),
+            );
+        }
+        let expanded = template
+            .replace("{host}", host)
+            .replace("{port}", &port.to_string());
+        let parts = split_command_line(&expanded);
+        if parts.is_empty() {
+            return Err("查看器命令模板不能为空白".into());
+        }
+        return Ok(parts);
+    }
+    match (kind, std::env::consts::OS) {
+        (RemoteDesktopKind::Rdp, "windows") => {
+            #[cfg(target_os = "windows")]
+            if credentials.is_some_and(|credentials| {
+                credentials.username.is_some() || credentials.password.is_some()
+            }) {
+                let file = write_promptless_rdp_file(host, port, credentials)?;
+                return Ok(vec!["mstsc".into(), file]);
+            }
+            Ok(vec!["mstsc".into(), format!("/v:{host}:{port}")])
+        }
+        (RemoteDesktopKind::Rdp, "macos") => {
+            Ok(vec!["open".into(), format!("rdp://{host}:{port}")])
+        }
+        (RemoteDesktopKind::Vnc, "macos") => {
+            Ok(vec!["open".into(), format!("vnc://{host}:{port}")])
+        }
+        _ => Err(format!(
+            "当前系统没有内置的 {} 查看器；请在会话的高级设置里配置查看器命令模板（含 {{host}}/{{port}} 占位符）",
+            kind.label()
+        )),
+    }
+}
+
+/// Writes a one-shot .rdp file whose password field is DPAPI-encrypted for
+/// the current user (`password 51:b:`), so `mstsc file.rdp` opens straight
+/// into the desktop instead of prompting for credentials.
+#[cfg(target_os = "windows")]
+fn write_promptless_rdp_file(
+    host: &str,
+    port: u16,
+    credentials: Option<&RemoteDesktopViewerCredentials>,
+) -> Result<String, String> {
+    let sanitize = |value: &str| value.replace(['\r', '\n'], " ");
+    let mut content = format!("full address:s:{}:{}\r\n", sanitize(host), port);
+    content.push_str("prompt for credentials:i:0\r\n");
+    if let Some(credentials) = credentials {
+        if let Some(username) = credentials.username.as_deref() {
+            content.push_str(&format!("username:s:{}\r\n", sanitize(username)));
+        }
+        if let Some(password) = credentials.password.as_deref() {
+            let blob = protect_rdp_password(password)?;
+            let hex = blob
+                .iter()
+                .map(|byte| format!("{byte:02X}"))
+                .collect::<String>();
+            content.push_str(&format!("password 51:b:{hex}\r\n"));
+        }
+    }
+    let path = std::env::temp_dir().join(format!("xsh-rdp-{}.rdp", Uuid::new_v4()));
+    std::fs::write(&path, content).map_err(|error| format!("写入 RDP 连接文件失败：{error}"))?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+#[cfg(target_os = "windows")]
+fn protect_rdp_password(password: &str) -> Result<Vec<u8>, String> {
+    use windows::Win32::Foundation::{HLOCAL, LocalFree};
+    use windows::Win32::Security::Cryptography::{CRYPT_INTEGER_BLOB, CryptProtectData};
+
+    let mut wide: Vec<u16> = password.encode_utf16().collect();
+    let blob_in = CRYPT_INTEGER_BLOB {
+        cbData: (wide.len() * 2) as u32,
+        pbData: wide.as_mut_ptr().cast::<u8>(),
+    };
+    let mut blob_out = CRYPT_INTEGER_BLOB::default();
+    unsafe {
+        CryptProtectData(&blob_in, None, None, None, None, 0, &mut blob_out)
+            .map_err(|error| format!("加密 RDP 密码失败：{error}"))?;
+        let out = std::slice::from_raw_parts(blob_out.pbData, blob_out.cbData as usize).to_vec();
+        let _ = LocalFree(Some(HLOCAL(blob_out.pbData as _)));
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteDesktopWsBridge {
+    port: u16,
+}
+
+/// Opens a loopback WebSocket bridge for the in-app (noVNC) viewer: binary
+/// WebSocket frames proxy bidirectionally to the given TCP endpoint — the
+/// tunnel's local listener in SSH mode, or the direct target otherwise.
+#[tauri::command]
+async fn open_remote_desktop_ws_bridge(
+    state: State<'_, AppState>,
+    host: String,
+    port: u16,
+) -> CommandResult<RemoteDesktopWsBridge> {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .map_err(display_error)?;
+    let ws_port = listener.local_addr().map_err(display_error)?.port();
+    let target_host = host.clone();
+    let accept_task = tauri::async_runtime::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let target_host = target_host.clone();
+            tauri::async_runtime::spawn(async move {
+                bridge_websocket_to_tcp(stream, target_host, port).await;
+            });
+        }
+    });
+    state.ws_bridges.lock().await.insert(ws_port, accept_task);
+    Ok(RemoteDesktopWsBridge { port: ws_port })
+}
+
+#[tauri::command]
+async fn close_remote_desktop_ws_bridge(
+    state: State<'_, AppState>,
+    port: u16,
+) -> CommandResult<()> {
+    if let Some(task) = state.ws_bridges.lock().await.remove(&port) {
+        task.abort();
+    }
+    Ok(())
+}
+
+/// Handshakes one WebSocket client and proxies binary frames both ways until
+/// either side closes; the per-connection task dies with the sockets.
+async fn bridge_websocket_to_tcp(stream: tokio::net::TcpStream, host: String, port: u16) {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let tcp = match tokio::net::TcpStream::connect((host.as_str(), port)).await {
+        Ok(tcp) => tcp,
+        Err(_) => return,
+    };
+    let ws = match tokio_tungstenite::accept_async(stream).await {
+        Ok(ws) => ws,
+        Err(_) => return,
+    };
+    let (mut tcp_read, mut tcp_write) = tcp.into_split();
+    let (mut ws_sink, mut ws_stream_rx) = ws.split();
+    let writer_task = tauri::async_runtime::spawn(async move {
+        while let Some(Ok(message)) = ws_stream_rx.next().await {
+            match message {
+                Message::Binary(data) => {
+                    if tokio::io::AsyncWriteExt::write_all(&mut tcp_write, &data)
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Message::Close(_) => break,
+                _ => {}
+            }
+        }
+    });
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let read = tokio::io::AsyncReadExt::read(&mut tcp_read, &mut buffer).await;
+        let chunk = match read {
+            Ok(0) | Err(_) => break,
+            Ok(n) => buffer[..n].to_vec(),
+        };
+        if ws_sink.send(Message::Binary(chunk.into())).await.is_err() {
+            break;
+        }
+    }
+    let _ = ws_sink.close().await;
+    let _ = writer_task.await;
+}
+
+/// Hands the stored remote-desktop password to the in-app viewer: VNC auth
+/// runs inside noVNC in the webview, so the secret must cross the IPC
+/// boundary to the app's own frontend (never persisted there).
+#[tauri::command]
+async fn get_remote_desktop_password(
+    state: State<'_, AppState>,
+    credential_ref: String,
+) -> CommandResult<String> {
+    let store = Arc::clone(&state.credentials);
+    run_credential_operation(move || {
+        use xsh_security::CredentialStore as _;
+        store
+            .get(&credential_ref)
+            .map(|secret| secret.to_string())
+            .map_err(display_error)
+    })
+    .await
+}
+
+/// Splits a viewer command template into program + arguments. Double quotes
+/// group a span (e.g. paths with spaces); no escape processing is applied
+/// because executable paths cannot contain quotes.
+fn split_command_line(command: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    for character in command.chars() {
+        match character {
+            '"' => in_quotes = !in_quotes,
+            _ if character.is_whitespace() && !in_quotes => {
+                if !current.is_empty() {
+                    parts.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(character),
+        }
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
+    parts
 }
 
 #[tauri::command]
@@ -1284,6 +1722,7 @@ async fn import_sessions_impl(
         for session in &bundle.sessions {
             repository
                 .create_session(SessionDraft {
+                    kind: session.kind,
                     group_id: session.group_id.and_then(|id| group_map.get(&id).copied()),
                     name: session.name.clone(),
                     host: session.host.clone(),
@@ -1295,6 +1734,7 @@ async fn import_sessions_impl(
                     authentication: session.authentication.clone(),
                     terminal: session.terminal.clone(),
                     forward_profiles: session.forward_profiles.clone(),
+                    remote_desktop: session.remote_desktop.clone(),
                     initial_directory: session.initial_directory.clone(),
                     startup_command: session.startup_command.clone(),
                     keepalive_seconds: session.keepalive_seconds,
@@ -1680,7 +2120,11 @@ fn saved_sessions_reference_credential(sessions: &[SavedSession], credential_ref
             &session.authentication,
             session.proxy_jump_authentication.as_ref(),
             credential_ref,
-        )
+        ) || session
+            .remote_desktop
+            .as_ref()
+            .and_then(|profile| profile.credential_ref.as_deref())
+            == Some(credential_ref)
     })
 }
 
@@ -1711,6 +2155,10 @@ fn session_credential_references(session: &SavedSession) -> Vec<String> {
             .proxy_jump_authentication
             .as_ref()
             .and_then(credential_reference),
+        session
+            .remote_desktop
+            .as_ref()
+            .and_then(|profile| profile.credential_ref.as_deref()),
     ]
     .into_iter()
     .flatten()
@@ -1757,10 +2205,16 @@ async fn validate_session_draft(
     if draft.name.trim().is_empty() {
         return Err("session name is required".into());
     }
-    if draft.host.trim().is_empty() {
+    // Direct remote-desktop sessions never touch an SSH server, so they carry
+    // no SSH endpoint; everything else requires the full endpoint.
+    let uses_ssh_transport = draft.kind != xsh_domain::SessionKind::RemoteDesktop
+        || draft.remote_desktop.as_ref().is_some_and(|profile| {
+            profile.transport == xsh_domain::RemoteDesktopTransport::SshTunnel
+        });
+    if uses_ssh_transport && draft.host.trim().is_empty() {
         return Err("host is required".into());
     }
-    if draft.username.trim().is_empty() {
+    if uses_ssh_transport && draft.username.trim().is_empty() {
         return Err("username is required".into());
     }
     if draft.port == 0 {
@@ -1975,6 +2429,7 @@ pub fn run() {
                 credential_lifecycle: tokio::sync::Mutex::new(()),
                 ssh: SshSessionManager::new(),
                 sftp: SftpManager::new(),
+                ws_bridges: tokio::sync::Mutex::new(HashMap::new()),
             });
 
             let show = MenuItem::with_id(app, "show", "显示 XSH", true, None::<&str>)?;
@@ -2043,6 +2498,11 @@ pub fn run() {
             list_forwards,
             diagnose_local_port,
             get_forward_health,
+            start_remote_desktop,
+            open_remote_desktop_viewer,
+            open_remote_desktop_ws_bridge,
+            close_remote_desktop_ws_bridge,
+            get_remote_desktop_password,
             terminal_resize,
             disconnect_terminal,
             connect_sftp,
@@ -2100,6 +2560,7 @@ mod tests {
         let now = Utc::now();
         SavedSession {
             id: Uuid::new_v4(),
+            kind: xsh_domain::SessionKind::Ssh,
             group_id: None,
             name: "credential-reference-test".into(),
             host: "example.com".into(),
@@ -2111,6 +2572,7 @@ mod tests {
             authentication,
             terminal: Default::default(),
             forward_profiles: Vec::new(),
+            remote_desktop: None,
             initial_directory: None,
             startup_command: None,
             keepalive_seconds: 30,
@@ -2161,6 +2623,68 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn remote_desktop_viewer_templates_expand_and_validate() {
+        let template = r#""C:\Program Files\TigerVNC\vncviewer.exe" {host}::{port}"#;
+        let parts = resolve_remote_desktop_viewer_command(
+            RemoteDesktopKind::Vnc,
+            "127.0.0.1",
+            59_001,
+            Some(template),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            parts,
+            vec![
+                r"C:\Program Files\TigerVNC\vncviewer.exe".to_owned(),
+                "127.0.0.1::59001".to_owned()
+            ]
+        );
+
+        // A template without the port placeholder cannot reach the ephemeral
+        // tunnel, so it is rejected instead of silently opening the wrong host.
+        assert!(
+            resolve_remote_desktop_viewer_command(
+                RemoteDesktopKind::Vnc,
+                "127.0.0.1",
+                59_001,
+                Some("vncviewer {host}"),
+                None,
+            )
+            .is_err()
+        );
+        // Blank templates fall through to the platform default instead of
+        // spawning an empty command.
+        let fallback = resolve_remote_desktop_viewer_command(
+            RemoteDesktopKind::Vnc,
+            "127.0.0.1",
+            59_001,
+            Some("   "),
+            None,
+        );
+        match std::env::consts::OS {
+            "macos" => assert_eq!(
+                fallback.unwrap(),
+                vec!["open".to_owned(), "vnc://127.0.0.1:59001".to_owned()]
+            ),
+            _ => assert!(fallback.is_err()),
+        }
+    }
+
+    #[test]
+    fn split_command_line_groups_quoted_spans_and_skips_extra_spaces() {
+        assert_eq!(
+            split_command_line(r#"  mstsc   /v:127.0.0.1:3389  "#),
+            vec!["mstsc", "/v:127.0.0.1:3389"]
+        );
+        assert_eq!(
+            split_command_line(r#""C:\VNC Viewer\vncviewer.exe" -warn"#),
+            vec![r"C:\VNC Viewer\vncviewer.exe", "-warn"]
+        );
+        assert_eq!(split_command_line(r#""""#), Vec::<String>::new());
     }
 
     fn host_key_approval(role: HostKeyRole, host: &str, port: u16) -> HostKeyApproval {
@@ -2273,6 +2797,7 @@ mod tests {
                 credential_lifecycle: tokio::sync::Mutex::new(()),
                 ssh: SshSessionManager::new(),
                 sftp: SftpManager::new(),
+                ws_bridges: tokio::sync::Mutex::new(HashMap::new()),
             },
             directory,
         )

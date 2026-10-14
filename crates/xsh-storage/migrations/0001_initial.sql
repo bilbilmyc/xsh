@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS session_groups (
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY NOT NULL,
     group_id TEXT REFERENCES session_groups(id) ON DELETE SET NULL,
+    kind TEXT NOT NULL DEFAULT 'ssh',
     name TEXT NOT NULL,
     host TEXT NOT NULL,
     port INTEGER NOT NULL,
@@ -32,7 +33,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     favorite INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    forward_profiles_json TEXT NOT NULL DEFAULT '[]'
+    forward_profiles_json TEXT NOT NULL DEFAULT '[]',
+    remote_desktop_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS session_tags (

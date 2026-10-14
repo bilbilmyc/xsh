@@ -1,12 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { BellRing, ChevronDown, FolderOpen, Keyboard, KeyRound, Plus, Server, Trash2, X } from "lucide-react";
+import { BellRing, ChevronDown, FolderOpen, Keyboard, KeyRound, Monitor, Plus, Server, Trash2, X } from "lucide-react";
 import { api } from "../api";
 import { rollbackUncommittedCredentials } from "../credential-lifecycle";
 import { confirmDialog } from "./DialogHost";
 import {
   defaultTerminalProfile,
+  remoteDesktopDefaultPort,
   type AuthenticationMethod,
+  type RemoteDesktopKind,
+  type RemoteDesktopProfile,
+  type RemoteDesktopTransport,
   type SavedSession,
   type SshAgentKey,
   type SshKeyDefaults,
@@ -20,6 +24,9 @@ interface SessionEditorProps {
   groups: SessionGroup[];
   sessions: SavedSession[];
   session?: SavedSession;
+  /** Editor flavor: remote-desktop sessions lead with VNC/RDP settings and
+   * treat the SSH server purely as the encrypted transport. */
+  mode?: "ssh" | "remoteDesktop";
   onClose: () => void;
   onSaved: (session: SavedSession) => void | Promise<void>;
   onSavedAndConnect?: (session: SavedSession) => void | Promise<void>;
@@ -36,11 +43,13 @@ export function SessionEditor({
   groups,
   sessions,
   session,
+  mode = "ssh",
   onClose,
   onSaved,
   onSavedAndConnect,
   onDeleted,
 }: SessionEditorProps) {
+  const isRemoteDesktop = mode === "remoteDesktop" || session?.kind === "remoteDesktop";
   const existingAuthType = session?.authentication.type ?? "password";
   const existingProxyAuth = session?.proxyJumpAuthentication ?? null;
   const [name, setName] = useState(session?.name ?? "");
@@ -126,6 +135,40 @@ export function SessionEditor({
   const [autoReconnect, setAutoReconnect] = useState(
     session?.autoReconnect ?? true,
   );
+  const [remoteDesktopEnabled, setRemoteDesktopEnabled] = useState(
+    isRemoteDesktop || Boolean(session?.remoteDesktop),
+  );
+  const [remoteDesktopKind, setRemoteDesktopKind] = useState<RemoteDesktopKind>(
+    session?.remoteDesktop?.kind ?? "vnc",
+  );
+  const [remoteDesktopTransport, setRemoteDesktopTransport] =
+    useState<RemoteDesktopTransport>(
+      // New remote-desktop sessions default to a plain direct connection;
+      // SSH-tunnel attachments and stored profiles keep the tunnel.
+      session?.remoteDesktop?.transport ?? (mode === "remoteDesktop" ? "direct" : "sshTunnel"),
+    );
+  const [remoteDesktopTargetHost, setRemoteDesktopTargetHost] = useState(
+    session?.remoteDesktop?.targetHost ?? "127.0.0.1",
+  );
+  const [remoteDesktopTargetPort, setRemoteDesktopTargetPort] = useState(
+    session?.remoteDesktop?.targetPort == null ? "" : String(session.remoteDesktop.targetPort),
+  );
+  const [remoteDesktopViewerCommand, setRemoteDesktopViewerCommand] = useState(
+    session?.remoteDesktop?.viewerCommand ?? "",
+  );
+  const [remoteDesktopUsername, setRemoteDesktopUsername] = useState(
+    session?.remoteDesktop?.username ?? "",
+  );
+  const [remoteDesktopPassword, setRemoteDesktopPassword] = useState("");
+  const remoteDesktopPasswordSaved = session?.remoteDesktop?.credentialRef?.startsWith("xsh-local/") ?? false;
+  const [remoteDesktopAutoStart, setRemoteDesktopAutoStart] = useState(
+    session?.remoteDesktop?.autoStart ?? false,
+  );
+  const [remoteDesktopLaunchViewer, setRemoteDesktopLaunchViewer] = useState(
+    session?.remoteDesktop?.launchViewer ?? false,
+  );
+  // Direct remote-desktop sessions carry no SSH transport at all.
+  const usesSshTransport = !isRemoteDesktop || remoteDesktopTransport === "sshTunnel";
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const passwordSaved = session?.authentication.type === "password"
@@ -138,8 +181,8 @@ export function SessionEditor({
     && isLocalCredentialRef(existingProxyAuth.passphraseRef);
 
   const title = useMemo(
-    () => (session ? `编辑 ${session.name}` : "新建 SSH 会话"),
-    [session],
+    () => (session ? `编辑 ${session.name}` : isRemoteDesktop ? "新建远程桌面" : "新建 SSH 会话"),
+    [session, isRemoteDesktop],
   );
 
   const refreshAgentKeys = async () => {
@@ -218,16 +261,20 @@ export function SessionEditor({
       const normalizedName = name.trim();
       const normalizedHost = host.trim();
       const normalizedUsername = username.trim();
+      // Direct remote-desktop sessions have no SSH transport, so its fields
+      // are neither required nor duplicated-checked.
       if (!normalizedName) throw new Error("请输入会话名称");
-      if (!normalizedHost) throw new Error("请输入 SSH 主机");
-      if (!normalizedUsername) throw new Error("请输入 SSH 用户名");
+      if (usesSshTransport && !normalizedHost) throw new Error("请输入 SSH 主机");
+      if (usesSshTransport && !normalizedUsername) throw new Error("请输入 SSH 用户名");
 
-      const duplicateTarget = sessions.find((candidate) =>
-        candidate.id !== session?.id
-        && candidate.host.trim().toLowerCase() === normalizedHost.toLowerCase()
-        && candidate.port === parsedPort
-        && candidate.username.trim().toLowerCase() === normalizedUsername.toLowerCase(),
-      );
+      const duplicateTarget = usesSshTransport
+        ? sessions.find((candidate) =>
+          candidate.id !== session?.id
+          && candidate.host.trim().toLowerCase() === normalizedHost.toLowerCase()
+          && candidate.port === parsedPort
+          && candidate.username.trim().toLowerCase() === normalizedUsername.toLowerCase(),
+        )
+        : undefined;
       const duplicateName = sessions.find((candidate) =>
         candidate.id !== session?.id
         && candidate.name.trim().toLowerCase() === normalizedName.toLowerCase(),
@@ -241,14 +288,18 @@ export function SessionEditor({
         ].filter(Boolean);
         const confirmed = await confirmDialog({
           title: "重复的会话",
-          message: `${warnings.join("\n")}。\n\n目标：${normalizedUsername}@${normalizedHost}:${parsedPort}\n\n仍要保存当前会话吗？`,
+          message: `${warnings.join("\n")}。${usesSshTransport ? `\n\n目标：${normalizedUsername}@${normalizedHost}:${parsedPort}` : ""}\n\n仍要保存当前会话吗？`,
           confirmLabel: "仍然保存",
         });
         if (!confirmed) return;
       }
 
       let authentication: AuthenticationMethod;
-      if (authType === "password") {
+      if (!usesSshTransport) {
+        // Direct remote-desktop sessions never open an SSH connection; keep
+        // whatever authentication is stored (agent needs no secrets).
+        authentication = session?.authentication ?? { type: "agent", identityFingerprint: null };
+      } else if (authType === "password") {
         let credentialRef =
           session?.authentication.type === "password"
             && isLocalCredentialRef(session.authentication.credentialRef)
@@ -362,7 +413,52 @@ export function SessionEditor({
         shortcuts.add(key);
       }
 
+      let remoteDesktop: RemoteDesktopProfile | null = null;
+      if (remoteDesktopEnabled || isRemoteDesktop) {
+        const normalizedRdHost = remoteDesktopTargetHost.trim();
+        if (!normalizedRdHost) throw new Error("远程桌面目标主机不能为空。");
+        const trimmedRdPort = remoteDesktopTargetPort.trim();
+        const parsedRdPort = trimmedRdPort === "" ? null : Number(trimmedRdPort);
+        if (parsedRdPort !== null && (!Number.isInteger(parsedRdPort) || parsedRdPort < 1 || parsedRdPort > 65535)) {
+          throw new Error("远程桌面目标端口必须在 1 到 65535 之间。");
+        }
+        const normalizedViewer = remoteDesktopViewerCommand.trim();
+        if (normalizedViewer && !normalizedViewer.includes("{port}")) {
+          throw new Error("远程桌面查看器命令必须包含 {port} 占位符，例如 vncviewer {host}::{port}。");
+        }
+        let remoteCredentialRef = isLocalCredentialRef(session?.remoteDesktop?.credentialRef)
+          ? session!.remoteDesktop!.credentialRef
+          : null;
+        if (remoteDesktopPassword) {
+          remoteCredentialRef = await api.createCredential("password", remoteDesktopPassword);
+          createdCredentialRefs.push(remoteCredentialRef);
+        }
+        remoteDesktop = {
+          kind: remoteDesktopKind,
+          transport: remoteDesktopTransport,
+          targetHost: normalizedRdHost,
+          targetPort: parsedRdPort,
+          // Remote-desktop sessions live and die with the tunnel: connecting
+          // always starts it (and opens the viewer) automatically. Direct
+          // sessions have no tunnel lifecycle to automate.
+          autoStart: isRemoteDesktop && remoteDesktopTransport === "sshTunnel"
+            ? true
+            : remoteDesktopAutoStart,
+          launchViewer: isRemoteDesktop && remoteDesktopTransport === "sshTunnel"
+            ? true
+            : remoteDesktopLaunchViewer,
+          viewerCommand: normalizedViewer || null,
+          username: remoteDesktopUsername.trim() || null,
+          credentialRef: remoteCredentialRef,
+          forwardProfileId: session?.remoteDesktop?.forwardProfileId ?? crypto.randomUUID(),
+        };
+      }
+      if (isRemoteDesktop && !remoteDesktop) {
+        throw new Error("远程桌面会话需要配置 VNC/RDP 目标。");
+      }
+
       const draft: SessionDraft = {
+        kind: isRemoteDesktop ? "remoteDesktop" : "ssh",
         groupId: groupId || null,
         name: normalizedName,
         host: normalizedHost,
@@ -395,6 +491,7 @@ export function SessionEditor({
           .filter(Boolean),
         favorite,
         forwardProfiles: session?.forwardProfiles ?? [],
+        remoteDesktop,
       };
       const saved = session
         ? await api.updateSession(session.id, draft)
@@ -462,38 +559,7 @@ export function SessionEditor({
     void save();
   };
 
-  return (
-    <div className="modal-backdrop" onMouseDown={requestClose}>
-      <section
-        className="session-editor"
-        onMouseDown={(event) => event.stopPropagation()}
-        onKeyDown={onEditorKeyDown}
-        onChange={() => setDirty(true)}
-      >
-        <header className="modal-header">
-          <div className="modal-title-wrap">
-            <span className="modal-icon"><Server size={18} /></span>
-            <div>
-              <h2>{title}</h2>
-              <p>连接信息保存在本地，密码由 XSH 本地加密数据库托管，不使用系统钥匙串。</p>
-            </div>
-          </div>
-          <button className="icon-button" onClick={requestClose} aria-label="关闭"><X size={18} /></button>
-        </header>
-
-        <div className="editor-body">
-          <div className="form-section session-basic-section">
-            <div className="section-heading"><Server size={15} />连接信息</div>
-            <p className="section-description">先填写服务器地址和登录用户，其他选项可以稍后再配置。</p>
-            <div className="form-grid">
-              <label className="field field-span-2"><span>会话名称</span><input value={name} onChange={(e) => setName(e.target.value)} placeholder="生产环境 API" autoFocus /></label>
-              <label className="field field-span-2"><span>所属目录</span><select value={groupId} onChange={(e) => setGroupId(e.target.value)}><option value="">未分类</option>{groups.map((group) => <option value={group.id} key={group.id}>{group.name}</option>)}</select></label>
-              <label className="field field-span-2"><span>主机</span><input value={host} onChange={(e) => setHost(e.target.value)} placeholder="server.example.com" /></label>
-              <label className="field"><span>端口</span><input type="text" inputMode="numeric" pattern="[0-9]*" value={port} onChange={(e) => setPort(e.target.value.replace(/[^0-9]/g, ""))} placeholder="22" aria-label="SSH 端口" /></label>
-              <label className="field"><span>用户名</span><input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="deploy" /></label>
-            </div>
-          </div>
-
+  const proxyJumpSection = (
           <details className="proxy-jump-details">
             <summary>
               <span className="proxy-jump-summary-title"><ChevronDown size={16} />跳板机设置（可选）</span>
@@ -515,14 +581,124 @@ export function SessionEditor({
               </div>
             </div>
           </details>
+  );
 
+  const remoteDesktopSection = (
+          <details className={`proxy-jump-details remote-desktop-details${isRemoteDesktop ? " remote-desktop-primary" : ""}`} open={isRemoteDesktop || undefined}>
+            <summary>
+              <span className="proxy-jump-summary-title"><ChevronDown size={16} />远程桌面{isRemoteDesktop ? "（VNC / RDP）" : "（VNC / RDP，可选）"}</span>
+              <span className="proxy-jump-summary-hint">
+                {isRemoteDesktop
+                  ? `已启用：${remoteDesktopKind === "vnc" ? "VNC" : "RDP"} → ${remoteDesktopTargetHost || "127.0.0.1"}:${remoteDesktopTargetPort.trim() || remoteDesktopDefaultPort(remoteDesktopKind)}`
+                  : session?.remoteDesktop
+                    ? `已配置：${session.remoteDesktop.kind === "vnc" ? "VNC" : "RDP"} → ${session.remoteDesktop.targetHost}:${session.remoteDesktop.targetPort ?? remoteDesktopDefaultPort(session.remoteDesktop.kind)}`
+                    : "默认关闭，按需展开"}
+              </span>
+            </summary>
+            <div className="proxy-jump-body">
+              {!isRemoteDesktop && (
+                <label className="check-row"><span><input type="checkbox" checked={remoteDesktopEnabled} onChange={(e) => setRemoteDesktopEnabled(e.target.checked)} />启用远程桌面（通过当前 SSH 会话加密隧道连接 VNC/RDP）</span></label>
+              )}
+              {(remoteDesktopEnabled || isRemoteDesktop) && <>
+                <div className="form-grid">
+                  <label className="field"><span>协议</span><div className="segmented-control"><button className={remoteDesktopKind === "vnc" ? "active" : ""} onClick={() => setRemoteDesktopKind("vnc")}><Monitor size={14} />VNC</button><button className={remoteDesktopKind === "rdp" ? "active" : ""} onClick={() => setRemoteDesktopKind("rdp")}><Monitor size={14} />RDP</button></div></label>
+                  {isRemoteDesktop && (
+                    <label className="field"><span>连接方式</span>
+                      <div className="segmented-control">
+                        <button className={remoteDesktopTransport === "direct" ? "active" : ""} onClick={() => setRemoteDesktopTransport("direct")}>直连</button>
+                        <button className={remoteDesktopTransport === "sshTunnel" ? "active" : ""} onClick={() => setRemoteDesktopTransport("sshTunnel")}>SSH 加密隧道</button>
+                      </div>
+                    </label>
+                  )}
+                  <label className="field"><span>远程目标主机</span><input value={remoteDesktopTargetHost} onChange={(e) => setRemoteDesktopTargetHost(e.target.value)} placeholder={remoteDesktopTransport === "direct" ? "192.168.1.10 或 vnc.example.com" : "127.0.0.1"} /></label>
+                  <label className="field"><span>远程目标端口</span><input type="number" min="1" max="65535" value={remoteDesktopTargetPort} onChange={(e) => setRemoteDesktopTargetPort(e.target.value)} placeholder={`默认 ${remoteDesktopDefaultPort(remoteDesktopKind)}`} /></label>
+                  <label className="field"><span>登录用户（可选）</span><input value={remoteDesktopUsername} onChange={(e) => setRemoteDesktopUsername(e.target.value)} placeholder={remoteDesktopKind === "rdp" ? "administrator 或 DOMAIN\\user" : "多数 VNC 服务器无需用户名"} /></label>
+                  <label className={`field${isRemoteDesktop ? "" : " field-span-2"}`}><span>登录密码（可选） {remoteDesktopPasswordSaved && <em className="credential-saved-badge">•••••••• 已保存</em>}</span><input type="password" value={remoteDesktopPassword} onChange={(e) => setRemoteDesktopPassword(e.target.value)} placeholder={remoteDesktopPasswordSaved ? "留空保持已保存的密码" : "保存在 XSH 本地加密库"} autoComplete="new-password" /></label>
+                  <label className="field field-span-2"><span>外部查看器命令模板（可选）</span><input value={remoteDesktopViewerCommand} onChange={(e) => setRemoteDesktopViewerCommand(e.target.value)} placeholder={remoteDesktopKind === "vnc" ? "vncviewer {host}::{port}" : "remmina -c rdp://{host}:{port}"} spellCheck={false} /></label>
+                </div>
+                <p className="field-help">
+                  {isRemoteDesktop
+                    ? remoteDesktopTransport === "direct"
+                      ? "直连：在应用内直接连接目标地址，不经过 SSH。登录信息保存在本地加密凭据库，VNC 桌面在应用内打开；填写外部查看器模板后将改用外部程序。"
+                      : "SSH 加密隧道：流量经 SSH 服务器加密转发，适合桌面不在公网或需要加密的场景。登录信息保存在本地加密凭据库；RDP 使用系统远程桌面并自动填入登录信息。"
+                    : "登录信息保存在本地加密凭据库；留空时 VNC 在应用内打开，RDP 使用系统远程桌面。也可以连接后在工具栏点“远程”随时启动。"}
+                </p>
+                {!isRemoteDesktop && (
+                  <div className="check-row">
+                    <label><input type="checkbox" checked={remoteDesktopAutoStart} onChange={(e) => setRemoteDesktopAutoStart(e.target.checked)} />连接成功后自动启动隧道</label>
+                    <label><input type="checkbox" checked={remoteDesktopLaunchViewer} onChange={(e) => setRemoteDesktopLaunchViewer(e.target.checked)} disabled={!remoteDesktopAutoStart} />自动启动时同时打开查看器</label>
+                  </div>
+                )}
+              </>}
+            </div>
+          </details>
+  );
+
+  return (
+    <div className="modal-backdrop" onMouseDown={requestClose}>
+      <section
+        className="session-editor"
+        onMouseDown={(event) => event.stopPropagation()}
+        onKeyDown={onEditorKeyDown}
+        onChange={() => setDirty(true)}
+      >
+        <header className="modal-header">
+          <div className="modal-title-wrap">
+            <span className="modal-icon"><Server size={18} /></span>
+            <div>
+              <h2>{title}</h2>
+              <p>{isRemoteDesktop
+                ? "通过 SSH 加密隧道连接服务器的 VNC/RDP 桌面；SSH 服务器只作为加密通道使用。"
+                : "连接信息保存在本地，密码由 XSH 本地加密数据库托管，不使用系统钥匙串。"}</p>
+            </div>
+          </div>
+          <button className="icon-button" onClick={requestClose} aria-label="关闭"><X size={18} /></button>
+        </header>
+
+        <div className="editor-body">
+          <div className="form-section session-basic-section">
+            <div className="section-heading"><Server size={15} />连接信息</div>
+            <p className="section-description">{isRemoteDesktop
+              ? "为这个远程桌面连接命名；VNC/RDP 桌面经由下方的 SSH 加密通道访问。"
+              : "先填写服务器地址和登录用户，其他选项可以稍后再配置。"}</p>
+            <div className="form-grid">
+              <label className="field field-span-2"><span>会话名称</span><input value={name} onChange={(e) => setName(e.target.value)} placeholder={isRemoteDesktop ? "机房工作站桌面" : "生产环境 API"} autoFocus /></label>
+              <label className="field field-span-2"><span>所属目录</span><select value={groupId} onChange={(e) => setGroupId(e.target.value)}><option value="">未分类</option>{groups.map((group) => <option value={group.id} key={group.id}>{group.name}</option>)}</select></label>
+              {!isRemoteDesktop && <>
+                <label className="field field-span-2"><span>主机</span><input value={host} onChange={(e) => setHost(e.target.value)} placeholder="server.example.com" /></label>
+                <label className="field"><span>端口</span><input type="text" inputMode="numeric" pattern="[0-9]*" value={port} onChange={(e) => setPort(e.target.value.replace(/[^0-9]/g, ""))} placeholder="22" aria-label="SSH 端口" /></label>
+                <label className="field"><span>用户名</span><input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="deploy" /></label>
+              </>}
+            </div>
+          </div>
+
+          {isRemoteDesktop && remoteDesktopSection}
+
+          {isRemoteDesktop && remoteDesktopTransport === "sshTunnel" && (
+            <div className="form-section">
+              <div className="section-heading"><Server size={15} />SSH 服务器（加密通道）</div>
+              <p className="section-description">填写用作加密通道的 SSH 服务器；远程桌面流量全部经由这条 SSH 连接转发，不直接暴露在网络上。</p>
+              <div className="form-grid">
+                <label className="field field-span-2"><span>主机</span><input value={host} onChange={(e) => setHost(e.target.value)} placeholder="server.example.com" /></label>
+                <label className="field"><span>端口</span><input type="text" inputMode="numeric" pattern="[0-9]*" value={port} onChange={(e) => setPort(e.target.value.replace(/[^0-9]/g, ""))} placeholder="22" aria-label="SSH 端口" /></label>
+                <label className="field"><span>用户名</span><input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="deploy" /></label>
+              </div>
+            </div>
+          )}
+
+          {usesSshTransport && proxyJumpSection}
+          {!isRemoteDesktop && remoteDesktopSection}
+
+          {usesSshTransport && (
           <div className="form-section">
-            <div className="section-heading"><KeyRound size={15} />目标主机认证</div>
+            <div className="section-heading"><KeyRound size={15} />{isRemoteDesktop ? "SSH 服务器认证（加密通道）" : "目标主机认证"}</div>
             <div className="segmented-control"><button className={authType === "password" ? "active" : ""} onClick={() => setAuthType("password")}>密码</button><button className={authType === "privateKey" ? "active" : ""} onClick={() => setAuthType("privateKey")}>SSH Key</button><button className={authType === "agent" ? "active" : ""} onClick={() => setAuthType("agent")}>SSH Agent</button></div>
             {authType === "password" ? <label className="field"><span>密码 {passwordSaved && <em className="credential-saved-badge">•••••••• 已保存</em>}</span><input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={passwordSaved ? "留空保持已保存的密码" : "请输入 SSH 密码"} autoComplete="new-password" /></label> : authType === "agent" ? <label className="field"><span>Agent 身份（可选）</span><select value={agentFingerprint} onChange={(e) => setAgentFingerprint(e.target.value)}><option value="">自动尝试 Agent 中的密钥</option>{agentKeys.map((key) => <option key={key.fingerprint} value={key.fingerprint}>{key.algorithm} · {key.fingerprint}{key.comment ? ` · ${key.comment}` : ""}{key.certificate ? " · 证书" : ""}</option>)}</select><small className="field-help">{agentLoading ? "正在读取本机 SSH Agent…" : agentKeys.length ? `已发现 ${agentKeys.length} 个 Agent 身份` : "未发现身份；保存后连接时会再次检测"}<button type="button" className="link-button" onClick={() => void refreshAgentKeys()}>刷新</button></small></label> : <div className="form-grid"><label className="field field-span-2"><span>私钥文件</span><div className="input-action-row"><input value={privateKeyPath} onChange={(e) => setPrivateKeyPath(e.target.value)} placeholder="~/.ssh/id_ed25519" /><button type="button" className="secondary-button" onClick={() => void choosePrivateKey()}>选择私钥</button></div><div className="private-key-actions"><button type="button" className="link-button private-key-directory-button" onClick={() => void openSshDirectory()}><FolderOpen size={13} />打开 ~/.ssh</button>{sshKeyDefaults?.defaultKeyPath && <button type="button" className="link-button" onClick={() => useDefaultPrivateKey()}>使用默认密钥</button>}</div><small className="field-help">选择器会默认打开 ~/.ssh，不需要在 Finder 中显示隐藏目录。</small></label><label className="field field-span-2"><span>Key Passphrase（没有则留空） {passphraseSaved && <em className="credential-saved-badge">•••••••• 已保存</em>}</span><input type="password" value={passphrase} onChange={(e) => setPassphrase(e.target.value)} placeholder={passphraseSaved ? "留空保持已保存的 Passphrase" : "没有则留空"} autoComplete="new-password" /></label></div>}
           </div>
+          )}
 
 
+          {!isRemoteDesktop && (
           <div className="form-section session-advanced-section">
             <div className="section-heading"><span>终端与高级</span></div>
             <p className="section-description">连接后行为、终端外观和标签等低频设置按需配置。</p>
@@ -578,7 +754,13 @@ export function SessionEditor({
               <label className="field field-span-2"><span>标签（逗号分隔）</span><input value={tags} onChange={(e) => setTags(e.target.value)} placeholder="linux, api, production" /></label>
             </div>
           </div>
-          <div className="check-row"><label><input type="checkbox" checked={favorite} onChange={(e) => setFavorite(e.target.checked)} />加入收藏</label><label><input type="checkbox" checked={autoReconnect} onChange={(e) => setAutoReconnect(e.target.checked)} />断线自动重连</label></div>
+          )}
+          {isRemoteDesktop && remoteDesktopTransport === "sshTunnel" && (
+            <div className="check-row"><label><input type="checkbox" checked={autoReconnect} onChange={(e) => setAutoReconnect(e.target.checked)} />断线自动重连（重连后自动恢复隧道并重新打开查看器）</label></div>
+          )}
+          {!isRemoteDesktop && (
+            <div className="check-row"><label><input type="checkbox" checked={favorite} onChange={(e) => setFavorite(e.target.checked)} />加入收藏</label><label><input type="checkbox" checked={autoReconnect} onChange={(e) => setAutoReconnect(e.target.checked)} />断线自动重连</label></div>
+          )}
           {error && <div className="form-error">{error}</div>}
         </div>
 

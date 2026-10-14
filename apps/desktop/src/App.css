@@ -1154,6 +1154,210 @@ select {
   visibility: visible;
 }
 
+/* Remote-desktop control panel pane: same stage slot as a terminal, but it
+   renders connection/tunnel/viewer status instead of a PTY. */
+.rd-pane {
+  position: absolute;
+  inset: 0;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+  background: #0b0f14;
+  overflow-y: auto;
+}
+
+.rd-pane.pane-hidden {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.rd-pane-header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #cdd9e3;
+}
+
+.rd-pane-title {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  margin-right: auto;
+}
+
+.rd-pane-title strong {
+  font-size: var(--font-md, 14px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rd-pane-title small {
+  color: #6f8698;
+  font-size: var(--font-xs);
+}
+
+.rd-pane-actions {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rd-pane-body {
+  min-width: 0;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  align-content: start;
+}
+
+.rd-card {
+  min-width: 0;
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid #253746;
+  border-radius: 9px;
+  background: #101923;
+}
+
+.rd-card-heading {
+  display: grid;
+  gap: 3px;
+}
+
+.rd-card-heading strong {
+  color: #cdd9e3;
+  font-size: var(--font-sm);
+}
+
+.rd-card-heading span {
+  color: #6f8698;
+  font-size: var(--font-xs);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.rd-hint {
+  margin: 0;
+  color: #7d93a5;
+  font-size: var(--font-xs);
+  line-height: 1.6;
+}
+
+.rd-auth-form {
+  display: grid;
+  gap: 10px;
+}
+
+.rd-auth-form .field {
+  display: grid;
+  gap: 6px;
+  color: #91a3b4;
+  font-size: var(--font-xs);
+}
+
+.rd-auth-form input {
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid #2a3d4e;
+  border-radius: 6px;
+  color: #dce5ed;
+  background: #0b1219;
+  font-size: var(--font-sm);
+}
+
+.rd-tunnel-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.rd-tunnel-address {
+  color: #b9c9d6;
+  font: 12px/1.5 var(--mono-font);
+  overflow-wrap: anywhere;
+}
+
+.rd-tunnel-idle {
+  color: #64798b;
+  font-size: var(--font-xs);
+}
+
+.rd-viewer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* Embedded VNC desktop (noVNC canvas) takes over the pane below a toolbar.
+ * Driven by an explicit .viewer-active class from React state — :has() is
+ * not reliable across WebView2 versions. */
+.rd-pane.viewer-active {
+  overflow: hidden;
+}
+
+.rd-pane.viewer-active .rd-pane-body {
+  flex: 1;
+  min-height: 0;
+  display: block;
+  overflow: hidden;
+}
+
+.rd-pane.viewer-active .rd-viewer-card {
+  height: 100%;
+}
+
+.rd-pane.viewer-active .rd-pane-body > .rd-card {
+  display: none;
+}
+
+.rd-viewer-card {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #253746;
+  border-radius: 9px;
+  background: #0b0f14;
+  overflow: hidden;
+}
+
+.rd-viewer-toolbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid #1d2c39;
+  background: #0e1620;
+}
+
+.rd-viewer-status {
+  margin-right: auto;
+  color: #8da3b5;
+  font-size: var(--font-xs);
+}
+
+.rd-viewer-host {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.rd-viewer-host canvas {
+  outline: none;
+}
+
 .xterm-host,
 .xterm-host .xterm {
   width: 100%;
@@ -3659,6 +3863,10 @@ body.resizing-terminal-split .split-divider.horizontal * { cursor: row-resize !i
   display: grid;
   grid-template-columns: minmax(0, 1.35fr) minmax(138px, 0.65fr);
   gap: 14px;
+}
+
+.remote-desktop-viewer-field {
+  grid-column: 1 / -1;
 }
 
 .forward-form-grid .field {

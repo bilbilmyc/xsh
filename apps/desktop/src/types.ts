@@ -75,6 +75,7 @@ export interface SshKeyDefaults {
 
 export interface SavedSession {
   id: Uuid;
+  kind: SessionKind;
   groupId: Uuid | null;
   name: string;
   host: string;
@@ -95,11 +96,13 @@ export interface SavedSession {
   tags: string[];
   favorite: boolean;
   forwardProfiles: ForwardProfile[];
+  remoteDesktop: RemoteDesktopProfile | null;
   createdAt: string;
   updatedAt: string;
 }
 
 export interface SessionDraft {
+  kind: SessionKind;
   groupId: Uuid | null;
   name: string;
   host: string;
@@ -120,6 +123,7 @@ export interface SessionDraft {
   tags: string[];
   favorite: boolean;
   forwardProfiles: ForwardProfile[];
+  remoteDesktop: RemoteDesktopProfile | null;
 }
 
 export interface SessionGroupDraft {
@@ -333,6 +337,45 @@ export interface ForwardProfile {
   targetHost: string | null;
   targetPort: number | null;
   autoStart: boolean;
+}
+
+export type RemoteDesktopKind = "vnc" | "rdp";
+
+/** How the viewer reaches the desktop: straight to the address, or through
+ * an encrypted SSH tunnel. */
+export type RemoteDesktopTransport = "direct" | "sshTunnel";
+
+/** What a session primarily connects to; remote-desktop sessions use the SSH
+ * server only as the encrypted transport for a VNC/RDP tunnel. */
+export type SessionKind = "ssh" | "remoteDesktop";
+
+export const remoteDesktopDefaultPort = (kind: RemoteDesktopKind): number =>
+  kind === "vnc" ? 5900 : 3389;
+
+export interface RemoteDesktopProfile {
+  kind: RemoteDesktopKind;
+  transport: RemoteDesktopTransport;
+  targetHost: string;
+  targetPort: number | null;
+  autoStart: boolean;
+  launchViewer: boolean;
+  viewerCommand: string | null;
+  username: string | null;
+  credentialRef: string | null;
+  forwardProfileId: Uuid | null;
+}
+
+export interface RemoteDesktopWsBridge {
+  port: number;
+}
+
+export interface RemoteDesktopViewerLaunch {
+  command: string;
+}
+
+export interface RemoteDesktopLaunch {
+  forward: ForwardInfo;
+  viewer: RemoteDesktopViewerLaunch | null;
 }
 
 export interface SshDiagnosticReport {

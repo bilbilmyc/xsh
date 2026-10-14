@@ -13,6 +13,7 @@ import {
   FileKey,
   Globe2,
   Lock,
+  Monitor,
   MoreHorizontal,
   PanelLeftClose,
   PanelLeftOpen,
@@ -30,6 +31,7 @@ import { colorDialog, confirmDialog, isDialogOpen, promptDialog, DialogHost } fr
 import { GroupEditorModal } from "./components/GroupEditorModal";
 import { QuickCommandBar } from "./components/QuickCommandBar";
 import { PortForwardModal } from "./components/PortForwardModal";
+import { RemoteDesktopModal } from "./components/RemoteDesktopModal";
 import type { SessionBatchUpdates } from "./components/SessionBatchEditorModal";
 import { SessionEditor } from "./components/SessionEditor";
 import { PasswordPromptModal } from "./components/PasswordPromptModal";
@@ -45,11 +47,14 @@ import {
   type WorkspacePaneLayout,
   type WorkspaceSnapshot,
 } from "./workspace-state";
-import { defaultTerminalProfile, type ForwardProfile, type SavedSession, type SessionDraft, type SessionGroup, type SessionGroupDraft, type SshConfigEntry, type SshDiagnosticReport } from "./types";
+import { defaultTerminalProfile, type ForwardProfile, type RemoteDesktopProfile, type SavedSession, type SessionDraft, type SessionGroup, type SessionGroupDraft, type SshConfigEntry, type SshDiagnosticReport } from "./types";
 import "./App.css";
 
 const TerminalPane = lazy(() =>
   import("./components/TerminalPane").then((module) => ({ default: module.TerminalPane })),
+);
+const RemoteDesktopPane = lazy(() =>
+  import("./components/RemoteDesktopPane").then((module) => ({ default: module.RemoteDesktopPane })),
 );
 const SftpPanel = lazy(() =>
   import("./components/SftpPanel").then((module) => ({ default: module.SftpPanel })),
@@ -140,6 +145,35 @@ const TerminalPaneHost = memo(function TerminalPaneHost({
       onTrigger={handleTrigger}
       onEditSession={onEditSession}
       onDiagnose={onDiagnose}
+    />
+  );
+});
+
+const RemoteDesktopPaneHost = memo(function RemoteDesktopPaneHost({
+  tab,
+  visible,
+  focused,
+  connectionEnabled,
+  onStateChange,
+  onConnectionChange,
+  onFocus,
+  onEditSession,
+}: Omit<TerminalPaneHostProps, "preferences" | "command" | "onCommandResult" | "onTrigger" | "onDiagnose">) {
+  const handleStateChange = useCallback((state: string) => onStateChange(tab.id, state), [onStateChange, tab.id]);
+  const handleConnectionChange = useCallback((connectionId: string | null) => onConnectionChange(tab.id, connectionId), [onConnectionChange, tab.id]);
+  const handleFocus = useCallback(() => onFocus(tab.id), [onFocus, tab.id]);
+  const handleEditSession = useCallback((session: SavedSession) => onEditSession(session), [onEditSession]);
+
+  return (
+    <RemoteDesktopPane
+      session={tab.session}
+      visible={visible}
+      focused={focused}
+      connectionEnabled={connectionEnabled}
+      onStateChange={handleStateChange}
+      onConnectionChange={handleConnectionChange}
+      onFocus={handleFocus}
+      onEditSession={handleEditSession}
     />
   );
 });
@@ -250,11 +284,21 @@ function App() {
   const [tabs, setTabs] = useState<TerminalTab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [editorSession, setEditorSession] = useState<SavedSession | null | undefined>();
+  const [remoteDesktopCreateVisible, setRemoteDesktopCreateVisible] = useState(false);
+  const openSshSessionEditor = () => {
+    setRemoteDesktopCreateVisible(false);
+    setEditorSession(null);
+  };
+  const openRemoteDesktopEditor = () => {
+    setEditorSession(undefined);
+    setRemoteDesktopCreateVisible(true);
+  };
   const [groupEditor, setGroupEditor] = useState<GroupEditorState | null>(null);
   const [preferences, setPreferences] = useState<AppPreferences>(() => loadPreferences());
   const [sftpVisible, setSftpVisible] = useState(false);
   const [transferManagerVisible, setTransferManagerVisible] = useState(false);
   const [portForwardVisible, setPortForwardVisible] = useState(false);
+  const [remoteDesktopVisible, setRemoteDesktopVisible] = useState(false);
   const [connectionIds, setConnectionIds] = useState<Record<string, string | null>>({});
   const [settingsVisible, setSettingsVisible] = useState(false);
   const [sshConfigVisible, setSshConfigVisible] = useState(false);
@@ -1053,6 +1097,7 @@ function App() {
   };
 
   const sessionDraft = (session: SavedSession, overrides: Partial<SessionDraft> = {}): SessionDraft => ({
+    kind: session.kind ?? "ssh",
     groupId: session.groupId,
     name: session.name,
     host: session.host,
@@ -1073,6 +1118,7 @@ function App() {
     tags: session.tags,
     favorite: session.favorite,
     forwardProfiles: session.forwardProfiles ?? [],
+    remoteDesktop: session.remoteDesktop ?? null,
     ...overrides,
   });
 
@@ -1081,6 +1127,12 @@ function App() {
     setSessions((current) => current.map((candidate) => candidate.id === saved.id ? saved : candidate));
     setTabs((current) => current.map((tab) => tab.session.id === saved.id ? { ...tab, session: saved } : tab));
     setToast(`会话“${saved.name}”的隧道配置已保存。`);
+  };
+
+  const updateRemoteDesktop = async (session: SavedSession, remoteDesktop: RemoteDesktopProfile | null) => {
+    const saved = await api.updateSession(session.id, sessionDraft(session, { remoteDesktop }));
+    setSessions((current) => current.map((candidate) => candidate.id === saved.id ? saved : candidate));
+    setTabs((current) => current.map((tab) => tab.session.id === saved.id ? { ...tab, session: saved } : tab));
   };
 
   const moveSessionToGroup = async (session: SavedSession, groupId: string | null) => {
@@ -1276,6 +1328,7 @@ function App() {
             credentialRef: null,
           };
       const draft: SessionDraft = {
+        kind: existing?.kind ?? "ssh",
         groupId: existing?.groupId ?? null,
         name: entry.alias,
         host: entry.hostname,
@@ -1294,6 +1347,7 @@ function App() {
         color: existing?.color ?? null,
         notes: existing?.notes ?? null,
         tags: Array.from(new Set([...(existing?.tags ?? []), "ssh-config"])),
+        remoteDesktop: existing?.remoteDesktop ?? null,
         favorite: existing?.favorite ?? false,
         forwardProfiles: existing?.forwardProfiles ?? [],
       };
@@ -1382,7 +1436,7 @@ function App() {
       const chromeShift = IS_MACOS ? !event.shiftKey : event.shiftKey;
       const hasOverlay = isDialogOpen() || editorSession !== undefined || settingsVisible || sshConfigVisible ||
         commandCenterVisible || historyVisible || diagnosticSession !== null || groupEditor !== null ||
-        workspaceManagerVisible || sessionFileDialog !== null || connectionManagerVisible || batchEditorSessions.length > 0 || portForwardVisible ||
+        workspaceManagerVisible || sessionFileDialog !== null || connectionManagerVisible || batchEditorSessions.length > 0 || portForwardVisible || remoteDesktopVisible ||
         batchCommandVisible || transferManagerVisible || onboardingVisible || tabContextMenu !== null;
       if (hasOverlay) return;
 
@@ -1528,7 +1582,8 @@ function App() {
           <button className="toolbar-button" onClick={() => setTransferManagerVisible(true)} title="查看后台传输任务"><Activity size={14} />传输</button>
           <button className="toolbar-button command-center-trigger" onClick={() => setCommandCenterVisible(true)}><Command size={14} />命令中心</button>
           <button className="toolbar-button" onClick={() => setHistoryVisible(true)}><History size={14} />历史</button>
-          <button className="toolbar-button" onClick={() => setEditorSession(null)}><Plus size={15} />新建会话</button>
+          <button className="toolbar-button" onClick={openSshSessionEditor}><Plus size={15} />新建会话</button>
+          <button className="toolbar-button" onClick={openRemoteDesktopEditor} title="新建 VNC/RDP 远程桌面连接（经 SSH 加密隧道）"><Monitor size={15} />新建远程桌面</button>
           <button className="icon-button" title="设置" onClick={() => setSettingsVisible(true)}><Settings size={16} /></button>
           <button className="icon-button" title="工作区管理" onClick={() => setWorkspaceManagerVisible(true)}><MoreHorizontal size={17} /></button>
         </div>
@@ -1544,7 +1599,8 @@ function App() {
           onOpenGroup={openGroupSessions}
           onDiagnose={(session) => void runDiagnostic(session)}
           onEdit={(session) => setEditorSession(session)}
-          onCreateSession={() => setEditorSession(null)}
+          onCreateSession={openSshSessionEditor}
+          onCreateRemoteDesktop={openRemoteDesktopEditor}
           onCreateGroup={createGroup}
           onDuplicate={duplicateSession}
           onToggleFavorite={toggleFavorite}
@@ -1630,12 +1686,17 @@ function App() {
               <button className={broadcastEnabled ? "active" : ""} onClick={() => setBroadcastEnabled((value) => !value)} title={broadcastEnabled ? "关闭命令广播" : "开启命令广播"}>广播</button>
               <button onClick={() => setBatchCommandVisible(true)} title="选择目标并逐会话汇总批量命令结果"><SendHorizontal size={13} />批量</button>
             </div>
-            {activeTab && connectionIds[activeTab.id] && (
+            {activeTab && connectionIds[activeTab.id] && activeTab.session.kind !== "remoteDesktop" && (
               <button className={`sftp-toggle ${portForwardVisible ? "active" : ""}`} onClick={() => setPortForwardVisible((value) => !value)} title="端口转发">
                 <Globe2 size={14} />转发
               </button>
             )}
-            {activeTab && (
+            {activeTab && connectionIds[activeTab.id] && activeTab.session.kind !== "remoteDesktop" && (
+              <button className={`sftp-toggle ${remoteDesktopVisible ? "active" : ""}`} onClick={() => setRemoteDesktopVisible((value) => !value)} title="VNC / RDP 远程桌面">
+                <Monitor size={14} />远程
+              </button>
+            )}
+            {activeTab && activeTab.session.kind !== "remoteDesktop" && (
               <button className={`sftp-toggle ${sftpVisible ? "active" : ""}`} onClick={() => setSftpVisible((value) => !value)}>
                 <Files size={14} />SFTP
               </button>
@@ -1656,6 +1717,21 @@ function App() {
                 const paneVisible = paneLayout === "single"
                   ? tab.id === activeTabId
                   : tab.id === activeTabId || tab.id === secondaryTabId;
+                if (tab.session.kind === "remoteDesktop") {
+                  return (
+                    <RemoteDesktopPaneHost
+                      key={`${tab.id}:${tab.connectionVersion}`}
+                      tab={tab}
+                      visible={paneVisible}
+                      focused={tab.id === activeTabId}
+                      connectionEnabled={tab.state !== "queued"}
+                      onStateChange={handleTerminalStateChange}
+                      onConnectionChange={handleTerminalConnectionChange}
+                      onFocus={handleTerminalFocus}
+                      onEditSession={handleEditSession}
+                    />
+                  );
+                }
                 return (
                 <TerminalPaneHost
                   key={`${tab.id}:${tab.connectionVersion}`}
@@ -1819,6 +1895,16 @@ function App() {
         />
       )}
 
+      {remoteDesktopVisible && activeTab && connectionIds[activeTab.id] && (
+        <RemoteDesktopModal
+          connectionId={connectionIds[activeTab.id]!}
+          session={activeTab.session}
+          onClose={() => setRemoteDesktopVisible(false)}
+          onToast={setToast}
+          onUpdateSession={updateRemoteDesktop}
+        />
+      )}
+
       {commandCenterVisible && (
         <CommandCenterModal
           commands={commands}
@@ -1948,12 +2034,15 @@ function App() {
         />
       )}
 
-      {editorSession !== undefined && (
+      {(editorSession !== undefined || remoteDesktopCreateVisible) && (
         <SessionEditor
           groups={groups}
           sessions={sessions}
-          session={editorSession ?? undefined}
-          onClose={() => setEditorSession(undefined)}
+          mode={remoteDesktopCreateVisible
+            ? "remoteDesktop"
+            : editorSession?.kind === "remoteDesktop" ? "remoteDesktop" : "ssh"}
+          session={remoteDesktopCreateVisible ? undefined : editorSession ?? undefined}
+          onClose={() => { setEditorSession(undefined); setRemoteDesktopCreateVisible(false); }}
           onSaved={async (saved) => {
             // SessionEditor returns the fully persisted session, including the
             // new credentialRef. Replace the in-memory tab snapshot before
@@ -1972,11 +2061,13 @@ function App() {
               ),
             );
             setEditorSession(undefined);
+            setRemoteDesktopCreateVisible(false);
             await refresh();
             setToast(`已保存会话：${saved.name}，正在使用新凭据重连。`);
           }}
           onSavedAndConnect={async (saved) => {
             setEditorSession(undefined);
+            setRemoteDesktopCreateVisible(false);
             await refresh();
             openSession(saved);
             setToast(`已保存并连接：${saved.name}`);
