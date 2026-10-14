@@ -1,13 +1,16 @@
 import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import { getCurrentWindow, type Window as TauriWindow } from "@tauri-apps/api/window";
 import {
   Activity,
   BellRing,
   Command,
   Columns2,
+  Copy,
   Download,
   History,
   Rows2,
+  Minus,
   Square,
   Files,
   FileKey,
@@ -177,6 +180,64 @@ const RemoteDesktopPaneHost = memo(function RemoteDesktopPaneHost({
     />
   );
 });
+
+// Integrated VSCode-style window controls for the undecorated window.
+// macOS keeps its native traffic lights, so nothing renders there; in a plain
+// browser preview getCurrentWindow() throws and the buttons stay inert.
+function WindowControls() {
+  const [maximized, setMaximized] = useState(false);
+  const winRef = useRef<TauriWindow | null>(null);
+
+  useEffect(() => {
+    if (IS_MACOS) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    let win: TauriWindow;
+    try {
+      win = getCurrentWindow();
+    } catch {
+      return;
+    }
+    winRef.current = win;
+    const sync = () => {
+      void win.isMaximized()
+        .then((value) => {
+          if (!disposed) setMaximized(value);
+        })
+        .catch(() => undefined);
+    };
+    sync();
+    void win.onResized(sync)
+      .then((fn) => {
+        unlisten = fn;
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  if (IS_MACOS) return null;
+  const run = (op: (win: TauriWindow) => Promise<unknown>) => () => {
+    const win = winRef.current;
+    if (win) void op(win).catch(() => undefined);
+  };
+
+  return (
+    <div className="window-controls" role="group" aria-label="窗口控制">
+      <button type="button" className="window-control" onClick={run((win) => win.minimize())} title="最小化" aria-label="最小化">
+        <Minus size={15} strokeWidth={1.6} />
+      </button>
+      <button type="button" className="window-control" onClick={run((win) => win.toggleMaximize())} title={maximized ? "向下还原" : "最大化"} aria-label={maximized ? "向下还原" : "最大化"}>
+        {maximized ? <Copy size={12} strokeWidth={1.8} /> : <Square size={12} strokeWidth={1.8} />}
+      </button>
+      <button type="button" className="window-control close" onClick={run((win) => win.close())} title="关闭" aria-label="关闭">
+        <X size={16} strokeWidth={1.6} />
+      </button>
+    </div>
+  );
+}
 
 type GroupEditorState =
   | { mode: "create"; parentId: string | null }
@@ -1563,7 +1624,7 @@ function App() {
 
   return (
     <main className="app-shell">
-      <header className="app-header">
+      <header className="app-header" data-tauri-drag-region>
         <div className="brand-block">
           <div className="brand-mark">X</div>
           <div><strong>XSH</strong><span>SSH 工作台</span></div>
@@ -1594,6 +1655,7 @@ function App() {
           <button className="toolbar-button" onClick={openRemoteDesktopEditor} title="新建 VNC/RDP 远程桌面连接（经 SSH 加密隧道）"><Monitor size={15} />新建远程桌面</button>
           <button className="icon-button" title="设置" onClick={() => setSettingsVisible(true)}><Settings size={16} /></button>
           <button className="icon-button" title="工作区管理" onClick={() => setWorkspaceManagerVisible(true)}><MoreHorizontal size={17} /></button>
+          <WindowControls />
         </div>
       </header>
 
