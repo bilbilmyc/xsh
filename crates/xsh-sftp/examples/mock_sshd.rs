@@ -37,6 +37,10 @@ const BANNER: &str =
 struct Server {
     channels: Arc<Mutex<HashMap<ChannelId, Channel<Msg>>>>,
     sftp_channels: Arc<Mutex<std::collections::HashSet<ChannelId>>>,
+    /// direct-tcpip channels route their inbound bytes to the proxy task
+    /// that owns the dialed TcpStream (server-side data arrives through
+    /// `Handler::data`, not through `Channel::wait`).
+    direct_tcp_senders: Arc<Mutex<HashMap<ChannelId, tokio::sync::mpsc::Sender<Vec<u8>>>>>,
     root: PathBuf,
     pending_line: String,
 }
@@ -71,6 +75,7 @@ async fn main() -> anyhow::Result<()> {
     let mut server = Server {
         channels: Arc::new(Mutex::new(HashMap::new())),
         sftp_channels: Arc::new(Mutex::new(std::collections::HashSet::new())),
+        direct_tcp_senders: Arc::new(Mutex::new(HashMap::new())),
         root,
         pending_line: String::new(),
     };
@@ -115,6 +120,64 @@ impl russh::server::Handler for Server {
     ) -> Result<(), Self::Error> {
         self.channels.lock().await.insert(channel.id(), channel);
         reply.accept().await;
+        Ok(())
+    }
+
+    /// Local port forwarding (`direct-tcpip`): dial the requested target and
+    /// proxy bytes both ways, so tunneled clients (e.g. a VNC/RDP viewer
+    /// through XSH's remote-desktop feature) can be tested end-to-end.
+    /// Client-to-target bytes arrive via `Handler::data` and are routed
+    /// through the registered mpsc sender; target-to-client bytes are sent
+    /// on the channel from the proxy task.
+    async fn channel_open_direct_tcpip(
+        &mut self,
+        channel: Channel<Msg>,
+        host_to_connect: &str,
+        port_to_connect: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: russh::server::ChannelOpenHandle,
+        _session: &mut russh::server::Session,
+    ) -> Result<(), Self::Error> {
+        let stream =
+            tokio::net::TcpStream::connect((host_to_connect, port_to_connect as u16)).await;
+        let mut stream = match stream {
+            Ok(stream) => stream,
+            Err(_) => {
+                reply.reject(russh::ChannelOpenFailure::ConnectFailed).await;
+                return Ok(());
+            }
+        };
+        let (inbound_tx, mut inbound_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+        self.direct_tcp_senders
+            .lock()
+            .await
+            .insert(channel.id(), inbound_tx);
+        reply.accept().await;
+        tokio::spawn(async move {
+            let mut buffer = vec![0_u8; 64 * 1024];
+            loop {
+                tokio::select! {
+                    inbound = inbound_rx.recv() => {
+                        match inbound {
+                            Some(data) => {
+                                if tokio::io::AsyncWriteExt::write_all(&mut stream, &data).await.is_err() {
+                                    break;
+                                }
+                            }
+                            None => break,
+                        }
+                    }
+                    read = tokio::io::AsyncReadExt::read(&mut stream, &mut buffer) => {
+                        match read {
+                            Ok(0) => { channel.eof().await.ok(); break; }
+                            Ok(n) => { channel.data(&buffer[..n]).await.ok(); }
+                            Err(_) => break,
+                        }
+                    }
+                }
+            }
+        });
         Ok(())
     }
 
@@ -195,6 +258,13 @@ impl russh::server::Handler for Server {
         if self.sftp_channels.lock().await.contains(&channel) {
             return Ok(());
         }
+        let direct_sender = self.direct_tcp_senders.lock().await.get(&channel).cloned();
+        if let Some(sender) = direct_sender {
+            if sender.send(data.to_vec()).await.is_err() {
+                self.direct_tcp_senders.lock().await.remove(&channel);
+            }
+            return Ok(());
+        }
         for byte in data {
             let text = *byte as char;
             if text == '\r' || text == '\n' {
@@ -212,6 +282,9 @@ impl russh::server::Handler for Server {
         channel: ChannelId,
         session: &mut russh::server::Session,
     ) -> Result<(), Self::Error> {
+        // Dropping the sender half-closes the direct-tcpip proxy (client is
+        // done sending); the proxy still flushes target-to-client bytes.
+        self.direct_tcp_senders.lock().await.remove(&channel);
         session.close(channel)?;
         Ok(())
     }
@@ -395,6 +468,7 @@ impl SftpHandler for MockSftp {
                 std::fs::OpenOptions::new()
                     .write(true)
                     .create(true)
+                    .truncate(true)
                     .open(&path)
             }
             .map_err(|_| StatusCode::Failure)?;
