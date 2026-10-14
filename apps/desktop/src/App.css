@@ -6177,3 +6177,47 @@ body.resizing-terminal-split .split-divider.horizontal * { cursor: row-resize !i
 .remote-entry { content-visibility: auto; contain-intrinsic-size: auto 36px; }
 .session-row { content-visibility: auto; contain-intrinsic-size: auto 48px; }
 .command-list-item { content-visibility: auto; contain-intrinsic-size: auto 66px; }
+
+/* Custom tooltips for icon-only controls. Native title hints in WebView2 are
+ * erratic (long delay, drop on slight pointer movement, often fail to
+ * retrigger); this replacement always appears after a stable 350ms hover. */
+[data-tooltip] {
+  position: relative;
+}
+
+[data-tooltip]::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  top: calc(100% + 7px);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 4px 9px;
+  border: 1px solid #2b3f53;
+  border-radius: 6px;
+  color: #d9e5ef;
+  background: #131e29;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.4);
+  font-size: var(--font-xs);
+  font-weight: 400;
+  line-height: 1.5;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  z-index: 300;
+  transition: opacity 110ms ease 350ms, visibility 0s linear 350ms;
+}
+
+[data-tooltip]:hover::after {
+  opacity: 1;
+  visibility: visible;
+  transition: opacity 110ms ease 350ms;
+}
+
+/* Flush-right buttons (window controls): centering would overflow the window
+ * edge, so anchor the tooltip to the button's right edge instead. */
+[data-tooltip].tooltip-edge-right::after {
+  left: auto;
+  right: 0;
+  transform: none;
+}

@@ -227,13 +227,13 @@ function WindowControls() {
 
   return (
     <div className="window-controls" role="group" aria-label="窗口控制">
-      <button type="button" className="window-control" onClick={run((win) => win.minimize())} title="最小化" aria-label="最小化">
+      <button type="button" className="window-control" onClick={run((win) => win.minimize())} data-tooltip="最小化" aria-label="最小化">
         <Minus size={15} strokeWidth={1.6} />
       </button>
-      <button type="button" className="window-control" onClick={run((win) => win.toggleMaximize())} title={maximized ? "向下还原" : "最大化"} aria-label={maximized ? "向下还原" : "最大化"}>
+      <button type="button" className="window-control" onClick={run((win) => win.toggleMaximize())} data-tooltip={maximized ? "向下还原" : "最大化"} aria-label={maximized ? "向下还原" : "最大化"}>
         {maximized ? <Copy size={12} strokeWidth={1.8} /> : <Square size={12} strokeWidth={1.8} />}
       </button>
-      <button type="button" className="window-control close" onClick={run((win) => win.close())} title="关闭" aria-label="关闭">
+      <button type="button" className="window-control close tooltip-edge-right" onClick={run((win) => win.close())} data-tooltip="关闭" aria-label="关闭">
         <X size={16} strokeWidth={1.6} />
       </button>
     </div>
@@ -1627,33 +1627,33 @@ function App() {
     <main className="app-shell">
       <header className="app-header" data-tauri-drag-region>
         <div className="header-actions">
-          <button className="icon-button" title={`${sidebarVisible ? "隐藏" : "显示"}会话侧栏 · macOS ⌘B / Windows Ctrl+Shift+B`} onClick={toggleSidebar} aria-label={sidebarVisible ? "隐藏会话侧栏" : "显示会话侧栏"}>
+          <button className="icon-button" data-tooltip={`${sidebarVisible ? "隐藏" : "显示"}会话侧栏 · macOS ⌘B / Windows Ctrl+Shift+B`} onClick={toggleSidebar} aria-label={sidebarVisible ? "隐藏会话侧栏" : "显示会话侧栏"}>
             {sidebarVisible ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}
           </button>
-          <button className="toolbar-button" onClick={openSshSessionEditor} title="新建 SSH 会话"><Plus size={14} />新建会话</button>
-          <button className="toolbar-button" onClick={importSessions} title="从文件导入会话"><Upload size={14} />导入</button>
-          <button className="toolbar-button" onClick={exportSessions} title="导出会话到文件"><Download size={14} />导出</button>
+          <button className="toolbar-button" onClick={openSshSessionEditor} data-tooltip="新建 SSH 会话" aria-label="新建 SSH 会话"><Plus size={14} />新建会话</button>
+          <button className="toolbar-button" onClick={importSessions} data-tooltip="从文件导入会话"><Upload size={14} />导入</button>
+          <button className="toolbar-button" onClick={exportSessions} data-tooltip="导出会话到文件"><Download size={14} />导出</button>
           <button
             className="toolbar-button"
             onClick={() => {
               setSshConfigVisible(true);
               void refreshSshConfig();
             }}
-            title="读取 ~/.ssh/config"
+            data-tooltip="读取 ~/.ssh/config"
           >
             <FileKey size={14} />SSH 配置
           </button>
           <span className="toolbar-group-divider" />
-          <button className="icon-button connection-manager-trigger" onClick={() => setConnectionManagerVisible(true)} title={`连接管理 · 已连接 ${tabs.filter((tab) => tab.state === "connected").length}/${tabs.length}`}>
+          <button className="icon-button connection-manager-trigger" onClick={() => setConnectionManagerVisible(true)} data-tooltip={`连接管理 · 已连接 ${tabs.filter((tab) => tab.state === "connected").length}/${tabs.length}`}>
             <Activity size={16} />
           </button>
-          <button className="icon-button" onClick={() => setTransferManagerVisible(true)} title="后台传输任务"><ArrowDownUp size={16} /></button>
-          <button className="icon-button command-center-trigger" onClick={() => setCommandCenterVisible(true)} title="命令中心"><Command size={16} /></button>
-          <button className="icon-button" onClick={() => setHistoryVisible(true)} title="命令历史"><History size={16} /></button>
+          <button className="icon-button" onClick={() => setTransferManagerVisible(true)} data-tooltip="后台传输任务" aria-label="后台传输任务"><ArrowDownUp size={16} /></button>
+          <button className="icon-button command-center-trigger" onClick={() => setCommandCenterVisible(true)} data-tooltip="命令中心" aria-label="命令中心"><Command size={16} /></button>
+          <button className="icon-button" onClick={() => setHistoryVisible(true)} data-tooltip="命令历史" aria-label="命令历史"><History size={16} /></button>
           <span className="toolbar-group-divider" />
-          <button className="icon-button" onClick={openRemoteDesktopEditor} title="新建 VNC/RDP 远程桌面连接（经 SSH 加密隧道）"><Monitor size={16} /></button>
-          <button className="icon-button" title="设置" onClick={() => setSettingsVisible(true)}><Settings size={16} /></button>
-          <button className="icon-button" title="工作区管理" onClick={() => setWorkspaceManagerVisible(true)}><MoreHorizontal size={17} /></button>
+          <button className="icon-button" onClick={openRemoteDesktopEditor} data-tooltip="新建 VNC/RDP 远程桌面连接（经 SSH 加密隧道）" aria-label="新建远程桌面连接"><Monitor size={16} /></button>
+          <button className="icon-button" data-tooltip="设置" aria-label="设置" onClick={() => setSettingsVisible(true)}><Settings size={16} /></button>
+          <button className="icon-button" data-tooltip="工作区管理" aria-label="工作区管理" onClick={() => setWorkspaceManagerVisible(true)}><MoreHorizontal size={17} /></button>
         </div>
         <div className="header-tabs">
           <div className="tabs-scroll">
@@ -1714,25 +1714,25 @@ function App() {
             <button className="tab-new-button" onClick={() => setEditorSession(null)} title="新建会话标签"><Plus size={15} /></button>
           </div>
           <div className="pane-controls" title="终端布局">
-            <button className={paneLayout === "single" ? "active" : ""} onClick={() => updatePaneLayout("single")} title="单终端"><Square size={13} /></button>
-            <button className={paneLayout === "vertical" ? "active" : ""} onClick={() => updatePaneLayout("vertical")} title="左右分屏"><Columns2 size={13} /></button>
-            <button className={paneLayout === "horizontal" ? "active" : ""} onClick={() => updatePaneLayout("horizontal")} title="上下分屏 · macOS ⌘⌥J / Windows Ctrl+Alt+J"><Rows2 size={13} /></button>
+            <button className={paneLayout === "single" ? "active" : ""} onClick={() => updatePaneLayout("single")} data-tooltip="单终端" aria-label="单终端"><Square size={13} /></button>
+            <button className={paneLayout === "vertical" ? "active" : ""} onClick={() => updatePaneLayout("vertical")} data-tooltip="左右分屏" aria-label="左右分屏"><Columns2 size={13} /></button>
+            <button className={paneLayout === "horizontal" ? "active" : ""} onClick={() => updatePaneLayout("horizontal")} data-tooltip="上下分屏 · macOS ⌘⌥J / Windows Ctrl+Alt+J" aria-label="上下分屏"><Rows2 size={13} /></button>
             {paneLayout !== "single" && (
               <select value={secondaryTabId ?? ""} onChange={(event) => setSecondaryTabId(event.target.value || null)} title="选择分屏会话">
                 <option value="">选择第二个会话</option>
                 {tabs.filter((tab) => tab.id !== activeTabId).map((tab) => <option key={tab.id} value={tab.id}>{getTabLabel(tab)}</option>)}
               </select>
             )}
-            <button className={broadcastEnabled ? "active" : ""} onClick={() => setBroadcastEnabled((value) => !value)} title={broadcastEnabled ? "关闭命令广播" : "开启命令广播"}>广播</button>
-            <button onClick={() => setBatchCommandVisible(true)} title="选择目标并逐会话汇总批量命令结果"><SendHorizontal size={13} />批量命令</button>
+            <button className={broadcastEnabled ? "active" : ""} onClick={() => setBroadcastEnabled((value) => !value)} data-tooltip={broadcastEnabled ? "关闭命令广播" : "开启命令广播"}>广播</button>
+            <button onClick={() => setBatchCommandVisible(true)} data-tooltip="选择目标并逐会话汇总批量命令结果"><SendHorizontal size={13} />批量命令</button>
           </div>
           {activeTab && connectionIds[activeTab.id] && activeTab.session.kind !== "remoteDesktop" && (
-            <button className={`sftp-toggle ${portForwardVisible ? "active" : ""}`} onClick={() => setPortForwardVisible((value) => !value)} title="端口转发">
+            <button className={`sftp-toggle ${portForwardVisible ? "active" : ""}`} onClick={() => setPortForwardVisible((value) => !value)} data-tooltip="端口转发">
               <Globe2 size={14} />转发
             </button>
           )}
           {activeTab && connectionIds[activeTab.id] && activeTab.session.kind !== "remoteDesktop" && (
-            <button className={`sftp-toggle ${remoteDesktopVisible ? "active" : ""}`} onClick={() => setRemoteDesktopVisible((value) => !value)} title="VNC / RDP 远程桌面">
+            <button className={`sftp-toggle ${remoteDesktopVisible ? "active" : ""}`} onClick={() => setRemoteDesktopVisible((value) => !value)} data-tooltip="VNC / RDP 远程桌面">
               <Monitor size={14} />远程
             </button>
           )}
