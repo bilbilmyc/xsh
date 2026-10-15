@@ -1051,6 +1051,38 @@ export function TerminalPane({
     else searchAddonRef.current?.findPrevious(term, options);
   };
 
+  // The menu bar and toolbar live in the shell and have no refs into these
+  // lazily mounted panes, so commands travel on a window event bus and only
+  // the focused pane reacts.
+  useEffect(() => {
+    if (!focused) return;
+    const onShellCommand = (event: Event) => {
+      const kind = (event as CustomEvent<{ kind?: string }>).detail?.kind;
+      if (kind === "copy") {
+        const selection = terminalRef.current?.getSelection();
+        if (selection) void writeClipboardText(selection).catch(() => undefined);
+      } else if (kind === "copyAll") {
+        void copyAllTerminal();
+      } else if (kind === "paste") {
+        void pasteIntoTerminal(terminalRef.current, preferences.confirmMultiLinePaste, session.name);
+      } else if (kind === "find") {
+        openTerminalSearch();
+      } else if (kind === "clear") {
+        clearTerminal();
+      } else if (kind === "saveLog") {
+        void saveLog();
+      } else if (kind === "reconnect") {
+        reconnectRef.current?.();
+      } else if (kind === "resetFont") {
+        applyTerminalFontSize(preferences.useSessionTerminalFont ? session.terminal.fontSize || preferences.terminalFontSize : preferences.terminalFontSize);
+      }
+    };
+    window.addEventListener("xsh:terminal-action", onShellCommand);
+    return () => window.removeEventListener("xsh:terminal-action", onShellCommand);
+    // The handlers above read live state through refs and stable setters only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focused, preferences.confirmMultiLinePaste, preferences.terminalFontSize, preferences.useSessionTerminalFont, session.name, session.terminal.fontSize]);
+
   const submitAuthChallenge = async () => {
     if (!authChallenge || !connectionIdRef.current) return;
     try {

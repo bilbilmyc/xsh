@@ -24,8 +24,15 @@
   --red: #ff6b6b;
   --purple: #bc8cff;
   --mono-font: "Cascadia Mono", "Cascadia Code", "SFMono-Regular", "SF Mono", Menlo, Consolas, "Courier New", monospace;
-  --header-height: 52px;
-  --status-height: 30px;
+  --titlebar-height: 34px;
+  --menubar-height: 28px;
+  --toolbar-height: 38px;
+  --tabbar-height: 32px;
+  --status-height: 26px;
+  /* Chrome rows (title/menu/toolbar/tabs/status) share one flat surface. */
+  --chrome: #121a24;
+  --chrome-raised: #16202c;
+  --tab-active-bg: #0b0f14;
 }
 
 * {
@@ -109,36 +116,60 @@ select {
   padding-right: 28px !important;
 }
 
+/* XShell-style chrome: three stacked rows (title bar, menu bar, toolbar)
+ * above the workspace; the tab strip lives inside the terminal column so
+ * session tabs start above the terminal, right of the sidebar. */
 .app-shell {
   width: 100%;
   height: 100%;
   display: grid;
-  grid-template-rows: var(--header-height) minmax(0, 1fr) var(--status-height);
+  grid-template-rows:
+    var(--titlebar-height)
+    var(--menubar-height)
+    var(--toolbar-height)
+    minmax(0, 1fr)
+    var(--status-height);
   color: var(--text);
   background: var(--bg);
 }
 
-.app-header {
-  z-index: 10;
+/* ---- Row 1: title bar ---- */
+.title-bar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 8px;
   min-width: 0;
-  padding: 0 11px 0 15px;
-  border-bottom: 1px solid var(--line);
-  background: linear-gradient(180deg, #151d27 0%, #111821 100%);
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.025) inset;
+  padding: 0 0 0 10px;
+  background: var(--chrome);
+  border-bottom: 1px solid var(--line-soft);
 }
 
-/* VSCode-style window controls: borderless, full-height hit areas that bleed
- * to the very edge of the undecorated window. Fixed to the header height —
- * .header-actions is only as tall as its content, so stretch won't reach. */
+.title-bar-logo {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  pointer-events: none;
+}
+
+.title-bar-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: var(--font-sm);
+  /* Let mousedown fall through to the drag region instead of the text node. */
+  pointer-events: none;
+}
+
+/* ---- Window controls: borderless, full-height hit areas that bleed to the
+ * very edge of the undecorated window. ---- */
 .window-controls {
   flex: none;
   display: inline-flex;
   align-items: stretch;
-  height: var(--header-height);
-  margin: 0 -11px 0 4px;
+  align-self: stretch;
 }
 
 .window-control {
@@ -176,76 +207,305 @@ select {
   color: #44576b;
 }
 
-.header-actions {
-  flex: none;
+/* ---- Row 2: menu bar ---- */
+.menu-bar {
+  position: relative;
+  z-index: 40;
   display: flex;
   align-items: center;
-  gap: 6px;
+  min-width: 0;
+  padding: 0 4px;
+  background: var(--chrome);
+  border-bottom: 1px solid var(--line-soft);
 }
 
-/* Session tabs live in the header between the toolbar and the window
- * controls, XShell-style: the strip fills the leftover width instead of
- * wasting a drag-only dead zone in the middle. */
-.header-tabs {
-  flex: 1;
-  min-width: 0;
-  display: flex;
+.menu-bar-title {
+  position: relative;
+}
+
+.menu-bar-title > button {
+  height: var(--menubar-height);
+  padding: 0 10px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--font-sm);
+  cursor: default;
+}
+
+.menu-bar-title > button:hover {
+  background: var(--panel-hover);
+  color: var(--text);
+}
+
+.menu-bar-title.open > button {
+  background: var(--panel-active);
+  color: var(--text-strong);
+}
+
+.menu-bar-dropdown {
+  position: absolute;
+  top: calc(100% + 3px);
+  left: 0;
+  z-index: 300;
+  min-width: 250px;
+  max-height: min(70vh, 560px);
+  overflow-y: auto;
+  padding: 5px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-raised);
+  box-shadow: 0 18px 46px rgba(0, 0, 0, 0.5);
+}
+
+.menu-bar-item {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 6px;
-  margin: 0 6px 0 10px;
+  gap: 8px;
+  height: 29px;
+  padding: 0 10px 0 6px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  font-size: var(--font-sm);
+  text-align: left;
+  cursor: default;
 }
 
-.header-tabs .tabs-scroll {
-  flex: 1;
+.menu-bar-item:hover:not(.disabled) {
+  background: var(--accent-bg);
+  color: var(--text-strong);
+}
+
+.menu-bar-item.disabled {
+  color: var(--faint);
+  opacity: 0.6;
+}
+
+.menu-bar-check {
+  color: var(--accent-strong);
+  font-size: var(--font-xs);
+}
+
+.menu-bar-label {
   min-width: 0;
-  height: 36px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.menu-bar-shortcut {
+  color: var(--faint);
+  font-size: var(--font-2xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.menu-bar-separator {
+  height: 1px;
+  margin: 5px 8px;
+  background: var(--line-soft);
+}
+
+/* ---- Row 3: toolbar ---- */
+.toolbar-bar {
+  position: relative;
+  z-index: 35;
   display: flex;
   align-items: center;
   gap: 2px;
+  min-width: 0;
+  padding: 0 8px;
+  background: var(--chrome);
+  border-bottom: 1px solid var(--line-soft);
 }
 
-.header-tabs .terminal-tab {
-  min-width: 96px;
-  max-width: 200px;
-  height: 32px;
-  border: 1px solid transparent;
-  border-radius: 7px;
-  color: #94a7ba;
+.toolbar-button {
+  flex: none;
+  width: 30px;
+  height: 27px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
   background: transparent;
+  color: var(--muted);
+  cursor: default;
 }
 
-.header-tabs .terminal-tab:hover {
-  background: #17222e;
-  color: #c3d1dd;
+.toolbar-button:hover:not(:disabled) {
+  background: var(--panel-hover);
+  color: var(--text-strong);
 }
 
-.header-tabs .pane-controls {
+.toolbar-button:active:not(:disabled) {
+  background: var(--panel-active);
+}
+
+.toolbar-button:disabled {
+  color: var(--faint);
+  opacity: 0.5;
+}
+
+.toolbar-button.active {
+  background: var(--accent-bg);
+  color: var(--accent-strong);
+}
+
+/* XShell-style quick-connect address bar on the toolbar's right edge. */
+.toolbar-address {
+  position: relative;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: min(320px, 34vw);
+  height: 27px;
+  margin-left: auto;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  color: var(--faint);
+  background: var(--bg-deep);
+}
+
+.toolbar-address:focus-within {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+}
+
+.toolbar-address input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-size: var(--font-sm);
+  outline: none;
+}
+
+.toolbar-address input::placeholder {
+  color: var(--faint);
+}
+
+.toolbar-address-suggestions {
+  position: absolute;
+  top: calc(100% + 5px);
+  right: -1px;
+  z-index: 300;
+  width: 360px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-raised);
+  box-shadow: 0 18px 46px rgba(0, 0, 0, 0.5);
+}
+
+.toolbar-address-suggestion {
+  width: 100%;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 9px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: default;
+}
+
+.toolbar-address-suggestion.selected,
+.toolbar-address-suggestion:hover {
+  background: var(--accent-bg);
+}
+
+.toolbar-address-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-sm);
+}
+
+.toolbar-address-host {
+  flex: none;
+  color: var(--faint);
+  font-size: var(--font-2xs);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- Session tab strip (first row of the terminal column) ---- */
+.tab-bar {
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+  padding: 0 6px 0 0;
+  background: var(--chrome-raised);
+  border-bottom: 1px solid var(--line);
+}
+
+/* Pinned leftmost tab that toggles the session manager sidebar; fills the
+ * sidebar column like XShell's 会话管理器 tab and keeps session tabs away
+ * from the left cluster. */
+.workspace > .sidebar-pin-tab {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 7px;
+  min-width: 0;
+  max-width: none;
+  width: 100%;
+  padding: 0 12px;
+  border-right: 1px solid var(--line-soft);
+  border-bottom: 1px solid var(--line);
+  background: var(--chrome-raised);
+  color: var(--faint);
+}
+
+.workspace > .sidebar-pin-tab:hover {
+  color: var(--text);
+}
+
+.workspace > .sidebar-pin-tab.active {
+  color: var(--accent-strong);
+  box-shadow: none;
+}
+
+.tab-bar .tabs-scroll {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: stretch;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+.tab-bar .tabs-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.tab-bar .pane-controls {
+  flex: none;
+  align-self: center;
+  margin-left: 0;
   padding-left: 8px;
   border-left: 1px solid var(--line-soft);
 }
 
-.header-tabs .terminal-tab.active {
-  border-color: rgba(57, 184, 214, 0.28);
-  background: #1b2c3d;
-  box-shadow: none;
-}
-
-.header-tabs .terminal-tab.has-custom-color {
-  box-shadow: none;
-}
-
-.header-tabs .terminal-tab.has-custom-color.active {
-  border-color: var(--tab-accent);
-}
-
-:root[data-theme="light"] .header-tabs .terminal-tab:hover {
-  background: #e9eef2;
-}
-
-:root[data-theme="light"] .header-tabs .terminal-tab.active {
-  border-color: rgba(8, 126, 164, 0.35);
-  background: #dde7ee;
-  box-shadow: none;
+.tab-bar .pane-controls button,
+.tab-bar .pane-controls select {
+  height: 24px;
+  min-width: 26px;
 }
 
 .toolbar-group-divider {
@@ -256,7 +516,6 @@ select {
   background: var(--line);
 }
 
-.toolbar-button,
 .icon-button,
 .primary-button,
 .secondary-button,
@@ -267,18 +526,6 @@ select {
   transition: color 120ms ease, border-color 120ms ease, background 120ms ease, transform 80ms ease;
 }
 
-.toolbar-button {
-  height: 30px;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 10px;
-  color: #b8c5d1;
-  background: #151f2a;
-  font-size: var(--font-sm);
-}
-
-.toolbar-button:hover,
 .icon-button:hover,
 .secondary-button:hover {
   border-color: #385064;
@@ -286,14 +533,12 @@ select {
   background: #1b2835;
 }
 
-.toolbar-button:active,
 .icon-button:active,
 .primary-button:active,
 .secondary-button:active,
 .sftp-toggle:active {
   transform: translateY(1px);
 }
-
 .icon-button {
   width: 30px;
   height: 30px;
@@ -307,8 +552,32 @@ select {
 .workspace {
   min-width: 0;
   min-height: 0;
-  display: flex;
+  display: grid;
+  /* Row 1 is the XShell-style split strip: the session-manager tab owns the
+   * sidebar column, session tabs start at the terminal column edge; row 2
+   * holds the sidebar (auto width, resizable) and the terminal column. */
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: var(--tabbar-height) minmax(0, 1fr);
   overflow: hidden;
+}
+
+.workspace > .sidebar-pin-tab {
+  grid-area: 1 / 1;
+}
+
+.workspace > .tab-bar {
+  grid-area: 1 / 2;
+}
+
+.workspace > .session-sidebar {
+  grid-area: 2 / 1;
+}
+
+.terminal-column {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  grid-area: 2 / 2;
 }
 
 .session-sidebar {
@@ -385,59 +654,31 @@ select {
   pointer-events: none;
 }
 
-.sidebar-view-tools {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: 14px minmax(0, 1fr) minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 5px;
-  padding: 6px 10px 7px;
-  border-bottom: 1px solid var(--line-soft);
-  color: var(--faint);
-}
-
-.sidebar-view-tools .multi-select-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  height: 28px;
-  padding: 0 8px;
+/* Compact icon-only multi-select toggle riding the search row; the old
+ * filter/sort chip row was removed for the XShell-style sidebar. */
+.sidebar-search .multi-select-toggle {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
   border: 1px solid var(--line-soft);
   border-radius: 4px;
   color: #a7b7c5;
   background: var(--panel);
-  font-size: var(--font-sm);
-  font-weight: 500;
   cursor: pointer;
 }
 
-.sidebar-view-tools .multi-select-toggle:hover {
+.sidebar-search .multi-select-toggle:hover {
   color: var(--accent-strong);
   border-color: rgba(57, 184, 214, 0.35);
 }
 
-.sidebar-view-tools .multi-select-toggle.active {
+.sidebar-search .multi-select-toggle.active {
   color: var(--accent-strong);
   border-color: rgba(57, 184, 214, 0.5);
   background: var(--accent-bg);
-}
-
-.sidebar-view-tools select {
-  min-width: 0;
-  width: 100%;
-  height: 28px;
-  padding: 0 5px;
-  border: 1px solid var(--line-soft);
-  border-radius: 4px;
-  color: #a7b7c5;
-  background: var(--panel);
-  font-size: var(--font-sm);
-  font-weight: 500;
-}
-
-.sidebar-view-tools select:focus-visible {
-  border-color: var(--accent);
-  outline: 1px solid rgba(57, 184, 214, 0.24);
 }
 
 .session-tree {
@@ -774,9 +1015,9 @@ select {
   min-height: 0;
   flex: 1;
   display: grid;
-  /* Only the terminal stage remains here; the tab strip moved into the app
-   * header, so a single filling row replaces the old 38px + 1fr pair. */
-  grid-template-rows: minmax(0, 1fr);
+  /* The tab strip is a workspace-level row above this column; the stage
+   * fills and the quick command bar takes its natural height below. */
+  grid-template-rows: minmax(0, 1fr) auto;
   background: #0b0f14;
 }
 
@@ -806,8 +1047,8 @@ select {
   border: 0;
   border-right: 1px solid var(--line-soft);
   cursor: default;
-  color: #768799;
-  background: #101720;
+  color: var(--muted);
+  background: transparent;
   font-size: var(--font-xs);
   text-align: left;
 }
@@ -1130,13 +1371,13 @@ select {
 }
 
 .terminal-tab:hover {
-  color: #b6c4d1;
-  background: #151f2a;
+  color: var(--text);
+  background: var(--panel-hover);
 }
 
 .terminal-tab.active {
   color: var(--text-strong);
-  background: #0b0f14;
+  background: var(--tab-active-bg);
   box-shadow: 0 2px 0 var(--accent) inset;
 }
 
@@ -1214,26 +1455,18 @@ select {
   opacity: 1 !important;
 }
 
-.sftp-toggle {
-  flex: none;
-  height: 28px;
-  align-self: center;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  margin: 0 6px;
-  padding: 0 9px;
-  color: #b3c1cd;
-  background: #151e28;
-  font-size: var(--font-sm);
-  font-weight: 500;
-}
-
+/* Per-session panel toggles (port-forward / remote desktop / SFTP) are now
+ * icon-only: .icon-button provides the 30px hit area, this layer adds the
+ * accent treatment so the active panel is obvious. */
 .sftp-toggle:hover,
 .sftp-toggle.active {
   border-color: rgba(57, 184, 214, 0.45);
   color: var(--accent-strong);
   background: var(--accent-bg);
+}
+
+.sftp-toggle.active {
+  border-color: rgba(57, 184, 214, 0.6);
 }
 
 .terminal-stage {
@@ -2166,12 +2399,27 @@ kbd {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 10px;
-  border-top: 1px solid #1a2733;
-  color: #536577;
-  background: #0c1219;
-  min-height: 30px;
-  font-size: var(--font-sm);
+  gap: 12px;
+  padding: 0 8px 0 12px;
+  border-top: 1px solid var(--line-soft);
+  color: var(--faint);
+  background: var(--chrome);
+  min-height: var(--status-height);
+  font-size: var(--font-xs);
+  overflow: hidden;
+}
+
+.status-bar > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-bar-current {
+  flex: 1;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 
 .modal-backdrop {
@@ -2449,7 +2697,6 @@ kbd {
   .sftp-browser-head small { font-size: var(--font-2xs); }
   .session-sidebar { width: 210px; }
   .sftp-panel { width: 285px; }
-  .toolbar-button { padding: 0 7px; }
   .welcome-shortcuts { gap: 10px; }
 }
 
@@ -2892,12 +3139,14 @@ body {
   --bg-deep: #0d0f11; --bg: #111315; --panel: #16191c; --panel-raised: #1c2024;
   --panel-hover: #23282d; --panel-active: #293139; --line: #30363c; --line-soft: #24292e;
   --text: #e2e5e8; --text-strong: #ffffff; --muted: #9aa3ab; --faint: #707981;
+  --chrome: #16191c; --chrome-raised: #1b1f23; --tab-active-bg: #111315;
 }
 
 :root[data-theme="dusk"] {
   --bg-deep: #0c0b12; --bg: #100f18; --panel: #161522; --panel-raised: #1d1b2a;
   --panel-hover: #262337; --panel-active: #302b47; --line: #373249; --line-soft: #282438;
   --text: #e6e1f0; --text-strong: #fffaff; --muted: #a39ab5; --faint: #746d85;
+  --chrome: #161522; --chrome-raised: #1b1928; --tab-active-bg: #100f18;
 }
 
 :root[data-theme="light"] {
@@ -2906,11 +3155,16 @@ body {
   --panel-hover: #edf4f7; --panel-active: #dff1f6; --line: #d5dee5; --line-soft: #e8eef2;
   --text: #273746; --text-strong: #15232e; --muted: #667786; --faint: #84929d;
   --accent: #087ea4; --accent-strong: #05657f; --accent-bg: rgba(8, 126, 164, 0.11);
+  /* Classic XShell light chrome: one flat neutral-gray band. */
+  --chrome: #f0f0f0; --chrome-raised: #ececec; --tab-active-bg: #ffffff;
 }
 
 :root[data-theme="light"] body,
 :root[data-theme="light"] .app-shell,
-:root[data-theme="light"] .app-header,
+:root[data-theme="light"] .title-bar,
+:root[data-theme="light"] .menu-bar,
+:root[data-theme="light"] .toolbar-bar,
+:root[data-theme="light"] .tab-bar,
 :root[data-theme="light"] .session-sidebar,
 :root[data-theme="light"] .status-bar,
 :root[data-theme="light"] .terminal-stage,
@@ -2920,10 +3174,21 @@ body {
   color: var(--text);
 }
 
-:root[data-theme="light"] .app-header,
+:root[data-theme="light"] .title-bar,
+:root[data-theme="light"] .menu-bar,
+:root[data-theme="light"] .toolbar-bar {
+  background: var(--chrome);
+}
+
+:root[data-theme="light"] .tab-bar,
 :root[data-theme="light"] .session-sidebar,
 :root[data-theme="light"] .status-bar {
-  background: #f7f9fb;
+  background: var(--chrome-raised);
+}
+
+:root[data-theme="light"] .title-bar-text,
+:root[data-theme="light"] .menu-bar-title > button {
+  color: #3a4046;
 }
 
 :root[data-theme="light"] input,
@@ -2969,14 +3234,12 @@ body {
 
 :root[data-theme="light"] .session-row:hover,
 :root[data-theme="light"] .group-row:hover,
-:root[data-theme="light"] .terminal-tab:hover,
 :root[data-theme="light"] .connection-manager-row:hover,
 :root[data-theme="light"] .shortcut-row:hover {
   background: #edf4f7;
 }
 
 :root[data-theme="light"] .session-row.active,
-:root[data-theme="light"] .terminal-tab.active,
 :root[data-theme="light"] .group-row.active {
   background: #dff1f6;
 }
@@ -3009,14 +3272,10 @@ body {
 :root[data-theme="light"] .theme-preview.light::before { background: #e4ebef; }
 :root[data-theme="light"] .theme-preview.light i { background: #f2f6f8; }
 
-:root[data-theme="graphite"] .app-header,
-:root[data-theme="graphite"] .session-sidebar,
-:root[data-theme="graphite"] .status-bar { background: #15181b; }
+:root[data-theme="graphite"] .session-sidebar { background: #15181b; }
 :root[data-theme="graphite"] .terminal-stage,
 :root[data-theme="graphite"] .welcome-panel { background-color: #111315; }
-:root[data-theme="dusk"] .app-header,
-:root[data-theme="dusk"] .session-sidebar,
-:root[data-theme="dusk"] .status-bar { background: #15131f; }
+:root[data-theme="dusk"] .session-sidebar { background: #15131f; }
 :root[data-theme="dusk"] .terminal-stage,
 :root[data-theme="dusk"] .welcome-panel { background-color: #100f18; }
 :root[data-theme="light"] .terminal-pane,
@@ -3029,8 +3288,6 @@ body {
   --xsh-terminal-background: #fbfcfe;
 }
 
-.toolbar-button,
-.sftp-toggle { font-size: var(--font-sm); font-weight: 400; }
 .sidebar-section-title { font-size: var(--font-xs); color: #8e9eac; font-weight: 500; }
 .group-toggle { font-size: var(--font-md); font-weight: 500; }
 .session-row-copy strong { font-size: var(--font-md); font-weight: 400; line-height: 1.25; }
@@ -3358,8 +3615,8 @@ body {
 
 /* V2.0.1: Xshell-style bottom quick command bar. */
 .terminal-workspace {
-  /* Tab strip lives in the app header now: terminal stage fills, quick
-   * command bar takes its natural height below. */
+  /* Terminal stage fills, quick command bar takes its natural height below;
+   * the tab strip lives at workspace level, above this whole column. */
   grid-template-rows: minmax(0, 1fr) auto;
 }
 
@@ -5201,12 +5458,6 @@ body.resizing-terminal-split .split-divider.horizontal * { cursor: row-resize !i
 
 /* Light theme finishing pass: keep the workspace bright, but give each layer
    enough contrast and hierarchy instead of relying on nearly-white surfaces. */
-:root[data-theme="light"] .app-header {
-  background: linear-gradient(180deg, #ffffff 0%, #f4f8fa 100%);
-  box-shadow: 0 1px 0 rgba(27, 58, 72, 0.04) inset;
-}
-
-:root[data-theme="light"] .toolbar-button,
 :root[data-theme="light"] .icon-button,
 :root[data-theme="light"] .sftp-toggle {
   border-color: #c9d7df;
@@ -5214,7 +5465,6 @@ body.resizing-terminal-split .split-divider.horizontal * { cursor: row-resize !i
   background: #ffffff;
 }
 
-:root[data-theme="light"] .toolbar-button:hover,
 :root[data-theme="light"] .icon-button:hover,
 :root[data-theme="light"] .secondary-button:hover {
   border-color: #8bb9c8;
@@ -5244,17 +5494,23 @@ body.resizing-terminal-split .split-divider.horizontal * { cursor: row-resize !i
 
 :root[data-theme="light"] .terminal-tab {
   color: #5c7280;
-  background: #f7f9fb;
 }
 
 :root[data-theme="light"] .terminal-tab:hover {
   color: #294957;
-  background: #edf5f7;
 }
 
 :root[data-theme="light"] .terminal-tab.active {
   color: #173746;
-  background: #fbfcfe;
+}
+
+:root[data-theme="light"] .tab-new-button {
+  color: #5c7280;
+}
+
+:root[data-theme="light"] .tab-new-button:hover {
+  border-color: #9fb3c4;
+  background: #e4ecf1;
 }
 
 :root[data-theme="light"] .terminal-stage,
@@ -5276,8 +5532,7 @@ body.resizing-terminal-split .split-divider.horizontal * { cursor: row-resize !i
 }
 
 :root[data-theme="light"] .status-bar {
-  border-top-color: #d6e1e6;
-  background: #f4f8fa;
+  border-top-color: #d6d6d6;
 }
 
 :root[data-theme="light"] .welcome-panel {

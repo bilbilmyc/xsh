@@ -11,7 +11,6 @@ import {
   Pencil,
   Search,
   Server,
-  SlidersHorizontal,
   Star,
   Trash2,
   X,
@@ -90,9 +89,13 @@ export function SessionSidebar({
   onDeleteGroup,
 }: SessionSidebarProps) {
   const [query, setQuery] = useState("");
-  const [sessionFilter, setSessionFilter] = useState<SessionFilter>("all");
-  const [sessionSort, setSessionSort] = useState<SessionSort>("recent");
-  const [recentSessions, setRecentSessions] = useState<Record<string, number>>(loadRecentSessions);
+  // Filter/sort stay as state defaults: the chip row was removed from the UI,
+  // but the filtering pipeline (search box, multi-select) still runs on "all".
+  const [sessionFilter] = useState<SessionFilter>("all");
+  const [sessionSort] = useState<SessionSort>("recent");
+  // Recency only feeds the default sort; markSessionOpened keeps the ref in
+  // sync and persists, so the setter-free state below never needs updating.
+  const [recentSessions] = useState<Record<string, number>>(loadRecentSessions);
   const [contextTarget, setContextTarget] = useState<ContextTarget | null>(null);
   const [draggedSessionId, setDraggedSessionId] = useState<string | null>(null);
   const [draggedSessionIds, setDraggedSessionIds] = useState<Set<string>>(new Set());
@@ -208,16 +211,6 @@ export function SessionSidebar({
     recentSessionsRef.current = next;
     window.localStorage.setItem(RECENT_SESSIONS_STORAGE_KEY, JSON.stringify(next));
     onOpen(session, options);
-  };
-
-  const handleSessionSortChange = (value: string) => {
-    const nextSort = value as SessionSort;
-    if (nextSort === "recent") {
-      // Refresh the snapshot only when the user explicitly asks to view recent
-      // order; normal connection updates must not reorder the live list.
-      setRecentSessions({ ...recentSessionsRef.current });
-    }
-    setSessionSort(nextSort);
   };
 
   const toggleGroup = (groupId: string) => {
@@ -740,27 +733,13 @@ export function SessionSidebar({
             placeholder="搜索会话、主机或标签"
             aria-label="搜索会话、主机或标签"
           />
-        </div>
-        <div className="sidebar-view-tools" aria-label="会话筛选和排序">
-          <SlidersHorizontal size={13} />
-          <select value={sessionFilter} onChange={(event) => setSessionFilter(event.target.value as SessionFilter)} aria-label="筛选会话">
-            <option value="all">全部会话</option>
-            <option value="favorite">仅收藏</option>
-            <option value="open">已打开</option>
-            <option value="failed">需关注</option>
-          </select>
-          <select value={sessionSort} onChange={(event) => handleSessionSortChange(event.target.value)} aria-label="排序会话">
-            <option value="recent">最近使用</option>
-            <option value="status">连接状态</option>
-            <option value="name">名称</option>
-          </select>
           <button
             className={`multi-select-toggle ${multiSelectMode ? "active" : ""}`}
             onClick={() => (multiSelectMode ? exitMultiSelectMode() : setMultiSelectMode(true))}
             title={multiSelectMode ? "退出多选（Esc）" : "多选会话，批量删除 / 移动 / 收藏"}
             aria-pressed={multiSelectMode}
           >
-            <ListChecks size={13} />多选
+            <ListChecks size={13} />
           </button>
         </div>
         {(multiSelectMode || selectedSessions.length > 0) && (

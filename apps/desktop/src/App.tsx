@@ -3,34 +3,34 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow, type Window as TauriWindow } from "@tauri-apps/api/window";
 import {
   Activity,
-  ArrowDownUp,
   BellRing,
-  Command,
+  ClipboardPaste,
   Columns2,
+  Command,
   Copy,
-  Download,
+  Eraser,
+  FileText,
+  Globe2,
   History,
+  Lock,
   Rows2,
   Minus,
   Square,
-  Files,
-  FileKey,
-  Globe2,
-  Lock,
   Monitor,
-  MoreHorizontal,
-  PanelLeftClose,
-  PanelLeftOpen,
+  Pin,
   Plus,
-  Settings,
+  Radio,
+  ScreenShare,
+  Search,
   SendHorizontal,
-  Upload,
   X,
 } from "lucide-react";
 import { api } from "./api";
+import { writeClipboardText } from "./clipboard";
 import { CommandCenterModal } from "./components/CommandCenterModal";
 import type { BatchCommandRun, BatchCommandTarget } from "./components/BatchCommandModal";
 import { ContextMenu } from "./components/ContextMenu";
+import { MenuBar, type MenuBarMenu } from "./components/MenuBar";
 import { colorDialog, confirmDialog, isDialogOpen, promptDialog, DialogHost } from "./components/DialogHost";
 import { GroupEditorModal } from "./components/GroupEditorModal";
 import { QuickCommandBar } from "./components/QuickCommandBar";
@@ -338,6 +338,151 @@ function showLocalTriggerNotification(title: string, body: string) {
   } else {
     deliver();
   }
+}
+
+type TerminalShellCommand =
+  | "copy"
+  | "copyAll"
+  | "paste"
+  | "find"
+  | "clear"
+  | "saveLog"
+  | "reconnect"
+  | "resetFont";
+
+/** Sends a chrome command (menu bar / toolbar) to the focused terminal pane. */
+function runTerminalAction(kind: TerminalShellCommand) {
+  window.dispatchEvent(new CustomEvent("xsh:terminal-action", { detail: { kind } }));
+}
+
+function AppLogo({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" aria-hidden="true">
+      <rect width="16" height="16" rx="3.5" fill="#c8412f" />
+      <path d="M4.2 5.2 7 8l-2.8 2.8" stroke="#fff" strokeWidth="1.7" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M8.6 11h3.4" stroke="#fff" strokeWidth="1.7" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+/** SFTP transfer: upload/download arrows over a two-line channel — the accent
+ * color carries the motion, the neutral channel grounds it. */
+function TransferArrowsIcon({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M7 3.5V14" stroke="var(--accent-strong)" strokeWidth="2" strokeLinecap="round" />
+      <path d="M3.8 10.8 7 14l3.2-3.2" stroke="var(--accent-strong)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M17 14V3.5" stroke="var(--accent-strong)" strokeWidth="2" strokeLinecap="round" />
+      <path d="M13.8 6.7 17 3.5l3.2 3.2" stroke="var(--accent-strong)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M3 19h18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <path d="M6 21.5h12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" opacity="0.5" />
+    </svg>
+  );
+}
+
+/** Transfer task manager: a queue of items with one actively progressing —
+ * neutral rows, accent progress fill. */
+function TaskQueueIcon({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M4 5h10" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <path d="M4 9.5h7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <rect x="4" y="13.5" width="16" height="5.5" rx="2.75" stroke="currentColor" strokeWidth="2" />
+      <path d="M6.5 16.25h8" stroke="var(--accent-strong)" strokeWidth="3" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+interface ToolbarAddressProps {
+  sessions: SavedSession[];
+  onOpenSession: (session: SavedSession) => void;
+}
+
+/** XShell-style toolbar address bar: type a host, IP or session name and hit
+ * Enter to connect. Suggestions come from the saved session list. */
+function ToolbarAddress({ sessions, onOpenSession }: ToolbarAddressProps) {
+  const [value, setValue] = useState("");
+  const [focused, setFocused] = useState(false);
+  const [selected, setSelected] = useState(0);
+  const query = value.trim().toLowerCase();
+  const matches = query
+    ? sessions.filter((session) => {
+      const haystack = `${session.name} ${session.host} ${session.username}`.toLowerCase();
+      return haystack.includes(query);
+    }).slice(0, 8)
+    : [];
+  const open = focused && query.length > 0 && matches.length > 0;
+
+  const connect = (session: SavedSession) => {
+    setValue("");
+    setFocused(false);
+    onOpenSession(session);
+  };
+
+  return (
+    <div className={`toolbar-address ${open ? "open" : ""}`}>
+      <Search size={13} strokeWidth={2} />
+      <input
+        type="text"
+        value={value}
+        placeholder="主机、IP 地址或会话名称"
+        spellCheck={false}
+        aria-label="快速连接：主机、IP 地址或会话名称"
+        onChange={(event) => {
+          setValue(event.target.value);
+          setSelected(0);
+        }}
+        onFocus={(event) => {
+          setFocused(true);
+          event.target.select();
+        }}
+        onBlur={() => {
+          // Give the suggestion mousedown a beat to run before the dropdown unmounts.
+          window.setTimeout(() => setFocused(false), 120);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            const target = matches[selected] ?? matches[0];
+            if (target) connect(target);
+          } else if (event.key === "ArrowDown") {
+            event.preventDefault();
+            setSelected((current) => Math.min(matches.length - 1, current + 1));
+          } else if (event.key === "ArrowUp") {
+            event.preventDefault();
+            setSelected((current) => Math.max(0, current - 1));
+          } else if (event.key === "Escape") {
+            event.preventDefault();
+            setValue("");
+            setFocused(false);
+            (event.target as HTMLInputElement).blur();
+          }
+        }}
+      />
+      {open && (
+        <div className="toolbar-address-suggestions" role="listbox">
+          {matches.map((session, index) => (
+            <button
+              key={session.id}
+              type="button"
+              role="option"
+              aria-selected={index === selected}
+              className={`toolbar-address-suggestion ${index === selected ? "selected" : ""}`}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => connect(session)}
+              onMouseEnter={() => setSelected(index)}
+            >
+              <span className="toolbar-address-name">{session.name}</span>
+              <span className="toolbar-address-host">
+                {session.kind === "remoteDesktop" ? "远程桌面 · " : ""}
+                {session.username}@{session.host}:{session.port}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function App() {
@@ -1563,10 +1708,19 @@ function App() {
           updatePaneLayout("single");
           return;
         }
-        if ((key === "arrowleft" || key === "arrowright") && paneLayout !== "single") {
-          event.preventDefault();
-          focusOtherSplitPane();
-          return;
+        if (key === "arrowleft" || key === "arrowright") {
+          // Split layouts keep Alt+arrows for pane focus; single layout cycles
+          // session tabs the way XShell's 下一步/前一页 does.
+          if (paneLayout !== "single") {
+            event.preventDefault();
+            focusOtherSplitPane();
+            return;
+          }
+          if (tabs.length > 1) {
+            event.preventDefault();
+            cycleTab(key === "arrowright" ? 1 : -1);
+            return;
+          }
         }
         if (key === "f" && activeTabId) {
           event.preventDefault();
@@ -1623,39 +1777,249 @@ function App() {
     return () => window.removeEventListener("keydown", dispatch);
   }, []);
 
+  const closeAppWindow = () => {
+    try {
+      getCurrentWindow().close();
+    } catch {
+      window.close();
+    }
+  };
+
+  const activeTabConnected = activeTab && connectionIds[activeTab.id] ? activeTab : null;
+
+  // XShell sends keyboard input to every session; our broadcast toggle is the
+  // same concept, surfaced as a checkable menu entry.
+  const cycleTab = (offset: 1 | -1) => {
+    if (tabs.length < 2) return;
+    const index = tabs.findIndex((tab) => tab.id === activeTabId);
+    if (index < 0) return;
+    focusTab(tabs[(index + offset + tabs.length) % tabs.length].id);
+  };
+
+  const copyConnectionInfo = () => {
+    if (!activeTab) return;
+    const text = `${activeTab.session.username}@${activeTab.session.host}:${activeTab.session.port}`;
+    void writeClipboardText(text)
+      .then(() => setToast(`已复制连接信息：${text}`))
+      .catch(() => setToast("复制连接信息失败。"));
+  };
+
+  const copySshCommandLine = () => {
+    if (!activeTab) return;
+    const session = activeTab.session;
+    let command = `ssh -p ${session.port} ${session.username}@${session.host}`;
+    if (session.proxyJump) {
+      command += ` -J ${session.proxyJumpUsername ? `${session.proxyJumpUsername}@` : ""}${session.proxyJump}`;
+    }
+    void writeClipboardText(command)
+      .then(() => setToast(`已复制 SSH 命令行：${command}`))
+      .catch(() => setToast("复制 SSH 命令行失败。"));
+  };
+
+  const closeAllTabsWithConfirm = () => {
+    if (tabs.length <= 1) {
+      closeAllTabs();
+      return;
+    }
+    void confirmDialog({
+      title: "关闭全部标签",
+      message: `确定关闭全部 ${tabs.length} 个标签？`,
+      danger: true,
+      confirmLabel: "全部关闭",
+    }).then((confirmed) => {
+      if (confirmed) closeAllTabs();
+    });
+  };
+
+  // XShell-style menu bar: 文件/编辑/查看/工具/选项/窗口/帮助.
+  const menuBarMenus: MenuBarMenu[] = [
+    {
+      id: "file",
+      label: "文件(F)",
+      items: [
+        { label: "新建会话…", onClick: openSshSessionEditor },
+        { label: "新建远程桌面连接…", onClick: openRemoteDesktopEditor },
+        { label: "新建会话目录…", onClick: () => createGroup(null) },
+        { label: "导入会话…", separatorBefore: true, onClick: importSessions },
+        { label: "导出会话…", onClick: exportSessions },
+        {
+          label: "SSH 配置…",
+          onClick: () => {
+            setSshConfigVisible(true);
+            void refreshSshConfig();
+          },
+        },
+        { label: "复制 SSH 命令行", separatorBefore: true, disabled: !activeTab, onClick: copySshCommandLine },
+        { label: "退出", separatorBefore: true, onClick: closeAppWindow },
+      ],
+    },
+    {
+      id: "edit",
+      label: "编辑(E)",
+      items: [
+        { label: "复制", shortcut: "Ctrl+Shift+C", disabled: !activeTab, onClick: () => runTerminalAction("copy") },
+        { label: "粘贴", shortcut: "Ctrl+Shift+V", disabled: !activeTab, onClick: () => runTerminalAction("paste") },
+        { label: "复制全部输出", disabled: !activeTab, onClick: () => runTerminalAction("copyAll") },
+        { label: "复制连接信息", separatorBefore: true, disabled: !activeTab, onClick: copyConnectionInfo },
+        { label: "查找…", separatorBefore: true, shortcut: "Ctrl+Shift+F", disabled: !activeTab, onClick: () => runTerminalAction("find") },
+        { label: "清空屏幕", disabled: !activeTab, onClick: () => runTerminalAction("clear") },
+        { label: "重命名当前标签…", separatorBefore: true, disabled: !activeTab, onClick: () => activeTab && renameTab(activeTab) },
+        { label: "编辑当前会话…", disabled: !activeTab, onClick: () => activeTab && setEditorSession(activeTab.session) },
+      ],
+    },
+    {
+      id: "view",
+      label: "查看(V)",
+      items: [
+        { label: "会话管理器", shortcut: "Ctrl+Shift+B", checked: sidebarVisible, onClick: toggleSidebar },
+        { label: "SFTP 文件面板", checked: sftpVisible, disabled: !activeTab || activeTab.session.kind === "remoteDesktop", onClick: () => setSftpVisible((value) => !value) },
+        { label: "端口转发", checked: portForwardVisible, disabled: !activeTabConnected || activeTabConnected.session.kind === "remoteDesktop", onClick: () => setPortForwardVisible((value) => !value) },
+        { label: "远程桌面面板", checked: remoteDesktopVisible, disabled: !activeTabConnected, onClick: () => setRemoteDesktopVisible((value) => !value) },
+        { label: "单终端", separatorBefore: true, checked: paneLayout === "single", onClick: () => updatePaneLayout("single") },
+        { label: "左右分屏", checked: paneLayout === "vertical", onClick: () => updatePaneLayout("vertical") },
+        { label: "上下分屏", checked: paneLayout === "horizontal", onClick: () => updatePaneLayout("horizontal") },
+        { label: "命令广播", separatorBefore: true, checked: broadcastEnabled, onClick: () => setBroadcastEnabled((value) => !value) },
+        { label: "重置终端字号", disabled: !activeTab, onClick: () => runTerminalAction("resetFont") },
+      ],
+    },
+    {
+      id: "tools",
+      label: "工具(T)",
+      items: [
+        { label: "命令中心…", shortcut: "Ctrl+Shift+P", onClick: () => setCommandCenterVisible(true) },
+        { label: "批量命令…", onClick: () => setBatchCommandVisible(true) },
+        { label: "命令历史…", onClick: () => setHistoryVisible(true) },
+        { label: "发送键盘输入到所有会话", separatorBefore: true, checked: broadcastEnabled, disabled: tabs.length === 0, onClick: () => setBroadcastEnabled((value) => !value) },
+        { label: "SFTP 文件传输", checked: sftpVisible, disabled: !activeTab || activeTab.session.kind === "remoteDesktop", onClick: () => setSftpVisible((value) => !value) },
+        { label: "会话自动化…", separatorBefore: true, disabled: !activeTab, onClick: () => activeTab && setEditorSession(activeTab.session) },
+        { label: "连接管理器…", onClick: () => setConnectionManagerVisible(true) },
+        { label: "传输管理器…", onClick: () => setTransferManagerVisible(true) },
+        { label: "连接诊断…", disabled: !activeTab, onClick: () => activeTab && void runDiagnostic(activeTab.session) },
+        { label: "工作区管理…", separatorBefore: true, onClick: () => setWorkspaceManagerVisible(true) },
+      ],
+    },
+    {
+      id: "options",
+      label: "选项(O)",
+      items: [
+        { label: "设置…", onClick: () => setSettingsVisible(true) },
+        { label: "主题：浅色", separatorBefore: true, checked: preferences.theme === "light", onClick: () => updatePreferences({ ...preferences, theme: "light" }) },
+        { label: "主题：午夜", checked: preferences.theme === "midnight", onClick: () => updatePreferences({ ...preferences, theme: "midnight" }) },
+        { label: "主题：石墨", checked: preferences.theme === "graphite", onClick: () => updatePreferences({ ...preferences, theme: "graphite" }) },
+        { label: "主题：暮色", checked: preferences.theme === "dusk", onClick: () => updatePreferences({ ...preferences, theme: "dusk" }) },
+        { label: "界面字号：增大", separatorBefore: true, disabled: preferences.uiFontSize >= 18, onClick: () => updatePreferences({ ...preferences, uiFontSize: preferences.uiFontSize + 1 }) },
+        { label: "界面字号：减小", disabled: preferences.uiFontSize <= 12, onClick: () => updatePreferences({ ...preferences, uiFontSize: preferences.uiFontSize - 1 }) },
+        { label: "界面字号：重置", onClick: () => updatePreferences({ ...preferences, uiFontSize: 14 }) },
+      ],
+    },
+    {
+      id: "window",
+      label: "窗口(W)",
+      items: [
+        { label: "新建标签…", shortcut: "Ctrl+Shift+T", onClick: () => setEditorSession(null) },
+        ...(activeTab ? [
+          { label: "重新连接", shortcut: "Ctrl+Shift+R", onClick: () => reconnectTab(activeTab.id) },
+          { label: activeTab.locked ? "解锁当前标签" : "锁定当前标签", onClick: () => toggleTabLocked(activeTab.id) },
+        ] : []),
+        { label: "下一个标签", separatorBefore: true, shortcut: "Alt+→", disabled: tabs.length < 2, onClick: () => cycleTab(1) },
+        { label: "上一个标签", shortcut: "Alt+←", disabled: tabs.length < 2, onClick: () => cycleTab(-1) },
+        { label: "关闭当前标签", separatorBefore: true, shortcut: "Ctrl+Shift+W", disabled: !activeTab, onClick: () => activeTab && closeTab(activeTab.id) },
+        { label: "关闭其他标签", disabled: tabs.length < 2, onClick: () => activeTab && closeOtherTabs(activeTab.id) },
+        {
+          label: "关闭已断开标签",
+          disabled: !tabs.some((tab) => tab.state === "disconnected" || tab.state === "failed"),
+          onClick: closeDisconnectedTabs,
+        },
+        { label: "关闭全部标签", disabled: tabs.length === 0, onClick: closeAllTabsWithConfirm },
+        ...tabs.slice(0, 10).map((tab, index) => ({
+          label: `${index + 1}  ${getTabLabel(tab)}`,
+          separatorBefore: index === 0,
+          checked: tab.id === activeTabId,
+          onClick: () => focusTab(tab.id),
+        })),
+      ],
+    },
+    {
+      id: "help",
+      label: "帮助(H)",
+      items: [
+        { label: "欢迎指南…", onClick: () => setOnboardingVisible(true) },
+        { label: "关于 xsh", separatorBefore: true, onClick: () => setToast("xsh — 本地优先的 SSH 客户端 · SSH2 / SFTP / 端口转发 / VNC / RDP") },
+      ],
+    },
+  ];
+
   return (
     <main className="app-shell">
-      <header className="app-header" data-tauri-drag-region>
-        <div className="header-actions">
-          <button className="icon-button" data-tooltip={`${sidebarVisible ? "隐藏" : "显示"}会话侧栏 · macOS ⌘B / Windows Ctrl+Shift+B`} onClick={toggleSidebar} aria-label={sidebarVisible ? "隐藏会话侧栏" : "显示会话侧栏"}>
-            {sidebarVisible ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}
-          </button>
-          <button className="toolbar-button" onClick={openSshSessionEditor} data-tooltip="新建 SSH 会话" aria-label="新建 SSH 会话"><Plus size={14} />新建会话</button>
-          <button className="toolbar-button" onClick={importSessions} data-tooltip="从文件导入会话"><Upload size={14} />导入</button>
-          <button className="toolbar-button" onClick={exportSessions} data-tooltip="导出会话到文件"><Download size={14} />导出</button>
-          <button
-            className="toolbar-button"
-            onClick={() => {
-              setSshConfigVisible(true);
-              void refreshSshConfig();
-            }}
-            data-tooltip="读取 ~/.ssh/config"
-          >
-            <FileKey size={14} />SSH 配置
-          </button>
-          <span className="toolbar-group-divider" />
-          <button className="icon-button connection-manager-trigger" onClick={() => setConnectionManagerVisible(true)} data-tooltip={`连接管理 · 已连接 ${tabs.filter((tab) => tab.state === "connected").length}/${tabs.length}`}>
-            <Activity size={16} />
-          </button>
-          <button className="icon-button" onClick={() => setTransferManagerVisible(true)} data-tooltip="后台传输任务" aria-label="后台传输任务"><ArrowDownUp size={16} /></button>
-          <button className="icon-button command-center-trigger" onClick={() => setCommandCenterVisible(true)} data-tooltip="命令中心" aria-label="命令中心"><Command size={16} /></button>
-          <button className="icon-button" onClick={() => setHistoryVisible(true)} data-tooltip="命令历史" aria-label="命令历史"><History size={16} /></button>
-          <span className="toolbar-group-divider" />
-          <button className="icon-button" onClick={openRemoteDesktopEditor} data-tooltip="新建 VNC/RDP 远程桌面连接（经 SSH 加密隧道）" aria-label="新建远程桌面连接"><Monitor size={16} /></button>
-          <button className="icon-button" data-tooltip="设置" aria-label="设置" onClick={() => setSettingsVisible(true)}><Settings size={16} /></button>
-          <button className="icon-button" data-tooltip="工作区管理" aria-label="工作区管理" onClick={() => setWorkspaceManagerVisible(true)}><MoreHorizontal size={17} /></button>
-        </div>
-        <div className="header-tabs">
+      <div className="title-bar" data-tauri-drag-region>
+        <span className="title-bar-logo"><AppLogo /></span>
+        <span className="title-bar-text">{activeTab ? `${getTabLabel(activeTab)} - xsh` : "xsh"}</span>
+        <WindowControls />
+      </div>
+      <MenuBar menus={menuBarMenus} />
+      <div className="toolbar-bar">
+        <button className="toolbar-button" onClick={openSshSessionEditor} data-tooltip="新建会话" aria-label="新建会话"><Plus size={16} /></button>
+        <button className="toolbar-button" onClick={openRemoteDesktopEditor} data-tooltip="新建 VNC/RDP 远程桌面连接（经 SSH 加密隧道）" aria-label="新建远程桌面连接"><ScreenShare size={16} /></button>
+        <span className="toolbar-group-divider" />
+        <button className="toolbar-button" onClick={() => runTerminalAction("copy")} data-tooltip="复制选中内容 · macOS ⌘C / Windows Ctrl+Shift+C" aria-label="复制选中内容"><Copy size={16} /></button>
+        <button className="toolbar-button" onClick={() => runTerminalAction("paste")} data-tooltip="粘贴到终端 · macOS ⌘V / Windows Ctrl+Shift+V" aria-label="粘贴到终端"><ClipboardPaste size={16} /></button>
+        <button className="toolbar-button" onClick={() => runTerminalAction("find")} data-tooltip="查找终端内容 · macOS ⌘F / Windows Ctrl+Shift+F" aria-label="查找终端内容"><Search size={16} /></button>
+        <span className="toolbar-group-divider" />
+        <button className="toolbar-button" onClick={() => runTerminalAction("saveLog")} data-tooltip="保存终端日志" aria-label="保存终端日志"><FileText size={16} /></button>
+        <button className="toolbar-button" onClick={() => runTerminalAction("clear")} data-tooltip="清空终端屏幕" aria-label="清空终端屏幕"><Eraser size={16} /></button>
+        <span className="toolbar-group-divider" />
+        <button
+          className={`toolbar-button ${sftpVisible ? "active" : ""}`}
+          onClick={() => setSftpVisible((value) => !value)}
+          disabled={!activeTab || activeTab.session.kind === "remoteDesktop"}
+          data-tooltip="SFTP 文件传输面板 · Alt+F"
+          aria-label="SFTP 文件传输"
+        >
+          <TransferArrowsIcon size={16} />
+        </button>
+        <button className="toolbar-button" onClick={() => setTransferManagerVisible(true)} data-tooltip="传输任务管理 · 后台上传 / 下载队列" aria-label="传输任务管理"><TaskQueueIcon size={16} /></button>
+        <button
+          className={`toolbar-button ${portForwardVisible ? "active" : ""}`}
+          onClick={() => setPortForwardVisible((value) => !value)}
+          disabled={!activeTab || !connectionIds[activeTab.id] || activeTab.session.kind === "remoteDesktop"}
+          data-tooltip="端口转发"
+          aria-label="端口转发"
+        >
+          <Globe2 size={16} />
+        </button>
+        <button
+          className={`toolbar-button ${remoteDesktopVisible ? "active" : ""}`}
+          onClick={() => setRemoteDesktopVisible((value) => !value)}
+          disabled={!activeTab || !connectionIds[activeTab.id]}
+          data-tooltip="VNC / RDP 远程桌面"
+          aria-label="VNC / RDP 远程桌面"
+        >
+          <Monitor size={16} />
+        </button>
+        <span className="toolbar-group-divider" />
+        <button className="toolbar-button command-center-trigger" onClick={() => setCommandCenterVisible(true)} data-tooltip="命令中心 · macOS ⌘⇧P / Windows Ctrl+Shift+P" aria-label="命令中心"><Command size={16} /></button>
+        <button className="toolbar-button" onClick={() => setHistoryVisible(true)} data-tooltip="命令历史" aria-label="命令历史"><History size={16} /></button>
+        <button className="toolbar-button" onClick={() => setBatchCommandVisible(true)} data-tooltip="批量命令 · 选择目标并逐会话汇总结果" aria-label="批量命令"><SendHorizontal size={16} /></button>
+        <span className="toolbar-group-divider" />
+        <button className="toolbar-button connection-manager-trigger" onClick={() => setConnectionManagerVisible(true)} data-tooltip={`连接管理 · 已连接 ${tabs.filter((tab) => tab.state === "connected").length}/${tabs.length}`} aria-label="连接管理"><Activity size={16} /></button>
+        <ToolbarAddress sessions={sessions} onOpenSession={openSession} />
+      </div>
+
+      <div className={`workspace ${sidebarVisible ? "" : "sidebar-hidden"}`}>
+        {/* XShell-style split strip: the session-manager tab owns the left
+         * grid cell (directly above the sidebar), while session tabs live in
+         * the terminal column so they never crowd the left cluster. */}
+        <button
+          type="button"
+          className={`terminal-tab sidebar-pin-tab ${sidebarVisible ? "active" : ""}`}
+          onClick={toggleSidebar}
+          title={`${sidebarVisible ? "隐藏" : "显示"}会话管理器 · macOS ⌘B / Windows Ctrl+Shift+B`}
+          aria-label={`${sidebarVisible ? "隐藏" : "显示"}会话管理器`}
+        >
+          <Pin size={11} />
+          <span>会话管理器</span>
+        </button>
+        <div className="tab-bar">
           <div className="tabs-scroll">
             {tabs.map((tab) => (
               <button
@@ -1723,29 +2087,9 @@ function App() {
                 {tabs.filter((tab) => tab.id !== activeTabId).map((tab) => <option key={tab.id} value={tab.id}>{getTabLabel(tab)}</option>)}
               </select>
             )}
-            <button className={broadcastEnabled ? "active" : ""} onClick={() => setBroadcastEnabled((value) => !value)} data-tooltip={broadcastEnabled ? "关闭命令广播" : "开启命令广播"}>广播</button>
-            <button onClick={() => setBatchCommandVisible(true)} data-tooltip="选择目标并逐会话汇总批量命令结果"><SendHorizontal size={13} />批量命令</button>
+            <button className={broadcastEnabled ? "active" : ""} onClick={() => setBroadcastEnabled((value) => !value)} data-tooltip={broadcastEnabled ? "关闭命令广播" : "开启命令广播"} aria-label="命令广播"><Radio size={13} /></button>
           </div>
-          {activeTab && connectionIds[activeTab.id] && activeTab.session.kind !== "remoteDesktop" && (
-            <button className={`sftp-toggle ${portForwardVisible ? "active" : ""}`} onClick={() => setPortForwardVisible((value) => !value)} data-tooltip="端口转发">
-              <Globe2 size={14} />转发
-            </button>
-          )}
-          {activeTab && connectionIds[activeTab.id] && activeTab.session.kind !== "remoteDesktop" && (
-            <button className={`sftp-toggle ${remoteDesktopVisible ? "active" : ""}`} onClick={() => setRemoteDesktopVisible((value) => !value)} data-tooltip="VNC / RDP 远程桌面">
-              <Monitor size={14} />远程
-            </button>
-          )}
-          {activeTab && activeTab.session.kind !== "remoteDesktop" && (
-            <button className={`sftp-toggle ${sftpVisible ? "active" : ""}`} onClick={() => setSftpVisible((value) => !value)}>
-              <Files size={14} />SFTP
-            </button>
-          )}
         </div>
-        <WindowControls />
-      </header>
-
-      <div className={`workspace ${sidebarVisible ? "" : "sidebar-hidden"}`}>
         {sidebarVisible && <SessionSidebar
           groups={groups}
           sessions={sessions}
@@ -1770,6 +2114,7 @@ function App() {
           onDeleteGroup={deleteGroup}
         />}
 
+        <div className="terminal-column">
         <section className="terminal-workspace">
           <div
             ref={terminalStageRef}
@@ -1871,6 +2216,7 @@ function App() {
             />
           </Suspense>
         )}
+        </div>
       </div>
 
       {tabContextMenu && (() => {
@@ -1923,7 +2269,13 @@ function App() {
       })()}
 
       <footer className="status-bar">
-        <span>{loading ? "加载会话…" : `${sessions.length} 个会话 · ${tabs.length} 个已打开标签`}</span>
+        <span>
+          {loading
+            ? "加载会话…"
+            : activeTab
+              ? `${activeTab.session.username}@${activeTab.session.host} · ${sessions.length} 个会话`
+              : `${sessions.length} 个会话 · 未连接`}
+        </span>
         <span className="status-bar-current">
           {workspaceOpening && (() => {
             const openingTabs = tabs.filter((tab) => workspaceOpening.sessionIds.includes(tab.session.id));
