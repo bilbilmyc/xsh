@@ -1,3 +1,5 @@
+@import "./themes.css";
+
 :root {
   color-scheme: dark;
   font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
@@ -3278,15 +3280,6 @@ body {
 :root[data-theme="dusk"] .session-sidebar { background: #15131f; }
 :root[data-theme="dusk"] .terminal-stage,
 :root[data-theme="dusk"] .welcome-panel { background-color: #100f18; }
-:root[data-theme="light"] .terminal-pane,
-:root[data-theme="light"] .xterm-host,
-:root[data-theme="light"] .xterm-host .xterm,
-:root[data-theme="light"] .xterm-host .xterm .xterm-viewport,
-:root[data-theme="light"] .xterm-host .xterm .xterm-screen,
-:root[data-theme="light"] .xterm-host .xterm .xterm-rows,
-:root[data-theme="light"] .xterm-host .xterm .xterm-helpers {
-  --xsh-terminal-background: #fbfcfe;
-}
 
 .sidebar-section-title { font-size: var(--font-xs); color: #8e9eac; font-weight: 500; }
 .group-toggle { font-size: var(--font-md); font-weight: 500; }
@@ -4490,25 +4483,6 @@ body.resizing-terminal-split .split-divider.horizontal * { cursor: row-resize !i
   background: var(--xsh-terminal-background, #0b0f14);
 }
 
-:root[data-theme="graphite"] .terminal-pane,
-:root[data-theme="graphite"] .xterm-host,
-:root[data-theme="graphite"] .xterm-host .xterm,
-:root[data-theme="graphite"] .xterm-host .xterm .xterm-viewport,
-:root[data-theme="graphite"] .xterm-host .xterm .xterm-screen,
-:root[data-theme="graphite"] .xterm-host .xterm .xterm-rows,
-:root[data-theme="graphite"] .xterm-host .xterm .xterm-helpers {
-  --xsh-terminal-background: #111315;
-}
-
-:root[data-theme="dusk"] .terminal-pane,
-:root[data-theme="dusk"] .xterm-host,
-:root[data-theme="dusk"] .xterm-host .xterm,
-:root[data-theme="dusk"] .xterm-host .xterm .xterm-viewport,
-:root[data-theme="dusk"] .xterm-host .xterm .xterm-screen,
-:root[data-theme="dusk"] .xterm-host .xterm .xterm-rows,
-:root[data-theme="dusk"] .xterm-host .xterm .xterm-helpers {
-  --xsh-terminal-background: #100f18;
-}
 
 /* Keep the editor aligned with the compact toolbar scale. */
 .session-editor {
@@ -5516,7 +5490,7 @@ body.resizing-terminal-split .split-divider.horizontal * { cursor: row-resize !i
 :root[data-theme="light"] .terminal-stage,
 :root[data-theme="light"] .terminal-pane,
 :root[data-theme="light"] .xterm-host {
-  background: #fbfcfe;
+  background: var(--xsh-terminal-background, #fbfcfe);
 }
 
 :root[data-theme="light"] .terminal-toolbar button {

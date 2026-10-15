@@ -1,6 +1,7 @@
 import type { SftpTransferPolicy } from "./types";
+import { getTheme, getThemeTokens, isAppTheme, type AppTheme } from "./themes.ts";
 
-export type AppTheme = "light" | "midnight" | "graphite" | "dusk";
+export type { AppTheme } from "./themes.ts";
 export type AccentColor = "cyan" | "blue" | "green" | "orange" | "purple";
 export type RightClickAction = "paste" | "menu";
 export type TerminalShortcutMode = "platform-safe" | "remote-first";
@@ -129,6 +130,12 @@ export function applyPreferences(preferences: AppPreferences) {
   const root = document.documentElement;
   root.dataset.theme = preferences.theme;
   root.dataset.accent = preferences.accent;
+  const theme = getTheme(preferences.theme);
+  root.dataset.palette = theme.extended ? "extended" : "classic";
+  root.dataset.scheme = theme.scheme;
+  for (const [property, value] of Object.entries(getThemeTokens(preferences.theme, preferences.accent))) {
+    root.style.setProperty(property, theme.extended ? value : "");
+  }
   root.style.setProperty("--ui-font-family", preferences.uiFontFamily);
   root.style.setProperty("--ui-font-size", `${preferences.uiFontSize}px`);
   root.style.setProperty("--ui-font-adjust", `${preferences.uiFontSize - UI_FONT_BASELINE}px`);
@@ -149,6 +156,8 @@ export function normalizePreferences(preferences: AppPreferences): AppPreference
   );
   return {
     ...preferences,
+    theme: isAppTheme(preferences.theme) ? preferences.theme : defaultPreferences.theme,
+    accent: ["cyan", "blue", "green", "orange", "purple"].includes(preferences.accent) ? preferences.accent : defaultPreferences.accent,
     uiFontSize: clamp(Number(preferences.uiFontSize), UI_FONT_MIN, UI_FONT_MAX, defaultPreferences.uiFontSize),
     terminalFontSize: clamp(Number(preferences.terminalFontSize), TERMINAL_FONT_MIN, TERMINAL_FONT_MAX, defaultPreferences.terminalFontSize),
     terminalLineHeight: clamp(Number(preferences.terminalLineHeight), 1, 1.6, defaultPreferences.terminalLineHeight),

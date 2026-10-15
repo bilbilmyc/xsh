@@ -17,16 +17,11 @@ import {
 } from "lucide-react";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
 import type { SavedSession, SessionGroup } from "../types";
+import { IS_MACOS } from "../platform";
+import { formatActivitySummary, primaryActivityState, SESSION_ACTIVITY_LABELS, type SessionActivitySummary } from "../session-activity";
+import "./SessionSidebar.css";
 
-export interface SessionActivitySummary {
-  openTabs: number;
-  connected: number;
-  connecting: number;
-  reconnecting: number;
-  waitingNetwork: number;
-  failed: number;
-  disconnected: number;
-}
+export type { SessionActivitySummary } from "../session-activity";
 
 interface SessionSidebarProps {
   groups: SessionGroup[];
@@ -62,6 +57,7 @@ const SIDEBAR_WIDTH_STORAGE_KEY = "xsh.session-sidebar.width";
 const MIN_SIDEBAR_WIDTH = 190;
 const MAX_SIDEBAR_WIDTH = 360;
 const RECENT_SESSIONS_STORAGE_KEY = "xsh.session-sidebar.recent.v1";
+const FAVORITES_EXPANDED_STORAGE_KEY = "xsh.session-sidebar.favorites-expanded";
 type SessionFilter = "all" | "favorite" | "open" | "failed";
 type SessionSort = "recent" | "name" | "status";
 
@@ -89,6 +85,7 @@ export function SessionSidebar({
   onDeleteGroup,
 }: SessionSidebarProps) {
   const [query, setQuery] = useState("");
+  const [favoritesExpanded, setFavoritesExpanded] = useState(() => window.localStorage.getItem(FAVORITES_EXPANDED_STORAGE_KEY) !== "false");
   // Filter/sort stay as state defaults: the chip row was removed from the UI,
   // but the filtering pipeline (search box, multi-select) still runs on "all".
   const [sessionFilter] = useState<SessionFilter>("all");
@@ -125,6 +122,10 @@ export function SessionSidebar({
   useEffect(() => {
     window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(sidebarWidth));
   }, [sidebarWidth]);
+
+  useEffect(() => {
+    window.localStorage.setItem(FAVORITES_EXPANDED_STORAGE_KEY, String(favoritesExpanded));
+  }, [favoritesExpanded]);
 
   useEffect(() => {
     recentSessionsRef.current = recentSessions;
@@ -594,22 +595,19 @@ export function SessionSidebar({
       aria-label={`${session.name}，${session.kind === "remoteDesktop" && session.remoteDesktop?.transport === "direct"
         ? `${session.remoteDesktop.kind === "vnc" ? "VNC" : "RDP"} 直连 · ${session.remoteDesktop.targetHost}:${session.remoteDesktop.targetPort ?? (session.remoteDesktop.kind === "vnc" ? 5900 : 3389)}`
         : `${session.username}@${session.host}:${session.port}`}${activityDescription ? `，${activityDescription}` : ""}`}
-      title={`${session.name}\n${session.username}@${session.host}:${session.port}${activityDescription ? `\n${activityDescription}` : ""}`}
+      title={`${session.name}\n${session.username}@${session.host}:${session.port}\n${activityDescription}${session.environment ? `\n环境：${({ production: "生产", staging: "预发布", development: "开发" } as Record<string, string>)[session.environment] ?? session.environment}` : ""}`}
     >
       {multiSelectMode && (
         <span className={`row-checkbox ${isSelected ? "checked" : ""}`} aria-hidden="true">
           {isSelected && <Check size={12} />}
         </span>
       )}
-      <span className={`environment-dot ${session.environment ?? "development"}`} />
+      <span className={`session-status-dot ${activityState}`} title={SESSION_ACTIVITY_LABELS[activityState]} aria-hidden="true" />
       {session.kind === "remoteDesktop" ? <Monitor size={14} className="session-kind-icon" /> : <Server size={14} />}
       <span className="session-row-copy">
         <strong>{session.name}</strong>
       </span>
       <span className="session-row-indicators" aria-hidden="true">
-        {activity && (
-          <span className={`session-activity-dot ${activityState}`} />
-        )}
         {activity?.openTabs > 1 && <span className="session-tab-count">{activity.openTabs}</span>}
         {session.favorite && <Star size={12} className="favorite-icon" fill="currentColor" />}
       </span>
@@ -730,8 +728,9 @@ export function SessionSidebar({
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="搜索会话、主机或标签"
-            aria-label="搜索会话、主机或标签"
+            placeholder="筛选会话"
+            aria-label="筛选已保存会话"
+            title="仅筛选本地已保存会话，支持名称、主机、用户和标签"
           />
           <button
             className={`multi-select-toggle ${multiSelectMode ? "active" : ""}`}
@@ -772,8 +771,22 @@ export function SessionSidebar({
       <div className="session-tree" tabIndex={0} aria-label="会话列表" onContextMenu={showSidebarMenu}>
         {favorites.length > 0 && (
           <section className="sidebar-section">
-            <div className="sidebar-section-title"><Star size={13} />收藏</div>
-            {favorites.map((session) => sessionRow(session))}
+            <div className="sidebar-section-title">
+              <button
+                type="button"
+                className="sidebar-favorites-toggle"
+                aria-expanded={favoritesExpanded}
+                aria-controls="sidebar-favorite-sessions"
+                onClick={() => setFavoritesExpanded((value) => !value)}
+                title={favoritesExpanded ? "收起收藏" : "展开收藏"}
+              >
+                {favoritesExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                <Star size={13} />
+                <span>收藏</span>
+                <span className="sidebar-favorites-count">{favorites.length}</span>
+              </button>
+            </div>
+            {favoritesExpanded && <div id="sidebar-favorite-sessions">{favorites.map((session) => sessionRow(session))}</div>}
           </section>
         )}
         <section className="sidebar-section">
@@ -820,7 +833,7 @@ export function SessionSidebar({
       <div className={`sidebar-hint ${dragFeedback ? "drag-feedback" : ""}`} role="status">
         {dragFeedback ?? (multiSelectMode
           ? `多选模式：点击勾选 · Shift 连选 · 已选 ${selectedSessions.length} 个 · Esc 退出`
-          : `${visibleSessions.length}/${sessions.length} 个会话 · 多选模式可批量删除 · Ctrl 多选 · Shift 连选`)}
+          : `${visibleSessions.length}/${sessions.length} 个会话 · 多选模式可批量删除 · ${IS_MACOS ? "⌘" : "Ctrl"} 多选 · Shift 连选`)}
       </div>
       {contextTarget && (
         <ContextMenu
@@ -863,16 +876,6 @@ function groupPathLabel(group: SessionGroup, groups: SessionGroup[]): string {
   return names.join(" / ");
 }
 
-function primaryActivityState(activity?: SessionActivitySummary): string {
-  if (!activity) return "idle";
-  if (activity.connected > 0) return "connected";
-  if (activity.waitingNetwork > 0) return "waiting-network";
-  if (activity.reconnecting > 0) return "reconnecting";
-  if (activity.connecting > 0) return "connecting";
-  if (activity.failed > 0) return "failed";
-  return "disconnected";
-}
-
 function clampSidebarWidth(width: number): number {
   return Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, Math.round(width)));
 }
@@ -882,18 +885,6 @@ function loadSidebarWidth(): number {
   if (!storedValue) return 244;
   const stored = Number(storedValue);
   return Number.isFinite(stored) ? clampSidebarWidth(stored) : 244;
-}
-
-function formatActivitySummary(activity?: SessionActivitySummary): string {
-  if (!activity) return "";
-  const parts = [`${activity.openTabs} 个标签`];
-  if (activity.connected > 0) parts.push(`${activity.connected} 个已连接`);
-  if (activity.connecting > 0) parts.push(`${activity.connecting} 个连接中`);
-  if (activity.reconnecting > 0) parts.push(`${activity.reconnecting} 个重连中`);
-  if (activity.waitingNetwork > 0) parts.push(`${activity.waitingNetwork} 个等待网络`);
-  if (activity.failed > 0) parts.push(`${activity.failed} 个失败`);
-  if (activity.disconnected > 0) parts.push(`${activity.disconnected} 个已断开`);
-  return parts.join("，");
 }
 
 function countGroupSessions(groupId: string, groups: SessionGroup[], sessions: SavedSession[]): number {

@@ -1,0 +1,8 @@
+.session-advanced-summary { display: flex; align-items: center; gap: 7px; min-height: 26px; cursor: pointer; list-style: none; color: var(--text); font-size: var(--font-sm); }
+.session-advanced-summary::-webkit-details-marker { display: none; }
+.session-advanced-summary > svg { flex: none; transition: transform 120ms ease; }
+.session-advanced-section:not([open]) > .session-advanced-summary > svg { transform: rotate(-90deg); }
+.session-advanced-summary > span { margin-left: auto; color: var(--muted); font-size: var(--font-xs); font-weight: 400; }
+.session-advanced-section[open] > .session-advanced-summary { margin-bottom: 12px; }
+.session-first-connection-note { padding: 10px 12px; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); background: var(--panel-raised); font-size: var(--font-xs); line-height: 1.7; }
+@media (prefers-reduced-motion: reduce) { .session-advanced-summary > svg { transition: none; } }

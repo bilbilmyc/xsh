@@ -28,7 +28,7 @@ export function OnboardingModal({ onCreateSession, onOpenSshConfig, onDismiss }:
             <div className="onboarding-step"><span className="onboarding-step-icon"><Files size={16} /></span><div><strong>用工作区组织日常工作</strong><span>多标签、分屏、命令中心和 SFTP 都可以随时使用。</span></div></div>
           </div>
 
-          <div className="onboarding-safety"><ShieldCheck size={15} /><span>密码和私钥 Passphrase 只保存在 XSH 本地加密数据库；普通会话导出不会包含凭据。</span></div>
+          <div className="onboarding-safety"><ShieldCheck size={15} /><span>密码和私钥 Passphrase 保存在 XSH 本地加密数据库。会话包使用密码加密，分享前请确认包含的登录信息。</span></div>
         </div>
 
         <footer className="modal-footer onboarding-footer">

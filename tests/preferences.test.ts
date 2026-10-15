@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import test, { afterEach } from "node:test";
 import {
+  applyPreferences,
   defaultPreferences,
   loadPreferences,
   normalizePreferences,
   savePreferences,
   toSftpTransferPolicy,
 } from "../apps/desktop/src/preferences.ts";
+import { getTheme, getThemeTokens, THEME_IDS } from "../apps/desktop/src/themes.ts";
 
 afterEach(() => {
   delete (globalThis as { document?: unknown }).document;
@@ -31,6 +33,7 @@ function installDocument() {
       },
     },
   };
+  return properties;
 }
 
 test("migrates legacy v1 preferences with SFTP policy defaults", () => {
@@ -119,4 +122,34 @@ test("savePreferences returns and persists the normalized object", () => {
   assert.equal(saved.perHostSftpTransferConcurrency, 3);
   assert.equal(saved.sftpUploadBandwidthLimitBps, 1024);
   assert.deepEqual(JSON.parse(storage.getItem("xsh.preferences.v1") ?? "null"), saved);
+});
+
+test("all old and new theme IDs survive preference persistence", () => {
+  for (const theme of THEME_IDS) {
+    (globalThis as { localStorage?: unknown }).localStorage = createStorage({
+      "xsh.preferences.v1": JSON.stringify({ theme, accent: "green", terminalFontSize: 16 }),
+    });
+    assert.equal(loadPreferences().theme, theme);
+    assert.equal(loadPreferences().accent, "green");
+  }
+  (globalThis as { localStorage?: unknown }).localStorage = createStorage({
+    "xsh.preferences.v1": JSON.stringify({ theme: "removed-theme", accent: "invalid" }),
+  });
+  assert.equal(loadPreferences().theme, defaultPreferences.theme);
+  assert.equal(loadPreferences().accent, defaultPreferences.accent);
+});
+
+test("extended themes apply complete palette tokens and clear them when returning to a classic theme", () => {
+  const properties = installDocument();
+  for (const theme of ["nord", "forest", "sand", "ivory"] as const) {
+    applyPreferences({ ...defaultPreferences, theme, accent: "purple" });
+    assert.equal(document.documentElement.dataset.theme, theme);
+    assert.equal(document.documentElement.dataset.palette, "extended");
+    assert.equal(document.documentElement.dataset.scheme, getTheme(theme).scheme);
+    for (const [property, value] of Object.entries(getThemeTokens(theme, "purple"))) assert.equal(properties.get(property), value);
+  }
+  applyPreferences({ ...defaultPreferences, theme: "graphite" });
+  assert.equal(document.documentElement.dataset.palette, "classic");
+  assert.equal(document.documentElement.dataset.scheme, "dark");
+  for (const property of Object.keys(getThemeTokens("graphite"))) assert.equal(properties.get(property), "");
 });

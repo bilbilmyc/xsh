@@ -1,0 +1,109 @@
+.quick-command-bar.quick-command-ux {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr) auto;
+  column-gap: 12px;
+  row-gap: 4px;
+  padding: 4px 8px;
+  border-top-color: var(--line);
+  color: var(--muted);
+  background: var(--panel);
+}
+
+.quick-command-ux .quick-command-count {
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 3px;
+  color: var(--muted);
+  background: var(--panel-raised);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.quick-command-ux .quick-command-slots {
+  grid-column: 1 / -1;
+  min-height: 28px;
+  padding-bottom: 2px;
+  gap: 6px;
+}
+
+.quick-command-target {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: var(--font-xs);
+}
+
+.quick-command-target > span {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.quick-command-target > svg {
+  flex: none;
+}
+
+.quick-command-ux.is-broadcast {
+  border-top: 2px solid var(--yellow);
+}
+
+.quick-command-target.broadcast {
+  color: var(--yellow);
+  font-weight: 600;
+}
+
+.quick-command-empty {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: var(--font-xs);
+}
+
+.quick-command-add {
+  height: 26px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 0 8px;
+  border: 1px dashed var(--line);
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--accent-strong);
+  background: transparent;
+  font-size: var(--font-xs);
+  white-space: nowrap;
+}
+
+.quick-command-add:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+
+.quick-command-add:disabled {
+  cursor: default;
+  color: var(--muted);
+}
+
+.quick-command-add:focus-visible,
+.quick-command-ux .quick-command-collapse:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.quick-command-bar.quick-command-ux.collapsed {
+  padding-top: 1px;
+  padding-bottom: 1px;
+}
+
+@media (max-width: 900px) {
+  .quick-command-bar.quick-command-ux {
+    column-gap: 6px;
+  }
+
+  .quick-command-empty {
+    display: none;
+  }
+}

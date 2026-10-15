@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent } from "react";
-import { Check, ChevronDown, CircleHelp, Send, TerminalSquare, Trash2, X } from "lucide-react";
+import { Check, ChevronDown, CircleHelp, Plus, Radio, Send, TerminalSquare, Trash2, X } from "lucide-react";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
 import {
   createQuickCommand,
@@ -12,12 +12,16 @@ import { containsSensitiveCommand, SENSITIVE_COMMAND_ERROR } from "../sensitive-
 import { confirmDialog } from "./DialogHost";
 import { IS_MACOS } from "../platform";
 import type { TerminalShortcutMode } from "../preferences";
+import "./QuickCommandBar.css";
 
 interface QuickCommandBarProps {
   items: Array<QuickCommandItem | null>;
   canSend: boolean;
   unavailableReason: string;
   targetName: string | null;
+  broadcastEnabled?: boolean;
+  broadcastTargetCount?: number;
+  manageRequested?: number;
   terminalShortcutMode: TerminalShortcutMode;
   onChange: (items: Array<QuickCommandItem | null>) => void;
   onSend: (item: QuickCommandItem, text: string) => void;
@@ -30,7 +34,7 @@ const shortcutOptions = [
   { value: "", label: "不绑定快捷键" },
   ...Array.from({ length: 9 }, (_, index) => ({
     value: `mod-${index + 1}`,
-    label: `macOS ⌘${index + 1} / Windows Ctrl+Shift+${index + 1}`,
+    label: IS_MACOS ? `⌘${index + 1}` : `Ctrl+Shift+${index + 1}`,
   })),
 ];
 
@@ -39,6 +43,9 @@ export function QuickCommandBar({
   canSend,
   unavailableReason,
   targetName,
+  broadcastEnabled = false,
+  broadcastTargetCount = 0,
+  manageRequested = 0,
   terminalShortcutMode,
   onChange,
   onSend,
@@ -51,6 +58,10 @@ export function QuickCommandBar({
   const [draggedSlot, setDraggedSlot] = useState<number | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; slot: number } | null>(null);
   const clickTimerRef = useRef<number | null>(null);
+  const savedCount = items.filter(Boolean).length;
+  const targetDescription = broadcastEnabled
+    ? `广播已开启 · ${broadcastTargetCount} 个已连接会话`
+    : canSend && targetName ? `发送至：${targetName}` : unavailableReason || "连接会话后可发送，离线也可管理命令";
 
   useEffect(() => {
     const onEscape = (event: KeyboardEvent) => {
@@ -83,6 +94,13 @@ export function QuickCommandBar({
     });
     setError(null);
   };
+
+  useEffect(() => {
+    if (!manageRequested) return;
+    setExpanded(true);
+    const availableSlot = nextEmptySlot();
+    openEditor(availableSlot >= 0 ? availableSlot : items.findIndex((item) => item !== null));
+  }, [manageRequested]);
 
   const saveEditor = () => {
     if (!editor) return;
@@ -127,15 +145,21 @@ export function QuickCommandBar({
   };
 
   const runItem = async (item: QuickCommandItem) => {
+    if (containsSensitiveCommand(item.command)) {
+      onToast(SENSITIVE_COMMAND_ERROR);
+      return;
+    }
     if (!canSend) {
       onToast(unavailableReason);
       return;
     }
-    const needsConfirmation = item.requiresConfirmation || /\r?\n/.test(item.command.trim());
+    const needsConfirmation = broadcastEnabled || item.requiresConfirmation || /\r?\n/.test(item.command.trim());
     if (needsConfirmation && !(await confirmDialog({
-      title: "发送快捷命令",
-      message: `即将向“${targetName}”发送：\n\n${item.command}`,
-      confirmLabel: "发送",
+      title: broadcastEnabled ? "广播快捷命令" : "发送快捷命令",
+      message: broadcastEnabled
+        ? `即将向 ${broadcastTargetCount} 个已连接会话广播同一命令：\n\n${item.command}`
+        : `即将向“${targetName}”发送：\n\n${item.command}`,
+      confirmLabel: broadcastEnabled ? "确认广播" : "发送",
     }))) return;
     onSend(item, item.command);
     setSentItemId(item.id);
@@ -161,7 +185,7 @@ export function QuickCommandBar({
     };
     window.addEventListener("keydown", onShortcut);
     return () => window.removeEventListener("keydown", onShortcut);
-  }, [editor, items, canSend, unavailableReason, targetName, terminalShortcutMode]);
+  }, [editor, items, canSend, unavailableReason, targetName, terminalShortcutMode, broadcastEnabled, broadcastTargetCount]);
 
   const scheduleRun = (item: QuickCommandItem) => {
     if (clickTimerRef.current !== null) window.clearTimeout(clickTimerRef.current);
@@ -219,7 +243,7 @@ export function QuickCommandBar({
   return (
     <>
       <section
-        className={`quick-command-bar ${expanded ? "expanded" : "collapsed"}`}
+        className={`quick-command-bar quick-command-ux ${expanded ? "expanded" : "collapsed"} ${broadcastEnabled ? "is-broadcast" : ""}`}
         aria-label="快捷命令栏"
         onDoubleClick={handleBarDoubleClick}
         title="单击发送；双击或右键编辑；拖拽按钮可调整顺序"
@@ -227,6 +251,7 @@ export function QuickCommandBar({
         <div className="quick-command-title">
           <TerminalSquare size={14} />
           <span>快捷命令</span>
+          <span className="quick-command-count">{savedCount}</span>
           <button
             type="button"
             className="quick-command-help"
@@ -238,9 +263,30 @@ export function QuickCommandBar({
             <CircleHelp size={13} />
           </button>
         </div>
+        <div
+          className={`quick-command-target ${broadcastEnabled ? "broadcast" : ""} ${!canSend ? "unavailable" : ""}`}
+          role="status"
+          title={`${targetDescription}${!canSend ? "；仍可添加、编辑和删除快捷命令" : ""}`}
+        >
+          {broadcastEnabled && <Radio size={13} aria-hidden="true" />}
+          <span>{targetDescription}</span>
+        </div>
+        <button
+          type="button"
+          className="quick-command-collapse"
+          onClick={(event) => { event.stopPropagation(); setExpanded((value) => !value); }}
+          title={expanded ? "收起快捷命令栏" : "展开快捷命令栏"}
+          aria-label={expanded ? `收起快捷命令（已保存 ${savedCount} 项）` : `展开快捷命令（已保存 ${savedCount} 项）`}
+          aria-expanded={expanded}
+          aria-controls="quick-command-slots"
+          onDoubleClick={(event) => event.stopPropagation()}
+        >
+          <ChevronDown size={15} />
+        </button>
         {expanded && (
           <>
-            <div className="quick-command-slots">
+            <div className="quick-command-slots" id="quick-command-slots">
+              {savedCount === 0 && <span className="quick-command-empty">还没有快捷命令，可先添加常用命令</span>}
               {items.map((item, slot) => item ? (
                 <button
                   key={item.id}
@@ -266,24 +312,28 @@ export function QuickCommandBar({
                   onKeyDown={navigateCommandButtons}
                   onDoubleClick={(event) => openEditorFromDoubleClick(event, slot)}
                   onContextMenu={(event) => showCommandMenu(event, slot)}
-                  title={`${item.command}\n分组：${item.group}${item.shortcut ? `\n快捷键：macOS ⌘${item.shortcut.slice(-1)} / Windows Ctrl+Shift+${item.shortcut.slice(-1)}` : ""}\n单击发送，双击或右键编辑，拖拽调整顺序`}
+                  aria-label={`${item.label}，${canSend ? targetDescription : unavailableReason}；双击或右键编辑`}
+                  title={`${item.command}\n分组：${item.group}${item.shortcut ? `\n快捷键：${IS_MACOS ? "⌘" : "Ctrl+Shift+"}${item.shortcut.slice(-1)}` : ""}\n${canSend ? targetDescription : unavailableReason}\n单击发送，双击或右键编辑，拖拽调整顺序`}
                 >
                   <Send size={12} />
                   <span>{item.label}</span>
-                  {item.shortcut && <kbd>{item.shortcut.slice(-1)}</kbd>}
+                  {item.shortcut && <kbd>{IS_MACOS ? "⌘" : "Ctrl+Shift+"}{item.shortcut.slice(-1)}</kbd>}
                 </button>
               ) : null)}
+              <button
+                type="button"
+                className="quick-command-add"
+                disabled={nextEmptySlot() < 0}
+                onClick={(event) => { event.stopPropagation(); openEditor(nextEmptySlot()); }}
+                onDoubleClick={(event) => event.stopPropagation()}
+                title={nextEmptySlot() < 0 ? "已保存 10 项，请编辑或删除已有命令" : "添加快捷命令，无需连接服务器"}
+              >
+                <Plus size={13} />
+                <span>添加命令</span>
+              </button>
             </div>
           </>
         )}
-        <button
-          className="quick-command-collapse"
-          onClick={(event) => { event.stopPropagation(); setExpanded((value) => !value); }}
-          title={expanded ? "收起快捷命令栏" : "展开快捷命令栏"}
-          onDoubleClick={(event) => event.stopPropagation()}
-        >
-          <ChevronDown size={15} />
-        </button>
       </section>
 
       {contextMenu && items[contextMenu.slot] && (
@@ -316,7 +366,7 @@ export function QuickCommandBar({
                 <span className="modal-icon"><TerminalSquare size={18} /></span>
                 <div>
                   <h2>{editor.item ? "编辑快捷命令" : "配置快捷命令"}</h2>
-                  <p>双击空白区域添加；双击或右键已有命令进行编辑。</p>
+                  <p>命令保存在本机，无需连接即可管理；双击或右键已有命令进行编辑。</p>
                 </div>
               </div>
               <button className="icon-button" onClick={() => setEditor(null)} aria-label="关闭"><X size={18} /></button>

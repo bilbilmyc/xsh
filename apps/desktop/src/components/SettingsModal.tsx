@@ -1,9 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { open, save as saveFile } from "@tauri-apps/plugin-dialog";
-import { Check, Copy, Fingerprint, Gauge, Keyboard, Monitor, RotateCcw, Shield, TerminalSquare, Trash2, X } from "lucide-react";
+import { Bot, Check, Copy, Fingerprint, Gauge, Keyboard, Monitor, RotateCcw, Shield, TerminalSquare, Trash2, X } from "lucide-react";
 import { api } from "../api";
-import { confirmDialog } from "./DialogHost";
-import { defaultPreferences, type AccentColor, type AppPreferences, type AppTheme } from "../preferences";
+import { confirmDialog, isDialogOpen } from "./DialogHost";
+import { defaultPreferences, type AccentColor, type AppPreferences } from "../preferences";
+import { getThemeTokens, resolveTerminalTheme, THEMES } from "../themes";
+import { AiServiceSettings } from "./AiServiceSettings";
 import type { KnownHost } from "../types";
 
 interface SettingsModalProps {
@@ -11,13 +13,17 @@ interface SettingsModalProps {
   onSave: (preferences: AppPreferences) => void;
   onClose: () => void;
   onToast: (message: string) => void;
+  initialSection?: SettingsSection;
 }
 
-type SettingsPage = "appearance" | "terminal" | "transfer" | "shortcuts" | "security";
+export type SettingsSection = "appearance" | "terminal" | "transfer" | "shortcuts" | "security" | "ai";
 
-export function SettingsModal({ preferences, onSave, onClose, onToast }: SettingsModalProps) {
-  const [page, setPage] = useState<SettingsPage>("appearance");
+export function SettingsModal({ preferences, onSave, onClose, onToast, initialSection = "appearance" }: SettingsModalProps) {
+  const [page, setPage] = useState<SettingsSection>(initialSection);
   const [draft, setDraft] = useState(preferences);
+  const [aiDirty, setAiDirty] = useState(false);
+  const discardPendingRef = useRef(false);
+  const terminalPreview = resolveTerminalTheme("xsh-dark", draft.theme);
   const [knownHosts, setKnownHosts] = useState<KnownHost[]>([]);
   const [loadingHosts, setLoadingHosts] = useState(false);
   const [hostsLoaded, setHostsLoaded] = useState(false);
@@ -27,6 +33,22 @@ export function SettingsModal({ preferences, onSave, onClose, onToast }: Setting
   const [backupPassword, setBackupPassword] = useState("");
   const [backupConfirmation, setBackupConfirmation] = useState("");
   const [backupBusy, setBackupBusy] = useState(false);
+  const changePage = async (next: SettingsSection) => {
+    if (next === page || discardPendingRef.current) return;
+    discardPendingRef.current = true;
+    try {
+      if (aiDirty && !await confirmDialog({
+        title: "AI 设置尚未保存",
+        message: "离开此分类会丢弃未保存的 AI 输入。外观和终端设置的草稿会保留，已保存的 AI 配置不受影响。是否继续？",
+        confirmLabel: "丢弃 AI 输入并切换",
+      })) return;
+      setAiDirty(false);
+      setPage(next);
+    } finally {
+      discardPendingRef.current = false;
+    }
+  };
+  useEffect(() => { void changePage(initialSection); }, [initialSection]);
 
   useEffect(() => {
     if (page !== "security" || hostsLoaded || loadingHosts) return;
@@ -150,25 +172,29 @@ export function SettingsModal({ preferences, onSave, onClose, onToast }: Setting
   };
 
   const dirty = draft !== preferences;
-  const requestClose = () => {
-    if (!dirty) {
+  const requestClose = async () => {
+    if (discardPendingRef.current || isDialogOpen()) return;
+    discardPendingRef.current = true;
+    try {
+      if ((dirty || aiDirty) && !await confirmDialog({
+        title: "未保存的修改",
+        message: aiDirty
+          ? `${dirty ? "外观或终端草稿与 " : ""}AI 服务输入尚未保存，关闭后将丢弃。已保存的 AI 配置不会回滚。确定关闭吗？`
+          : "设置有未保存的修改，关闭后将丢失，确定关闭吗？",
+        confirmLabel: "丢弃修改并关闭",
+      })) return;
       onClose();
-      return;
+    } finally {
+      discardPendingRef.current = false;
     }
-    void confirmDialog({
-      title: "未保存的修改",
-      message: "设置有未保存的修改，关闭后将丢失，确定关闭吗？",
-    }).then((confirmed) => {
-      if (confirmed) onClose();
-    });
   };
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") requestClose();
+      if (event.key === "Escape") void requestClose();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [dirty]);
+  }, [dirty, aiDirty]);
 
   return (
     <div className="modal-backdrop" onMouseDown={requestClose}>
@@ -176,30 +202,37 @@ export function SettingsModal({ preferences, onSave, onClose, onToast }: Setting
         <header className="modal-header">
           <div className="modal-title-wrap">
             <span className="modal-icon"><Monitor size={18} /></span>
-            <div><h2>设置</h2><p>调整应用外观、终端、传输和服务器信任记录。</p></div>
+            <div><h2>设置</h2><p>调整外观、终端、传输、AI 服务和服务器信任记录。</p></div>
           </div>
           <button className="icon-button" onClick={requestClose} aria-label="关闭"><X size={18} /></button>
         </header>
 
         <div className="settings-layout">
           <nav className="settings-nav" aria-label="设置分类">
-            <button type="button" aria-current={page === "appearance" ? "page" : undefined} className={page === "appearance" ? "active" : ""} onClick={() => setPage("appearance")}><Monitor size={15} />外观</button>
-            <button type="button" aria-current={page === "terminal" ? "page" : undefined} className={page === "terminal" ? "active" : ""} onClick={() => setPage("terminal")}><TerminalSquare size={15} />终端</button>
-            <button type="button" aria-current={page === "transfer" ? "page" : undefined} className={page === "transfer" ? "active" : ""} onClick={() => setPage("transfer")}><Gauge size={15} />传输</button>
-            <button type="button" aria-current={page === "shortcuts" ? "page" : undefined} className={page === "shortcuts" ? "active" : ""} onClick={() => setPage("shortcuts")}><Keyboard size={15} />快捷键</button>
-            <button type="button" aria-current={page === "security" ? "page" : undefined} className={page === "security" ? "active" : ""} onClick={() => setPage("security")}><Shield size={15} />服务器指纹</button>
+            <button type="button" aria-current={page === "appearance" ? "page" : undefined} className={page === "appearance" ? "active" : ""} onClick={() => void changePage("appearance")}><Monitor size={15} />外观</button>
+            <button type="button" aria-current={page === "terminal" ? "page" : undefined} className={page === "terminal" ? "active" : ""} onClick={() => void changePage("terminal")}><TerminalSquare size={15} />终端</button>
+            <button type="button" aria-current={page === "transfer" ? "page" : undefined} className={page === "transfer" ? "active" : ""} onClick={() => void changePage("transfer")}><Gauge size={15} />传输</button>
+            <button type="button" aria-current={page === "shortcuts" ? "page" : undefined} className={page === "shortcuts" ? "active" : ""} onClick={() => void changePage("shortcuts")}><Keyboard size={15} />快捷键</button>
+            <button type="button" aria-current={page === "security" ? "page" : undefined} className={page === "security" ? "active" : ""} onClick={() => void changePage("security")}><Shield size={15} />服务器指纹</button>
+            <button type="button" aria-current={page === "ai" ? "page" : undefined} className={page === "ai" ? "active" : ""} onClick={() => void changePage("ai")}><Bot size={15} />AI 服务</button>
           </nav>
 
           <div className="settings-body settings-page">
             {page === "appearance" && (
               <>
-                <SettingsHeading title="界面主题" description="选择工作区的整体明暗与背景风格。" />
-                <div className="theme-grid">
+                <SettingsHeading title="界面主题" description="完整切换工作区与终端配色；会话单独设置的终端主题仍然优先。" />
+                <div className="theme-choice-grid" role="group" aria-label="界面主题">
                   {THEMES.map((theme) => (
-                    <button key={theme.value} className={`theme-card ${draft.theme === theme.value ? "selected" : ""}`} onClick={() => patch({ theme: theme.value })}>
-                      <span className={`theme-preview ${theme.value}`}><i /><i /><i /></span>
-                      <strong>{theme.label}</strong><small>{theme.description}</small>
-                    </button>
+                    <label key={theme.value} className={`theme-choice ${draft.theme === theme.value ? "selected" : ""}`}>
+                      <input className="theme-choice-input" type="radio" name="xsh-app-theme" value={theme.value} checked={draft.theme === theme.value} onChange={() => patch({ theme: theme.value })} />
+                      <span className="theme-choice-preview" style={getThemeTokens(theme.value, draft.accent) as CSSProperties} aria-hidden="true">
+                        <span className="theme-choice-chrome"><i /><i /><i /></span>
+                        <span className="theme-choice-sidebar"><i /><i /><i /></span>
+                        <span className="theme-choice-terminal"><span><b>$</b> ssh server</span><span className="theme-choice-success">connected</span></span>
+                      </span>
+                      <span className="theme-choice-title"><strong>{theme.label}</strong><span>{theme.scheme === "light" ? "浅色" : "深色"}</span>{draft.theme === theme.value && <Check size={13} aria-hidden="true" />}</span>
+                      <small>{theme.description}</small>
+                    </label>
                   ))}
                 </div>
 
@@ -234,9 +267,9 @@ export function SettingsModal({ preferences, onSave, onClose, onToast }: Setting
                   <RangeField label="粗体字重" value={draft.terminalFontWeightBold} min={400} max={900} step={100} suffix="" onChange={(value) => patch({ terminalFontWeightBold: value })} />
                 </div>
                 <label className="check-row terminal-profile-toggle"><input type="checkbox" checked={draft.useSessionTerminalFont} onChange={(event) => patch({ useSessionTerminalFont: event.target.checked })} />优先使用会话中单独保存的字体和字号</label>
-                <div className={`terminal-font-preview ${draft.theme}`} style={{ fontFamily: draft.terminalFontFamily, fontSize: draft.terminalFontSize, lineHeight: draft.terminalLineHeight, fontWeight: draft.terminalFontWeight }}>
-                  <div><span className="prompt">user@server</span>:<span className="path">~/projects/xsh</span>$ cargo test</div>
-                  <div className="success">test result: ok. 12 passed; 0 failed</div>
+                <div className={`terminal-font-preview ${draft.theme}`} style={{ fontFamily: draft.terminalFontFamily, fontSize: draft.terminalFontSize, lineHeight: draft.terminalLineHeight, fontWeight: draft.terminalFontWeight, background: terminalPreview.background, color: terminalPreview.foreground }}>
+                  <div><span className="prompt" style={{ color: terminalPreview.green }}>user@server</span>:<span className="path" style={{ color: terminalPreview.blue }}>~/projects/xsh</span>$ cargo test</div>
+                  <div className="success" style={{ color: terminalPreview.green }}>test result: ok. 12 passed; 0 failed</div>
                   <div>中文路径与日志显示测试：连接成功</div>
                 </div>
                 <SettingsHeading title="终端回滚缓冲区" description="控制每个终端可以向上查看的历史输出，最高支持 100 万行。" />
@@ -351,6 +384,8 @@ export function SettingsModal({ preferences, onSave, onClose, onToast }: Setting
               </>
             )}
 
+            {page === "ai" && <AiServiceSettings onToast={onToast} onDirtyChange={setAiDirty} />}
+
             {page === "security" && (
               <>
                 <SettingsHeading title="服务器指纹" description={`${knownHosts.length} 条本地信任记录`} />
@@ -379,9 +414,11 @@ export function SettingsModal({ preferences, onSave, onClose, onToast }: Setting
         </div>
 
         <footer className="modal-footer settings-footer">
-          <button className="secondary-button reset-button" onClick={() => setDraft(defaultPreferences)}><RotateCcw size={14} />恢复默认</button>
-          <button className="secondary-button" onClick={requestClose}>取消</button>
-          <button className="primary-button" onClick={save}>保存并应用</button>
+          {page === "ai" ? <><span className="settings-ai-save-note">AI 服务请使用页面内的保存按钮。</span><button className="secondary-button" onClick={requestClose}>关闭</button></> : <>
+            <button className="secondary-button reset-button" onClick={() => setDraft(defaultPreferences)}><RotateCcw size={14} />恢复默认</button>
+            <button className="secondary-button" onClick={requestClose}>取消</button>
+            <button className="primary-button" onClick={save}>保存并应用</button>
+          </>}
         </footer>
       </section>
       {backupDialog && (
@@ -518,12 +555,6 @@ const SHORTCUTS = [
   { action: "打开命令中心", description: "搜索并发送已保存命令", keys: ["macOS ⌘⇧P", "Windows Ctrl+Shift+P"] },
 ] as const;
 
-const THEMES: { value: AppTheme; label: string; description: string }[] = [
-  { value: "light", label: "浅色", description: "白色工作区" },
-  { value: "midnight", label: "深海", description: "蓝黑高对比" },
-  { value: "graphite", label: "石墨", description: "中性灰黑" },
-  { value: "dusk", label: "暮色", description: "暗紫背景" },
-];
 const ACCENTS: { value: AccentColor; label: string; color: string }[] = [
   { value: "cyan", label: "青色", color: "#39b8d6" }, { value: "blue", label: "蓝色", color: "#4f8cff" },
   { value: "green", label: "绿色", color: "#42b883" }, { value: "orange", label: "橙色", color: "#e58b45" },

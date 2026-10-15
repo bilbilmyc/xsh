@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Channel } from "@tauri-apps/api/core";
 import { FitAddon } from "@xterm/addon-fit";
@@ -6,7 +6,7 @@ import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
-import { Activity, ChevronDown, ChevronUp, Copy, Eraser, FileText, Minus, Plus, RefreshCw, Search, X } from "lucide-react";
+import { Activity, Bot, ChevronDown, ChevronUp, Copy, Minus, Plus, RefreshCw, Search, X } from "lucide-react";
 import { api } from "../api";
 import { writeClipboardText } from "../clipboard";
 import { ContextMenu } from "./ContextMenu";
@@ -18,7 +18,10 @@ import { IS_MACOS } from "../platform";
 import { confirmDialog, hostKeyDialog } from "./DialogHost";
 import { BoundedSessionLogBuffer } from "../session-log-buffer";
 import { CumulativeTerminalOutputAcknowledger } from "../terminal-output-ack";
+import { readRecentTerminalOutput } from "../terminal-context";
 import "@xterm/xterm/css/xterm.css";
+import "./terminal-pane-layout.css";
+import { resolveTerminalTheme } from "../themes";
 
 export interface TerminalCommandRequest {
   id: string;
@@ -41,6 +44,7 @@ interface TerminalPaneProps {
   onTrigger?: (event: { triggerId: string; label: string; matchedText: string }) => void;
   onEditSession?: (session: SavedSession) => void;
   onDiagnose?: (session: SavedSession) => void;
+  onAiRequest?: (mode: "explain" | "diagnose", text: string, source?: "selection" | "recent-output") => void;
 }
 
 type OutputAcknowledge = (bytes: number) => void;
@@ -65,6 +69,7 @@ export function TerminalPane({
   onTrigger,
   onEditSession,
   onDiagnose,
+  onAiRequest,
 }: TerminalPaneProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -85,11 +90,14 @@ export function TerminalPane({
   const [searchValue, setSearchValue] = useState("");
   const [searchResults, setSearchResults] = useState<{ index: number; count: number } | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+  const [selectedCharacters, setSelectedCharacters] = useState(0);
   const [authChallenge, setAuthChallenge] = useState<{ challengeId: string; prompts: Array<{ prompt: string; echo: boolean }> } | null>(null);
   const [authResponses, setAuthResponses] = useState<string[]>([]);
   const searchAddonRef = useRef<SearchAddon | null>(null);
   const [sessionLog] = useState(() => new BoundedSessionLogBuffer());
   const preferencesRef = useRef(preferences);
+  const onAiRequestRef = useRef(onAiRequest);
+  onAiRequestRef.current = onAiRequest;
   preferencesRef.current = preferences;
   const sessionFontEnabled = preferences.useSessionTerminalFont;
   const baseFontSize = sessionFontEnabled ? session.terminal.fontSize || preferences.terminalFontSize : preferences.terminalFontSize;
@@ -452,6 +460,10 @@ export function TerminalPane({
       const copy = isCopyShortcut(event);
       const paste = isPasteShortcut(event);
       const search = isSearchShortcut(event);
+      const aiShortcut = event.shiftKey && !event.altKey && event.key.toLowerCase() === "i"
+        && (isMac ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey);
+      if (aiShortcut && (isMac || preferencesRef.current.terminalShortcutMode !== "remote-first")) return false;
+      if (event.key === "F1" && !event.shiftKey && !event.altKey && !event.metaKey && !event.ctrlKey && preferencesRef.current.terminalShortcutMode !== "remote-first") return false;
       const zoomAction = getZoomAction(event);
       if (zoomAction) {
         event.preventDefault();
@@ -498,7 +510,7 @@ export function TerminalPane({
       event.preventDefault();
       event.stopImmediatePropagation();
       terminal.focus();
-      if (preferencesRef.current.rightClickAction === "paste") {
+      if (preferencesRef.current.rightClickAction === "paste" && !event.shiftKey) {
         setContextMenu(null);
         void pasteFromRightClick().catch((error) => {
           terminal.writeln(`\r\n\x1b[31m粘贴失败：${String(error)}\x1b[0m`);
@@ -569,6 +581,7 @@ export function TerminalPane({
     host.addEventListener("paste", nativePaste, true);
 
     const selectionDisposable = terminal.onSelectionChange(() => {
+      setSelectedCharacters(terminal.getSelection().length);
       if (!preferencesRef.current.copyOnSelect || !terminal.hasSelection()) return;
       if (selectionCopyTimer !== undefined) window.clearTimeout(selectionCopyTimer);
       selectionCopyTimer = window.setTimeout(() => {
@@ -1003,6 +1016,19 @@ export function TerminalPane({
     terminalRef.current?.focus();
   };
 
+  const requestAiContext = (mode: "explain" | "diagnose") => {
+    const selection = terminalRef.current?.getSelection() ?? "";
+    if (!selection.trim()) { setConnectionNotice("请先在终端选择文本，再使用 AI 解释或分析报错。"); return; }
+    onAiRequestRef.current?.(mode, selection, "selection");
+  };
+
+  const requestRecentAiContext = (mode: "explain" | "diagnose") => {
+    const terminal = terminalRef.current;
+    const text = terminal ? readRecentTerminalOutput(terminal.buffer.active) : "";
+    if (!text) { setConnectionNotice("终端还没有可用输出。连接服务器后再附加，或在 AI 面板手动粘贴。"); return; }
+    onAiRequestRef.current?.(mode, text, "recent-output");
+  };
+
   const saveLog = async () => {
     const targetPath = await save({
       title: "保存终端日志",
@@ -1058,7 +1084,11 @@ export function TerminalPane({
     if (!focused) return;
     const onShellCommand = (event: Event) => {
       const kind = (event as CustomEvent<{ kind?: string }>).detail?.kind;
-      if (kind === "copy") {
+      if (kind === "aiExplain" || kind === "aiDiagnose") {
+        requestAiContext(kind === "aiExplain" ? "explain" : "diagnose");
+      } else if (kind === "aiRecentExplain" || kind === "aiRecentDiagnose") {
+        requestRecentAiContext(kind === "aiRecentExplain" ? "explain" : "diagnose");
+      } else if (kind === "copy") {
         const selection = terminalRef.current?.getSelection();
         if (selection) void writeClipboardText(selection).catch(() => undefined);
       } else if (kind === "copyAll") {
@@ -1097,18 +1127,23 @@ export function TerminalPane({
   return (
     <div
       className={`terminal-pane ${visible ? "visible" : "hidden"} ${focused ? "focused" : ""}`}
+      style={{ "--xsh-terminal-background": terminalTheme(session.terminal.theme, preferences.theme).background } as CSSProperties}
       onPointerDownCapture={() => onFocus?.()}
     >
       <div className="terminal-toolbar" role="toolbar" aria-label="终端工具栏">
-        <button type="button" onClick={() => applyTerminalFontSize(currentFontSize - 1)} title="缩小当前终端字号（macOS ⌘- / Windows Ctrl+Shift+-）" aria-label="缩小当前终端字号"><Minus size={14} /></button>
-        <button type="button" className="terminal-font-size-reset" onClick={() => applyTerminalFontSize(preferences.useSessionTerminalFont ? session.terminal.fontSize || preferences.terminalFontSize : preferences.terminalFontSize)} title="恢复当前终端字号（macOS ⌘0 / Windows Ctrl+Shift+0）" aria-label="恢复当前终端字号">{currentFontSize}</button>
-        <button type="button" onClick={() => applyTerminalFontSize(currentFontSize + 1)} title="放大当前终端字号（macOS ⌘+ / Windows Ctrl+Shift++）" aria-label="放大当前终端字号"><Plus size={14} /></button>
-        <button type="button" onClick={openTerminalSearch} title="查找终端内容（macOS ⌘F / Windows Ctrl+Shift+F）" aria-label="查找终端内容"><Search size={14} /></button>
-        <button type="button" onClick={() => void copyAllTerminal()} title="复制全部终端内容" aria-label="复制全部终端内容"><Copy size={14} /></button>
-        <button type="button" onClick={() => void saveLog()} title="保存终端日志" aria-label="保存终端日志"><FileText size={14} /></button>
-        <button type="button" onClick={clearTerminal} title="清空本地终端屏幕" aria-label="清空本地终端屏幕"><Eraser size={14} /></button>
+        <span className="terminal-toolbar-session" title={session.name}>{selectedCharacters > 0 ? `已选 ${selectedCharacters.toLocaleString()} 字符` : session.name}</span>
+        {selectedCharacters > 0 ? <>
+          <button type="button" className="terminal-selection-action" onMouseDown={(event) => event.preventDefault()} onClick={() => requestAiContext("explain")} title="仅把当前选区送到 AI 预览，不会自动联网" aria-label="AI 解释选区"><Bot size={13} /><span>解释</span></button>
+          <button type="button" className="terminal-selection-action" onMouseDown={(event) => event.preventDefault()} onClick={() => requestAiContext("diagnose")} title="用 AI 分析选中的报错，先预览再发送" aria-label="AI 分析选中的报错"><Activity size={13} /><span>分析报错</span></button>
+          <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => void copyFromTerminal(terminalRef.current).catch(() => setConnectionNotice("复制失败，请重试。"))} title="复制当前选区" aria-label="复制当前选区"><Copy size={14} /></button>
+        </> : <>
+        <button type="button" onClick={() => applyTerminalFontSize(currentFontSize - 1)} title={`缩小当前终端字号 · ${IS_MACOS ? "⌘-" : "Ctrl+Shift+-"}`} aria-label="缩小当前终端字号"><Minus size={14} /></button>
+        <button type="button" className="terminal-font-size-reset" onClick={() => applyTerminalFontSize(preferences.useSessionTerminalFont ? session.terminal.fontSize || preferences.terminalFontSize : preferences.terminalFontSize)} title={`恢复当前终端字号 · ${IS_MACOS ? "⌘0" : "Ctrl+Shift+0"}`} aria-label="恢复当前终端字号">{currentFontSize}</button>
+        <button type="button" onClick={() => applyTerminalFontSize(currentFontSize + 1)} title={`放大当前终端字号 · ${IS_MACOS ? "⌘+" : "Ctrl+Shift++"}`} aria-label="放大当前终端字号"><Plus size={14} /></button>
+        <button type="button" onClick={() => requestAiContext("explain")} title="AI 解释选区（先预览，再发送）" aria-label="AI 解释选区"><Bot size={14} /></button>
         <button type="button" onClick={() => terminalRef.current?.scrollToBottom()} title="滚动到底部" aria-label="滚动到底部"><ChevronDown size={14} /></button>
         <button type="button" onClick={() => reconnectRef.current?.()} title="重新连接" aria-label="重新连接"><RefreshCw size={14} /></button>
+        </>}
       </div>
       {connectionError && (
         <div className="terminal-connection-error" role="alert">
@@ -1205,6 +1240,8 @@ export function TerminalPane({
               }),
             },
             { label: "查找", onClick: openTerminalSearch },
+            { label: "AI 解释选区…", onClick: () => requestAiContext("explain"), separatorBefore: true },
+            { label: "AI 分析选中的报错…", onClick: () => requestAiContext("diagnose") },
             { label: "清空屏幕", onClick: clearTerminal },
             { label: "滚到底部", onClick: () => terminalRef.current?.scrollToBottom() },
           ]}
@@ -1277,44 +1314,5 @@ function createTextDecoder(encoding: string) {
 }
 
 function terminalTheme(profileTheme: string, appTheme: AppPreferences["theme"]) {
-  const theme = profileTheme === "xsh-dark" ? appTheme : profileTheme.replace(/^xsh-/, "");
-  if (theme === "green") {
-    return {
-      background: "#07130b", foreground: "#b7f3c5", cursor: "#7ee787", cursorAccent: "#07130b",
-      selectionBackground: "#1f5d35", black: "#07130b", red: "#ff8278", green: "#7ee787",
-      yellow: "#d7e88b", blue: "#83b8ff", magenta: "#d2a8ff", cyan: "#72e0c3", white: "#d9f7df",
-      brightBlack: "#52735b", brightRed: "#ffa198", brightGreen: "#aff5b4", brightYellow: "#f2cc60",
-      brightBlue: "#a5c8ff", brightMagenta: "#e2c5ff", brightCyan: "#a5f3d5", brightWhite: "#ffffff",
-    };
-  }
-  if (theme === "blue") {
-    return {
-      background: "#07111f", foreground: "#dbeafe", cursor: "#7dd3fc", cursorAccent: "#07111f",
-      selectionBackground: "#1d4e73", black: "#07111f", red: "#ff8b80", green: "#8be9a3",
-      yellow: "#f0d58a", blue: "#7db7ff", magenta: "#d0b2ff", cyan: "#70e0ee", white: "#e2efff",
-      brightBlack: "#62758e", brightRed: "#ffb0a8", brightGreen: "#b6f5c3", brightYellow: "#ffe3a3",
-      brightBlue: "#b0d4ff", brightMagenta: "#e4d2ff", brightCyan: "#b4f4ff", brightWhite: "#ffffff",
-    };
-  }
-  if (theme === "light") {
-    return {
-      // A warm, ink-forward light palette keeps terminal output distinct from
-      // the white workspace without looking like a dark theme pasted on top.
-      background: "#fbfcfe", foreground: "#263746", cursor: "#087ea4", cursorAccent: "#fbfcfe",
-      selectionBackground: "#b8e1ee", black: "#263746", red: "#c43d3d", green: "#167a55",
-      yellow: "#946600", blue: "#1769aa", magenta: "#7b3fb2", cyan: "#087ea4", white: "#edf2f5",
-      brightBlack: "#71808b", brightRed: "#a92f36", brightGreen: "#0f6848", brightYellow: "#7d5400",
-      brightBlue: "#125a91", brightMagenta: "#642f92", brightCyan: "#05657f", brightWhite: "#15232e",
-    };
-  }
-  const background = theme === "graphite" ? "#111315" : theme === "dusk" ? "#100f18" : "#0b0f14";
-  return {
-    // Keep the dark palette crisp and saturated so ANSI output stays readable
-    // on both macOS and Windows displays. The background remains unchanged.
-    background, foreground: "#f0f4f8", cursor: "#7dd3fc", cursorAccent: background,
-    selectionBackground: "#2f6685", black: "#171d24", red: "#ff5f56", green: "#39d353",
-    yellow: "#f2c94c", blue: "#3d9bff", magenta: "#c678dd", cyan: "#22c7d6", white: "#e6edf3",
-    brightBlack: "#8b949e", brightRed: "#ff7b72", brightGreen: "#56d364", brightYellow: "#f0d264",
-    brightBlue: "#79c0ff", brightMagenta: "#d2a8ff", brightCyan: "#56d4dd", brightWhite: "#ffffff",
-  };
+  return resolveTerminalTheme(profileTheme, appTheme);
 }

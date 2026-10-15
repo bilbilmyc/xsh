@@ -1,0 +1,60 @@
+.session-row .session-status-dot {
+  width: 6px;
+  height: 6px;
+  box-sizing: border-box;
+  border: 1px solid var(--muted);
+  border-radius: 50%;
+  background: transparent;
+}
+
+.session-row .session-status-dot.connected {
+  border-color: var(--green);
+  background: var(--green);
+}
+
+.session-row .session-status-dot.connecting,
+.session-row .session-status-dot.reconnecting {
+  border-color: var(--yellow);
+  border-right-color: transparent;
+  animation: sidebar-session-connecting 900ms linear infinite;
+}
+
+.session-row .session-status-dot.waiting-network {
+  border-color: var(--yellow);
+}
+
+.session-row .session-status-dot.failed {
+  border-color: var(--red);
+  background: var(--red);
+}
+
+.sidebar-section-title > .sidebar-favorites-toggle {
+  width: 100%;
+  display: flex;
+  justify-content: flex-start;
+  gap: 5px;
+  text-align: left;
+  font: inherit;
+}
+
+.sidebar-favorites-count {
+  margin-left: auto;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.sidebar-favorites-toggle:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+@keyframes sidebar-session-connecting {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .session-row .session-status-dot.connecting,
+  .session-row .session-status-dot.reconnecting {
+    animation: none;
+  }
+}

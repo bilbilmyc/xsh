@@ -1,0 +1,261 @@
+.beginner-guide-backdrop {
+  z-index: 125;
+  padding: 24px;
+}
+
+.beginner-guide {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  width: min(780px, calc(100vw - 48px));
+  max-height: min(640px, calc(100vh - 48px));
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+}
+
+.beginner-guide-header,
+.beginner-guide-header > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.beginner-guide-header {
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.beginner-guide-header h2 {
+  margin: 0;
+  font-size: var(--font-md);
+  font-weight: 600;
+}
+
+.beginner-guide-header > div > svg {
+  color: var(--accent-strong);
+}
+
+.beginner-guide-header > div > span {
+  margin-left: 8px;
+  color: var(--muted);
+  font-size: var(--font-xs);
+}
+
+.beginner-guide-layout {
+  display: grid;
+  grid-template-columns: 176px minmax(0, 1fr);
+  min-height: 0;
+}
+
+.beginner-guide-topics {
+  min-height: 0;
+  padding: 12px 8px;
+  border-right: 1px solid var(--line);
+  overflow-y: auto;
+  background: var(--bg);
+}
+
+.beginner-guide-topics button {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 36px;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  text-align: left;
+  font-size: var(--font-sm);
+}
+
+.beginner-guide-topics button > span {
+  flex: 1;
+}
+
+.beginner-guide-topics button:hover {
+  background: var(--panel-hover);
+  color: var(--text);
+}
+
+.beginner-guide-topics button[aria-selected="true"] {
+  border-color: var(--line);
+  background: var(--accent-bg);
+  color: var(--accent-strong);
+}
+
+.beginner-guide-content {
+  min-height: 0;
+  padding: 20px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.beginner-guide-content h3 {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: var(--font-lg);
+  font-weight: 600;
+}
+
+.beginner-guide-intro,
+.beginner-guide-footnote {
+  margin: 8px 0 16px;
+  color: var(--muted);
+  font-size: var(--font-sm);
+  line-height: 1.7;
+}
+
+.beginner-guide-requirement {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
+  padding: 10px 12px;
+  border-left: 2px solid var(--accent);
+  background: var(--bg);
+  font-size: var(--font-xs);
+  line-height: 1.7;
+}
+
+.beginner-guide-requirement strong {
+  color: var(--accent-strong);
+  font-weight: 500;
+}
+
+.beginner-guide-steps {
+  display: grid;
+  gap: 16px;
+  margin: 20px 0;
+  padding-left: 22px;
+  font-size: var(--font-sm);
+}
+
+.beginner-guide-steps li {
+  padding-left: 4px;
+}
+
+.beginner-guide-steps li::marker {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.beginner-guide-steps strong {
+  font-weight: 550;
+}
+
+.beginner-guide-steps p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  line-height: 1.7;
+}
+
+.beginner-guide-next {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 16px 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--line-soft);
+  color: var(--muted);
+  font-size: var(--font-xs);
+  line-height: 1.7;
+}
+
+.beginner-guide-next > svg {
+  flex: none;
+  margin-top: 3px;
+  color: var(--accent-strong);
+}
+
+.beginner-guide-next strong {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.beginner-guide-actions,
+.beginner-guide-keys,
+.beginner-guide-keys > span {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.beginner-guide-keys {
+  margin-top: 16px;
+  gap: 8px 16px;
+  color: var(--muted);
+  font-size: var(--font-xs);
+}
+
+.beginner-guide-footnote {
+  margin: 14px 0 0;
+  font-size: var(--font-xs);
+}
+
+.beginner-guide-footer {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: var(--font-2xs);
+  line-height: 1.6;
+}
+
+.beginner-guide-footer > svg {
+  flex: none;
+  color: var(--accent-strong);
+}
+
+.beginner-guide-footer > span:last-child {
+  margin-left: auto;
+}
+
+.beginner-guide kbd {
+  border-color: var(--line);
+  background: var(--bg);
+  color: var(--text);
+}
+
+.beginner-guide button:focus-visible,
+.beginner-guide-content:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+@media (max-width: 640px) {
+  .beginner-guide-backdrop {
+    padding: 12px;
+  }
+
+  .beginner-guide {
+    width: calc(100vw - 24px);
+    max-height: calc(100vh - 24px);
+  }
+
+  .beginner-guide-layout {
+    grid-template-columns: 132px minmax(0, 1fr);
+  }
+
+  .beginner-guide-content {
+    padding: 14px;
+  }
+
+  .beginner-guide-header > div > span {
+    display: none;
+  }
+
+  .beginner-guide-topics button {
+    gap: 5px;
+    font-size: var(--font-xs);
+  }
+}

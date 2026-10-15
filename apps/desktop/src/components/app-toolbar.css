@@ -1,0 +1,23 @@
+.app-toolbar { gap: 6px; }
+.app-toolbar-group { display: flex; align-items: center; gap: 2px; flex: none; }
+.app-toolbar-group + .app-toolbar-group { border-left: 1px solid var(--line); padding-left: 6px; }
+.app-toolbar .toolbar-labelled { width: auto; display: inline-flex; gap: 5px; padding: 0 8px; white-space: nowrap; font-size: var(--font-sm); }
+.app-toolbar .toolbar-button { cursor: pointer; }
+.app-toolbar .toolbar-button:disabled { cursor: not-allowed; }
+.toolbar-overflow { position: relative; flex: none; }
+.toolbar-overflow-menu { position: absolute; z-index: 320; top: calc(100% + 6px); right: 0; width: 238px; max-height: min(65vh, 540px); overflow-y: auto; padding: 5px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-raised); box-shadow: 0 12px 32px #0005; }
+.toolbar-overflow-heading { padding: 7px 8px 4px; color: var(--muted); font-size: var(--font-2xs); }
+.toolbar-overflow-menu button { display: flex; align-items: center; gap: 9px; width: 100%; padding: 7px 8px; border: 0; border-radius: 4px; color: var(--text); background: transparent; text-align: left; font-size: var(--font-sm); cursor: pointer; }
+.toolbar-overflow-menu button:hover:not(:disabled) { background: var(--accent-bg); }
+.toolbar-overflow-menu button:disabled { opacity: .45; cursor: not-allowed; }
+.toolbar-overflow-active { margin-left: auto; color: var(--accent-strong); font-size: var(--font-2xs); }
+.app-toolbar .quick-connect { flex: 1 1 250px; width: auto; max-width: 350px; min-width: 210px; }
+.quick-connect-submit { display: grid; place-items: center; flex: none; width: 22px; height: 22px; padding: 0; border: 0; color: var(--accent-strong); background: transparent; cursor: pointer; }
+.quick-connect-submit:disabled { color: var(--faint); cursor: default; }
+.quick-connect-hint { padding: 7px 9px; color: var(--muted); font-size: var(--font-2xs); }
+.quick-connect-error { padding: 8px 9px; color: var(--red); font-size: var(--font-xs); line-height: 1.5; }
+.quick-connect .toolbar-address-suggestions { width: min(400px, calc(100vw - 24px)); }
+.quick-connect .toolbar-address-host { max-width: 195px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.quick-connect-create { border-top: 1px solid var(--line-soft); }
+@media (max-width: 1240px) { .app-toolbar .toolbar-secondary { display: none; } }
+@media (max-width: 1050px) { .app-toolbar { gap: 3px; padding-inline: 6px; } .app-toolbar .quick-connect { min-width: 200px; } }

@@ -1,3 +1,5 @@
+mod ai;
+
 #[cfg(test)]
 use chrono::Utc;
 use serde::Serialize;
@@ -698,6 +700,9 @@ async fn start_remote_desktop(
     launch_viewer: bool,
 ) -> CommandResult<RemoteDesktopLaunch> {
     profile.validate().map_err(display_error)?;
+    if let Some(reference) = profile.credential_ref.as_deref() {
+        ensure_session_credential_reference(reference)?;
+    }
     let forward = state
         .ssh
         .start_forward_profile(connection_id, profile.forward_profile())
@@ -769,14 +774,8 @@ async fn resolve_remote_desktop_credentials(
                 password: None,
             }));
     };
-    let store = Arc::clone(&state.credentials);
-    let credential_ref = credential_ref.to_owned();
-    let password = run_credential_operation(move || {
-        use xsh_security::CredentialStore as _;
-        store.get(&credential_ref).map_err(display_error)
-    })
-    .await
-    .map_err(|error| format!("XSH 读取远程桌面凭据线程异常：{error}"))?;
+    let password =
+        credential_get(Arc::clone(&state.credentials), credential_ref.to_owned()).await?;
     Ok(Some(RemoteDesktopViewerCredentials {
         username: profile.username.clone(),
         password: Some(password),
@@ -791,6 +790,9 @@ async fn start_remote_desktop_automatically(
     connection_id: ConnectionId,
     profile: &RemoteDesktopProfile,
 ) -> Result<(), String> {
+    if let Some(reference) = profile.credential_ref.as_deref() {
+        ensure_session_credential_reference(reference)?;
+    }
     let forward = ssh
         .start_forward_profile(connection_id, profile.forward_profile())
         .await
@@ -798,14 +800,8 @@ async fn start_remote_desktop_automatically(
     if profile.launch_viewer {
         let viewer_credentials = match profile.credential_ref.as_deref() {
             Some(credential_ref) => {
-                let store = Arc::clone(credentials);
-                let credential_ref = credential_ref.to_owned();
-                let password = run_credential_operation(move || {
-                    use xsh_security::CredentialStore as _;
-                    store.get(&credential_ref).map_err(display_error)
-                })
-                .await
-                .map_err(|error| format!("XSH 读取远程桌面凭据线程异常：{error}"))?;
+                let password =
+                    credential_get(Arc::clone(credentials), credential_ref.to_owned()).await?;
                 Some(RemoteDesktopViewerCredentials {
                     username: profile.username.clone(),
                     password: Some(password),
@@ -1061,6 +1057,7 @@ async fn get_remote_desktop_password(
     state: State<'_, AppState>,
     credential_ref: String,
 ) -> CommandResult<String> {
+    ensure_session_credential_reference(&credential_ref)?;
     let store = Arc::clone(&state.credentials);
     run_credential_operation(move || {
         use xsh_security::CredentialStore as _;
@@ -1578,6 +1575,15 @@ async fn export_sessions_impl(
         .flat_map(session_credential_references)
         .collect::<std::collections::BTreeSet<_>>();
     let credential_refs = credential_refs.into_iter().collect::<Vec<_>>();
+    for session in &bundle.sessions {
+        ensure_authentication_credential_namespace(&session.authentication)?;
+        if let Some(authentication) = &session.proxy_jump_authentication {
+            ensure_authentication_credential_namespace(authentication)?;
+        }
+    }
+    for reference in &credential_refs {
+        ensure_session_credential_reference(reference)?;
+    }
     let credentials = if credential_refs.is_empty() {
         Vec::new()
     } else {
@@ -1653,8 +1659,16 @@ async fn import_sessions_impl(
     // startup commands or credentials cannot leave a half-imported directory tree behind.
     for session in &bundle.sessions {
         validate_startup_command(session.startup_command.as_deref())?;
+        ensure_authentication_credential_namespace(&session.authentication)?;
+        if let Some(authentication) = &session.proxy_jump_authentication {
+            ensure_authentication_credential_namespace(authentication)?;
+        }
+        for reference in session_credential_references(session) {
+            ensure_session_credential_reference(&reference)?;
+        }
     }
     for credential in &credentials {
+        ensure_session_credential_reference(&credential.credential_ref)?;
         if credential.credential_ref.trim().is_empty() || credential.secret.is_empty() {
             return Err("会话导出文件包含无效凭据记录".into());
         }
@@ -2003,6 +2017,7 @@ async fn credential_get(
     credentials: Arc<LocalCredentialStore>,
     credential_ref: String,
 ) -> CommandResult<zeroize::Zeroizing<String>> {
+    ensure_session_credential_reference(&credential_ref)?;
     run_credential_operation(move || credentials.get(&credential_ref).map_err(display_error)).await
 }
 
@@ -2010,6 +2025,7 @@ async fn credential_delete(
     credentials: Arc<LocalCredentialStore>,
     credential_ref: String,
 ) -> CommandResult<()> {
+    ensure_session_credential_reference(&credential_ref)?;
     run_credential_mutation(move || credentials.delete(&credential_ref).map_err(display_error))
         .await
 }
@@ -2225,6 +2241,13 @@ async fn validate_session_draft(
         return Err("SSH port must be greater than zero".into());
     }
     validate_startup_command(draft.startup_command.as_deref())?;
+    if let Some(reference) = draft
+        .remote_desktop
+        .as_ref()
+        .and_then(|profile| profile.credential_ref.as_deref())
+    {
+        ensure_session_credential_reference(reference)?;
+    }
     validate_authentication_reference(
         state,
         &draft.authentication,
@@ -2360,6 +2383,7 @@ async fn validate_authentication_reference(
     previous: Option<&AuthenticationMethod>,
     label: &str,
 ) -> CommandResult<()> {
+    ensure_authentication_credential_namespace(authentication)?;
     match authentication {
         AuthenticationMethod::Password { credential_ref }
         | AuthenticationMethod::KeyboardInteractive { credential_ref } => {
@@ -2383,6 +2407,28 @@ async fn validate_authentication_reference(
                 })?;
         }
         AuthenticationMethod::PrivateKey { .. } | AuthenticationMethod::Agent { .. } => {}
+    }
+    Ok(())
+}
+
+fn ensure_session_credential_reference(reference: &str) -> CommandResult<()> {
+    if ai::is_ai_credential_reference(reference) {
+        return Err("AI API Key 仅能由 AI 服务设置管理，不能用于会话或通用凭据操作".into());
+    }
+    Ok(())
+}
+
+fn ensure_authentication_credential_namespace(
+    authentication: &AuthenticationMethod,
+) -> CommandResult<()> {
+    let reference = match authentication {
+        AuthenticationMethod::Password { credential_ref }
+        | AuthenticationMethod::KeyboardInteractive { credential_ref } => credential_ref.as_deref(),
+        AuthenticationMethod::PrivateKey { passphrase_ref, .. } => passphrase_ref.as_deref(),
+        AuthenticationMethod::Agent { .. } => None,
+    };
+    if let Some(reference) = reference {
+        ensure_session_credential_reference(reference)?;
     }
     Ok(())
 }
@@ -2427,9 +2473,14 @@ pub fn run() {
             let repository = SessionRepository::open(&database_path)?;
             let credentials =
                 LocalCredentialStore::open(&database_path, data_dir.join("xsh-vault.key"))?;
+            let credentials = Arc::new(credentials);
+            app.manage(Arc::new(ai::AiState::new(
+                data_dir.join("ai-settings.json"),
+                Arc::clone(&credentials),
+            )));
             app.manage(AppState {
                 repository: Arc::new(repository),
-                credentials: Arc::new(credentials),
+                credentials,
                 credential_lifecycle: tokio::sync::Mutex::new(()),
                 ssh: SshSessionManager::new(),
                 sftp: SftpManager::new(),
@@ -2470,6 +2521,11 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            ai::ai_get_settings,
+            ai::ai_save_settings,
+            ai::ai_complete,
+            ai::ai_stream,
+            ai::ai_cancel,
             write_text_file,
             read_text_file,
             list_groups,
@@ -2805,6 +2861,47 @@ mod tests {
             },
             directory,
         )
+    }
+
+    #[tokio::test]
+    async fn remote_desktop_resolvers_reject_ai_keys_before_viewer_or_tunnel_launch() {
+        let (state, directory) = scratch_app_state("ai-remote-desktop-isolation");
+        let reference = state
+            .credentials
+            .create(CredentialKind::AiApiKey, "ai-only-key")
+            .unwrap();
+        let profile = RemoteDesktopProfile {
+            kind: RemoteDesktopKind::Rdp,
+            transport: xsh_domain::RemoteDesktopTransport::Direct,
+            target_host: "127.0.0.1".into(),
+            target_port: None,
+            auto_start: false,
+            launch_viewer: true,
+            viewer_command: None,
+            username: Some("desktop-user".into()),
+            credential_ref: Some(reference.clone()),
+            forward_profile_id: None,
+        };
+        assert!(
+            resolve_remote_desktop_credentials(&state, &profile)
+                .await
+                .is_err()
+        );
+        let error = start_remote_desktop_automatically(
+            &state.ssh,
+            &state.credentials,
+            Uuid::new_v4(),
+            &profile,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("AI API Key"));
+        assert_eq!(
+            state.credentials.get(&reference).unwrap().as_str(),
+            "ai-only-key"
+        );
+        drop(state);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     fn export_bundle_fixture(session: SavedSession) -> SessionBundle {

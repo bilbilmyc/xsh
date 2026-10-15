@@ -1,0 +1,309 @@
+.xsh-welcome {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  padding: 32px 24px;
+  background: var(--tab-active-bg);
+  color: var(--text);
+  text-align: center;
+}
+
+.xsh-welcome-content {
+  width: min(600px, 100%);
+  margin: auto;
+}
+
+.xsh-welcome-logo {
+  display: block;
+  margin: 0 auto 16px;
+}
+
+.xsh-welcome h1 {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: var(--font-display);
+  font-weight: 550;
+}
+
+.xsh-welcome-description {
+  margin: 8px 0 20px;
+  color: var(--muted);
+  font-size: var(--font-sm);
+  line-height: 1.6;
+}
+
+.xsh-welcome-actions {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.xsh-welcome-actions button {
+  cursor: pointer;
+}
+
+.xsh-welcome-recents {
+  margin-top: 28px;
+  text-align: left;
+}
+
+.xsh-welcome-recents h2 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: var(--font-xs);
+  font-weight: 500;
+}
+
+.xsh-welcome-recents ul {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--line-soft);
+  list-style: none;
+}
+
+.xsh-welcome-recents li {
+  min-width: 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.xsh-welcome-recents li button {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 54px;
+  padding: 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.xsh-welcome-recents li button:hover {
+  background: var(--panel-hover);
+}
+
+.xsh-welcome-session-icon {
+  flex: none;
+  color: var(--muted);
+}
+
+.xsh-welcome-session-info {
+  display: grid;
+  flex: 1;
+  gap: 4px;
+  min-width: 0;
+}
+
+.xsh-welcome-session-info strong,
+.xsh-welcome-session-info small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xsh-welcome-session-info strong {
+  color: var(--text);
+  font-size: var(--font-sm);
+  font-weight: 500;
+}
+
+.xsh-welcome-session-info small {
+  color: var(--muted);
+  font-family: var(--mono-font);
+  font-size: var(--font-2xs);
+}
+
+.xsh-welcome-recents time {
+  flex: none;
+  color: var(--muted);
+  font-size: var(--font-2xs);
+  white-space: nowrap;
+}
+
+.xsh-welcome-open-icon {
+  flex: none;
+  color: var(--muted);
+}
+
+.xsh-welcome-recents li button:hover .xsh-welcome-open-icon {
+  color: var(--accent-strong);
+}
+
+.xsh-welcome-shortcuts {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin-top: 24px;
+  color: var(--muted);
+  font-size: var(--font-2xs);
+}
+
+.xsh-welcome-shortcuts > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.xsh-welcome-shortcuts kbd {
+  height: 20px;
+  border-color: var(--line);
+  background: var(--panel);
+  color: var(--muted);
+}
+
+.xsh-welcome-first-steps {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin: 20px 0 0;
+  padding: 0;
+  color: var(--muted);
+  font-size: var(--font-xs);
+  list-style: none;
+}
+
+.xsh-welcome-first-steps li {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.xsh-welcome-first-steps li > span {
+  display: inline-grid;
+  place-items: center;
+  width: 17px;
+  height: 17px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.xsh-welcome-tasks {
+  margin-top: 24px;
+  text-align: left;
+}
+
+.xsh-welcome-tasks h2 {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: var(--font-xs);
+  font-weight: 500;
+}
+
+.xsh-welcome-tasks > button {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 52px;
+  gap: 12px;
+  padding: 8px;
+  border: 0;
+  border-top: 1px solid var(--line-soft);
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  text-align: left;
+}
+
+.xsh-welcome-tasks > button:last-child {
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.xsh-welcome-tasks > button > svg {
+  flex: none;
+}
+
+.xsh-welcome-tasks > button > span {
+  display: grid;
+  flex: 1;
+  gap: 4px;
+  min-width: 0;
+}
+
+.xsh-welcome-tasks strong {
+  color: var(--text);
+  font-size: var(--font-sm);
+  font-weight: 500;
+}
+
+.xsh-welcome-tasks small {
+  color: var(--muted);
+  font-size: var(--font-xs);
+  line-height: 1.5;
+}
+
+.xsh-welcome-tasks > button:hover:not(:disabled) {
+  background: var(--panel-hover);
+  color: var(--accent-strong);
+}
+
+.xsh-welcome-tasks > button:disabled {
+  cursor: default;
+}
+
+.xsh-welcome-guide {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 16px;
+  padding: 4px;
+  border: 0;
+  background: transparent;
+  color: var(--accent-strong);
+  cursor: pointer;
+  font-size: var(--font-xs);
+}
+
+.xsh-welcome-guide > span {
+  margin-left: 4px;
+  color: var(--muted);
+}
+
+.xsh-welcome button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+@media (max-height: 760px) {
+  .xsh-welcome {
+    padding-block: 24px;
+  }
+
+  .xsh-welcome-logo {
+    width: 36px;
+    height: 36px;
+    margin-bottom: 12px;
+  }
+
+  .xsh-welcome-recents {
+    margin-top: 20px;
+  }
+
+  .xsh-welcome-recents li button {
+    min-height: 48px;
+  }
+
+  .xsh-welcome-shortcuts {
+    margin-top: 20px;
+  }
+
+  .xsh-welcome-tasks {
+    margin-top: 20px;
+  }
+}

@@ -3,6 +3,8 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow, type Window as TauriWindow } from "@tauri-apps/api/window";
 import {
   Activity,
+  Bot,
+  BookOpen,
   BellRing,
   ClipboardPaste,
   Columns2,
@@ -31,6 +33,18 @@ import { CommandCenterModal } from "./components/CommandCenterModal";
 import type { BatchCommandRun, BatchCommandTarget } from "./components/BatchCommandModal";
 import { ContextMenu } from "./components/ContextMenu";
 import { MenuBar, type MenuBarMenu } from "./components/MenuBar";
+import { AppToolbar, type ToolbarGroup } from "./components/AppToolbar";
+import { QuickConnect } from "./components/QuickConnect";
+import { WelcomePanel } from "./components/WelcomePanel";
+import { RightToolPanel } from "./components/RightToolPanel";
+import type { AiContextRequest } from "./components/AiAssistantPanel";
+import type { BeginnerGuideTopic } from "./components/BeginnerGuide";
+import type { SettingsSection } from "./components/SettingsModal";
+import { THEMES } from "./themes";
+import type { QuickConnectAddress } from "./quick-connect";
+import { recordRecentSession } from "./recent-sessions";
+import { normalizeAiTerminalCommand } from "./ai-context";
+import xshIcon from "./assets/xsh-icon.svg";
 import { colorDialog, confirmDialog, isDialogOpen, promptDialog, DialogHost } from "./components/DialogHost";
 import { GroupEditorModal } from "./components/GroupEditorModal";
 import { QuickCommandBar } from "./components/QuickCommandBar";
@@ -63,6 +77,9 @@ const RemoteDesktopPane = lazy(() =>
 const SftpPanel = lazy(() =>
   import("./components/SftpPanel").then((module) => ({ default: module.SftpPanel })),
 );
+const AiAssistantPanel = lazy(() =>
+  import("./components/AiAssistantPanel").then((module) => ({ default: module.AiAssistantPanel })),
+);
 // Infrequently used modals stay out of the initial bundle.
 const BatchCommandModal = lazy(() =>
   import("./components/BatchCommandModal").then((module) => ({ default: module.BatchCommandModal })),
@@ -78,6 +95,9 @@ const DiagnosticModal = lazy(() =>
 );
 const OnboardingModal = lazy(() =>
   import("./components/OnboardingModal").then((module) => ({ default: module.OnboardingModal })),
+);
+const BeginnerGuide = lazy(() =>
+  import("./components/BeginnerGuide").then((module) => ({ default: module.BeginnerGuide })),
 );
 const SessionBatchEditorModal = lazy(() =>
   import("./components/SessionBatchEditorModal").then((module) => ({ default: module.SessionBatchEditorModal })),
@@ -109,6 +129,7 @@ interface TerminalPaneHostProps {
   onTrigger: (tabId: string, event: { triggerId: string; label: string; matchedText: string }) => void;
   onEditSession: (session: SavedSession) => void;
   onDiagnose: (session: SavedSession) => void;
+  onAiRequest: (tabId: string, mode: "explain" | "diagnose", text: string, source?: "selection" | "recent-output") => void;
 }
 
 const TerminalPaneHost = memo(function TerminalPaneHost({
@@ -125,10 +146,12 @@ const TerminalPaneHost = memo(function TerminalPaneHost({
   onTrigger,
   onEditSession,
   onDiagnose,
+  onAiRequest,
 }: TerminalPaneHostProps) {
   const handleStateChange = useCallback((state: string) => onStateChange(tab.id, state), [onStateChange, tab.id]);
   const handleConnectionChange = useCallback((connectionId: string | null) => onConnectionChange(tab.id, connectionId), [onConnectionChange, tab.id]);
   const handleFocus = useCallback(() => onFocus(tab.id), [onFocus, tab.id]);
+  const handleAiRequest = useCallback((mode: "explain" | "diagnose", text: string, source?: "selection" | "recent-output") => onAiRequest(tab.id, mode, text, source), [onAiRequest, tab.id]);
   const handleTrigger = useCallback(
     (event: { triggerId: string; label: string; matchedText: string }) => onTrigger(tab.id, event),
     [onTrigger, tab.id],
@@ -149,6 +172,7 @@ const TerminalPaneHost = memo(function TerminalPaneHost({
       onTrigger={handleTrigger}
       onEditSession={onEditSession}
       onDiagnose={onDiagnose}
+      onAiRequest={handleAiRequest}
     />
   );
 });
@@ -162,7 +186,7 @@ const RemoteDesktopPaneHost = memo(function RemoteDesktopPaneHost({
   onConnectionChange,
   onFocus,
   onEditSession,
-}: Omit<TerminalPaneHostProps, "preferences" | "command" | "onCommandResult" | "onTrigger" | "onDiagnose">) {
+}: Omit<TerminalPaneHostProps, "preferences" | "command" | "onCommandResult" | "onTrigger" | "onDiagnose" | "onAiRequest">) {
   const handleStateChange = useCallback((state: string) => onStateChange(tab.id, state), [onStateChange, tab.id]);
   const handleConnectionChange = useCallback((connectionId: string | null) => onConnectionChange(tab.id, connectionId), [onConnectionChange, tab.id]);
   const handleFocus = useCallback(() => onFocus(tab.id), [onFocus, tab.id]);
@@ -256,7 +280,8 @@ const MAX_SPLIT_RATIO = 85;
 const MAX_CONCURRENT_CONNECTIONS = 6;
 
 function loadSplitRatio(): number {
-  const value = Number(window.localStorage.getItem(SPLIT_RATIO_STORAGE_KEY));
+  const saved = window.localStorage.getItem(SPLIT_RATIO_STORAGE_KEY);
+  const value = saved?.trim() ? Number(saved) : 50;
   return Number.isFinite(value) ? Math.min(MAX_SPLIT_RATIO, Math.max(MIN_SPLIT_RATIO, value)) : 50;
 }
 
@@ -348,7 +373,11 @@ type TerminalShellCommand =
   | "clear"
   | "saveLog"
   | "reconnect"
-  | "resetFont";
+  | "resetFont"
+  | "aiExplain"
+  | "aiDiagnose"
+  | "aiRecentExplain"
+  | "aiRecentDiagnose";
 
 /** Sends a chrome command (menu bar / toolbar) to the focused terminal pane. */
 function runTerminalAction(kind: TerminalShellCommand) {
@@ -356,13 +385,7 @@ function runTerminalAction(kind: TerminalShellCommand) {
 }
 
 function AppLogo({ size = 16 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 16 16" aria-hidden="true">
-      <rect width="16" height="16" rx="3.5" fill="#c8412f" />
-      <path d="M4.2 5.2 7 8l-2.8 2.8" stroke="#fff" strokeWidth="1.7" fill="none" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M8.6 11h3.4" stroke="#fff" strokeWidth="1.7" strokeLinecap="round" />
-    </svg>
-  );
+  return <img src={xshIcon} width={size} height={size} alt="" aria-hidden="true" />;
 }
 
 /** SFTP transfer: upload/download arrows over a two-line channel — the accent
@@ -393,98 +416,6 @@ function TaskQueueIcon({ size = 16 }: { size?: number }) {
   );
 }
 
-interface ToolbarAddressProps {
-  sessions: SavedSession[];
-  onOpenSession: (session: SavedSession) => void;
-}
-
-/** XShell-style toolbar address bar: type a host, IP or session name and hit
- * Enter to connect. Suggestions come from the saved session list. */
-function ToolbarAddress({ sessions, onOpenSession }: ToolbarAddressProps) {
-  const [value, setValue] = useState("");
-  const [focused, setFocused] = useState(false);
-  const [selected, setSelected] = useState(0);
-  const query = value.trim().toLowerCase();
-  const matches = query
-    ? sessions.filter((session) => {
-      const haystack = `${session.name} ${session.host} ${session.username}`.toLowerCase();
-      return haystack.includes(query);
-    }).slice(0, 8)
-    : [];
-  const open = focused && query.length > 0 && matches.length > 0;
-
-  const connect = (session: SavedSession) => {
-    setValue("");
-    setFocused(false);
-    onOpenSession(session);
-  };
-
-  return (
-    <div className={`toolbar-address ${open ? "open" : ""}`}>
-      <Search size={13} strokeWidth={2} />
-      <input
-        type="text"
-        value={value}
-        placeholder="主机、IP 地址或会话名称"
-        spellCheck={false}
-        aria-label="快速连接：主机、IP 地址或会话名称"
-        onChange={(event) => {
-          setValue(event.target.value);
-          setSelected(0);
-        }}
-        onFocus={(event) => {
-          setFocused(true);
-          event.target.select();
-        }}
-        onBlur={() => {
-          // Give the suggestion mousedown a beat to run before the dropdown unmounts.
-          window.setTimeout(() => setFocused(false), 120);
-        }}
-        onKeyDown={(event) => {
-          if (event.key === "Enter") {
-            event.preventDefault();
-            const target = matches[selected] ?? matches[0];
-            if (target) connect(target);
-          } else if (event.key === "ArrowDown") {
-            event.preventDefault();
-            setSelected((current) => Math.min(matches.length - 1, current + 1));
-          } else if (event.key === "ArrowUp") {
-            event.preventDefault();
-            setSelected((current) => Math.max(0, current - 1));
-          } else if (event.key === "Escape") {
-            event.preventDefault();
-            setValue("");
-            setFocused(false);
-            (event.target as HTMLInputElement).blur();
-          }
-        }}
-      />
-      {open && (
-        <div className="toolbar-address-suggestions" role="listbox">
-          {matches.map((session, index) => (
-            <button
-              key={session.id}
-              type="button"
-              role="option"
-              aria-selected={index === selected}
-              className={`toolbar-address-suggestion ${index === selected ? "selected" : ""}`}
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() => connect(session)}
-              onMouseEnter={() => setSelected(index)}
-            >
-              <span className="toolbar-address-name">{session.name}</span>
-              <span className="toolbar-address-host">
-                {session.kind === "remoteDesktop" ? "远程桌面 · " : ""}
-                {session.username}@{session.host}:{session.port}
-              </span>
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 function App() {
   const [groups, setGroups] = useState<SessionGroup[]>([]);
   const [sessions, setSessions] = useState<SavedSession[]>([]);
@@ -492,22 +423,43 @@ function App() {
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [editorSession, setEditorSession] = useState<SavedSession | null | undefined>();
   const [remoteDesktopCreateVisible, setRemoteDesktopCreateVisible] = useState(false);
+  const [quickConnectAddress, setQuickConnectAddress] = useState<QuickConnectAddress | null>(null);
   const openSshSessionEditor = () => {
+    setQuickConnectAddress(null);
     setRemoteDesktopCreateVisible(false);
     setEditorSession(null);
   };
   const openRemoteDesktopEditor = () => {
+    setQuickConnectAddress(null);
     setEditorSession(undefined);
     setRemoteDesktopCreateVisible(true);
   };
   const [groupEditor, setGroupEditor] = useState<GroupEditorState | null>(null);
   const [preferences, setPreferences] = useState<AppPreferences>(() => loadPreferences());
-  const [sftpVisible, setSftpVisible] = useState(false);
+  const [sideTool, setSideTool] = useState<"files" | "ai" | null>(null);
+  const sftpVisible = sideTool === "files";
+  const aiVisible = sideTool === "ai";
+  const setSftpVisible = (value: boolean | ((previous: boolean) => boolean)) => setSideTool((current) => {
+    const next = typeof value === "function" ? value(current === "files") : value;
+    return next ? "files" : current === "files" ? null : current;
+  });
+  const [aiContextRequest, setAiContextRequest] = useState<AiContextRequest | null>(null);
+  const [aiPanelMounted, setAiPanelMounted] = useState(false);
+  const aiRequestCounter = useRef(0);
+  useEffect(() => { if (aiVisible) setAiPanelMounted(true); }, [aiVisible]);
   const [transferManagerVisible, setTransferManagerVisible] = useState(false);
   const [portForwardVisible, setPortForwardVisible] = useState(false);
   const [remoteDesktopVisible, setRemoteDesktopVisible] = useState(false);
   const [connectionIds, setConnectionIds] = useState<Record<string, string | null>>({});
+  const connectionIdsRef = useRef(connectionIds);
+  connectionIdsRef.current = connectionIds;
   const [settingsVisible, setSettingsVisible] = useState(false);
+  const [settingsInitialSection, setSettingsInitialSection] = useState<SettingsSection>("appearance");
+  const [guideVisible, setGuideVisible] = useState(false);
+  const [guideTopic, setGuideTopic] = useState<BeginnerGuideTopic>("connect");
+  const [quickCommandsManageRequested, setQuickCommandsManageRequested] = useState(0);
+  const openSettings = (section: SettingsSection = "appearance") => { setSettingsInitialSection(section); setSettingsVisible(true); };
+  const openGuide = (topic: BeginnerGuideTopic = "connect") => { setGuideTopic(topic); setGuideVisible(true); };
   const [sshConfigVisible, setSshConfigVisible] = useState(false);
   const [sshConfigEntries, setSshConfigEntries] = useState<SshConfigEntry[]>([]);
   const [sshConfigLoading, setSshConfigLoading] = useState(false);
@@ -623,6 +575,10 @@ function App() {
     () => tabs.find((tab) => tab.id === activeTabId) ?? null,
     [activeTabId, tabs],
   );
+
+  useEffect(() => {
+    if (sideTool === "files" && (!activeTab || activeTab.session.kind === "remoteDesktop")) setSideTool(null);
+  }, [activeTab?.id, activeTab?.session.kind, sideTool]);
 
   const activityBySessionId = useMemo<Record<string, SessionActivitySummary>>(() => {
     const result: Record<string, SessionActivitySummary> = {};
@@ -847,6 +803,8 @@ function App() {
   };
 
   const handleTerminalStateChange = useCallback((tabId: string, state: string) => {
+    const previousTab = tabsRef.current.find((tab) => tab.id === tabId);
+    if (state === "connected" && previousTab && previousTab.state !== "connected") recordRecentSession(previousTab.session.id);
     setTabs((current) => {
       const stateUnchanged = current.every((tab) => tab.id !== tabId || tab.state === state);
       const canPromoteQueued = !isConnectionInFlight(state) && current.some((tab) => tab.state === "queued");
@@ -865,8 +823,35 @@ function App() {
   }, []);
 
   const handleTerminalConnectionChange = useCallback((tabId: string, connectionId: string | null) => {
+    connectionIdsRef.current = { ...connectionIdsRef.current, [tabId]: connectionId };
     setConnectionIds((current) => ({ ...current, [tabId]: connectionId }));
   }, []);
+
+  const handleAiRequest = useCallback((tabId: string, mode: "explain" | "diagnose", text: string, source: "selection" | "recent-output" = "selection") => {
+    const tab = tabsRef.current.find((candidate) => candidate.id === tabId);
+    if (!tab || tab.session.kind === "remoteDesktop") return;
+    setAiContextRequest({ id: ++aiRequestCounter.current, tabId, sessionName: tab.session.name, connectionVersion: tab.connectionVersion, connectionId: connectionIdsRef.current[tabId] ?? null, mode, text, source });
+    setSideTool("ai");
+  }, []);
+
+  const sendAiDraft = async (text: string, tabId: string, generationVersion: number, generationConnectionId: string | null) => {
+    const command = text.trim();
+    const terminalData = normalizeAiTerminalCommand(command);
+    const target = tabsRef.current.find((tab) => tab.id === tabId);
+    const connectionId = connectionIdsRef.current[tabId];
+    if (!target || target.session.kind === "remoteDesktop" || target.state !== "connected" || !connectionId) throw new Error("生成草稿时关联的 SSH 会话已断开，请重新连接后生成草稿。");
+    if (target.connectionVersion !== generationVersion || connectionId !== generationConnectionId) throw new Error("生成草稿后目标已重新连接，请重新生成并确认命令。");
+    const confirmed = await confirmDialog({
+      title: "确认发送 AI 命令",
+      message: `本次执行目标：${target.session.name}\n${target.session.username}@${target.session.host}:${target.session.port}\n仅发送到此一个会话。\n\n${command}`,
+      confirmLabel: "发送到此会话",
+    });
+    if (!confirmed) return;
+    const current = tabsRef.current.find((tab) => tab.id === tabId);
+    if (!current || current.state !== "connected" || current.connectionVersion !== target.connectionVersion || connectionIdsRef.current[tabId] !== connectionId) throw new Error("确认期间目标连接已变化，请重新检查目标后生成草稿。");
+    await api.terminalWrite(connectionId, terminalData);
+    setToast(`AI 命令已发送到“${target.session.name}”。`);
+  };
 
   const handleTerminalFocus = useCallback((tabId: string) => {
     focusTab(tabId);
@@ -1640,6 +1625,12 @@ function App() {
   // window listener dispatches through a ref and attaches once instead of
   // being removed and re-added on every tab state change and modal toggle.
   const onKeyDown = (event: KeyboardEvent) => {
+      if (event.isComposing) return;
+      if (event.key === "F1" && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey && !isDialogOpen() && editorSession === undefined && !settingsVisible && !guideVisible) {
+        event.preventDefault();
+        openGuide();
+        return;
+      }
       // On macOS, application shortcuts use Command only so Ctrl reaches the
       // remote shell unchanged. On Windows, high-conflict actions require
       // Ctrl+Shift to preserve Ctrl+T/W/B for readline, tmux, vim, and shells.
@@ -1652,8 +1643,14 @@ function App() {
       const hasOverlay = isDialogOpen() || editorSession !== undefined || settingsVisible || sshConfigVisible ||
         commandCenterVisible || historyVisible || diagnosticSession !== null || groupEditor !== null ||
         workspaceManagerVisible || sessionFileDialog !== null || connectionManagerVisible || batchEditorSessions.length > 0 || portForwardVisible || remoteDesktopVisible ||
-        batchCommandVisible || transferManagerVisible || onboardingVisible || tabContextMenu !== null;
+        batchCommandVisible || transferManagerVisible || onboardingVisible || guideVisible || tabContextMenu !== null;
       if (hasOverlay) return;
+
+      if (key === "i" && event.shiftKey && !event.altKey) {
+        event.preventDefault();
+        setSideTool("ai");
+        return;
+      }
 
       if (key === "p" && event.shiftKey && !event.altKey) {
         event.preventDefault();
@@ -1873,6 +1870,7 @@ function App() {
       items: [
         { label: "会话管理器", shortcut: "Ctrl+Shift+B", checked: sidebarVisible, onClick: toggleSidebar },
         { label: "SFTP 文件面板", checked: sftpVisible, disabled: !activeTab || activeTab.session.kind === "remoteDesktop", onClick: () => setSftpVisible((value) => !value) },
+        { label: "AI 助手", checked: aiVisible, onClick: () => setSideTool((current) => current === "ai" ? null : "ai") },
         { label: "端口转发", checked: portForwardVisible, disabled: !activeTabConnected || activeTabConnected.session.kind === "remoteDesktop", onClick: () => setPortForwardVisible((value) => !value) },
         { label: "远程桌面面板", checked: remoteDesktopVisible, disabled: !activeTabConnected, onClick: () => setRemoteDesktopVisible((value) => !value) },
         { label: "单终端", separatorBefore: true, checked: paneLayout === "single", onClick: () => updatePaneLayout("single") },
@@ -1889,6 +1887,8 @@ function App() {
         { label: "命令中心…", shortcut: "Ctrl+Shift+P", onClick: () => setCommandCenterVisible(true) },
         { label: "批量命令…", onClick: () => setBatchCommandVisible(true) },
         { label: "命令历史…", onClick: () => setHistoryVisible(true) },
+        { label: "AI 解释选区", disabled: !activeTab || activeTab.session.kind === "remoteDesktop", onClick: () => runTerminalAction("aiExplain"), separatorBefore: true },
+        { label: "AI 分析选中的报错", disabled: !activeTab || activeTab.session.kind === "remoteDesktop", onClick: () => runTerminalAction("aiDiagnose") },
         { label: "发送键盘输入到所有会话", separatorBefore: true, checked: broadcastEnabled, disabled: tabs.length === 0, onClick: () => setBroadcastEnabled((value) => !value) },
         { label: "SFTP 文件传输", checked: sftpVisible, disabled: !activeTab || activeTab.session.kind === "remoteDesktop", onClick: () => setSftpVisible((value) => !value) },
         { label: "会话自动化…", separatorBefore: true, disabled: !activeTab, onClick: () => activeTab && setEditorSession(activeTab.session) },
@@ -1902,11 +1902,9 @@ function App() {
       id: "options",
       label: "选项(O)",
       items: [
-        { label: "设置…", onClick: () => setSettingsVisible(true) },
-        { label: "主题：浅色", separatorBefore: true, checked: preferences.theme === "light", onClick: () => updatePreferences({ ...preferences, theme: "light" }) },
-        { label: "主题：午夜", checked: preferences.theme === "midnight", onClick: () => updatePreferences({ ...preferences, theme: "midnight" }) },
-        { label: "主题：石墨", checked: preferences.theme === "graphite", onClick: () => updatePreferences({ ...preferences, theme: "graphite" }) },
-        { label: "主题：暮色", checked: preferences.theme === "dusk", onClick: () => updatePreferences({ ...preferences, theme: "dusk" }) },
+        { label: "设置…", onClick: () => openSettings() },
+        { label: "AI 服务设置…", onClick: () => openSettings("ai") },
+        ...THEMES.map((theme, index) => ({ label: `主题：${theme.label}`, separatorBefore: index === 0, checked: preferences.theme === theme.value, onClick: () => updatePreferences({ ...preferences, theme: theme.value }) })),
         { label: "界面字号：增大", separatorBefore: true, disabled: preferences.uiFontSize >= 18, onClick: () => updatePreferences({ ...preferences, uiFontSize: preferences.uiFontSize + 1 }) },
         { label: "界面字号：减小", disabled: preferences.uiFontSize <= 12, onClick: () => updatePreferences({ ...preferences, uiFontSize: preferences.uiFontSize - 1 }) },
         { label: "界面字号：重置", onClick: () => updatePreferences({ ...preferences, uiFontSize: 14 }) },
@@ -1943,10 +1941,44 @@ function App() {
       id: "help",
       label: "帮助(H)",
       items: [
-        { label: "欢迎指南…", onClick: () => setOnboardingVisible(true) },
+        { label: "使用指南…", shortcut: "F1", onClick: () => openGuide() },
+        { label: "终端里使用 AI…", onClick: () => openGuide("ai") },
+        { label: "首次启动介绍…", onClick: () => setOnboardingVisible(true) },
         { label: "关于 xsh", separatorBefore: true, onClick: () => setToast("xsh — 本地优先的 SSH 客户端 · SSH2 / SFTP / 端口转发 / VNC / RDP") },
       ],
     },
+  ];
+
+  const terminalAvailable = Boolean(activeTab && activeTab.session.kind !== "remoteDesktop");
+  const toolbarGroups: ToolbarGroup[] = [
+    { label: "会话", actions: [
+      { id: "new", label: "新建", tooltip: "新建 SSH 会话", icon: <Plus size={16} />, onClick: openSshSessionEditor, showLabel: true },
+    ] },
+    { label: "终端", actions: [
+      { id: "copy", label: "复制选中内容", tooltip: `复制选中内容 · ${isMacOS() ? "⌘C" : "Ctrl+Shift+C"}`, icon: <Copy size={16} />, onClick: () => runTerminalAction("copy"), disabled: !terminalAvailable },
+      { id: "paste", label: "粘贴到终端", tooltip: `粘贴到终端 · ${isMacOS() ? "⌘V" : "Ctrl+Shift+V"}`, icon: <ClipboardPaste size={16} />, onClick: () => runTerminalAction("paste"), disabled: !terminalAvailable },
+      { id: "find", label: "查找终端内容", tooltip: `查找终端内容 · ${isMacOS() ? "⌘F" : "Ctrl+Shift+F"}`, icon: <Search size={16} />, onClick: () => runTerminalAction("find"), disabled: !terminalAvailable },
+    ] },
+    { label: "文件与命令", actions: [
+      { id: "files", label: "文件", tooltip: "SFTP 文件传输面板", icon: <TransferArrowsIcon />, onClick: () => setSftpVisible((current) => !current), disabled: !terminalAvailable, active: sftpVisible, showLabel: true },
+      { id: "commands", label: "命令中心", tooltip: `命令中心 · ${isMacOS() ? "⌘⇧P" : "Ctrl+Shift+P"}`, icon: <Command size={16} />, onClick: () => setCommandCenterVisible(true), showLabel: true },
+      { id: "ai", label: "AI 助手", tooltip: `AI 助手 · ${IS_MACOS ? "⌘⇧I" : "Ctrl+Shift+I"}`, icon: <Bot size={16} />, onClick: () => setSideTool((current) => current === "ai" ? null : "ai"), active: aiVisible, showLabel: true },
+      { id: "guide", label: "使用指南", tooltip: "按任务学习连接、传文件和 AI · F1", icon: <BookOpen size={16} />, onClick: () => openGuide(), showLabel: true },
+    ] },
+    { label: "会话与网络", secondary: true, actions: [
+      { id: "desktop", label: "新建远程桌面", icon: <ScreenShare size={16} />, onClick: openRemoteDesktopEditor },
+      { id: "transfer", label: "传输任务", icon: <TaskQueueIcon />, onClick: () => setTransferManagerVisible(true) },
+      { id: "forward", label: "端口转发", icon: <Globe2 size={16} />, onClick: () => setPortForwardVisible((current) => !current), disabled: !activeTabConnected || !terminalAvailable, active: portForwardVisible },
+      { id: "remote", label: "远程桌面", icon: <Monitor size={16} />, onClick: () => setRemoteDesktopVisible((current) => !current), disabled: !activeTabConnected, active: remoteDesktopVisible },
+      { id: "connections", label: "连接管理", tooltip: `连接管理 · 已连接 ${tabs.filter((tab) => tab.state === "connected").length}/${tabs.length}`, icon: <Activity size={16} />, onClick: () => setConnectionManagerVisible(true) },
+    ] },
+    { label: "终端与 AI 操作", secondary: true, actions: [
+      { id: "saveLog", label: "保存终端日志", icon: <FileText size={16} />, onClick: () => runTerminalAction("saveLog"), disabled: !terminalAvailable },
+      { id: "clear", label: "清空终端屏幕", icon: <Eraser size={16} />, onClick: () => runTerminalAction("clear"), disabled: !terminalAvailable },
+      { id: "history", label: "命令历史", icon: <History size={16} />, onClick: () => setHistoryVisible(true) },
+      { id: "batch", label: "批量命令", icon: <SendHorizontal size={16} />, onClick: () => setBatchCommandVisible(true) },
+      { id: "explain", label: "AI 解释选区", icon: <Bot size={16} />, onClick: () => runTerminalAction("aiExplain"), disabled: !terminalAvailable },
+    ] },
   ];
 
   return (
@@ -1957,53 +1989,9 @@ function App() {
         <WindowControls />
       </div>
       <MenuBar menus={menuBarMenus} />
-      <div className="toolbar-bar">
-        <button className="toolbar-button" onClick={openSshSessionEditor} data-tooltip="新建会话" aria-label="新建会话"><Plus size={16} /></button>
-        <button className="toolbar-button" onClick={openRemoteDesktopEditor} data-tooltip="新建 VNC/RDP 远程桌面连接（经 SSH 加密隧道）" aria-label="新建远程桌面连接"><ScreenShare size={16} /></button>
-        <span className="toolbar-group-divider" />
-        <button className="toolbar-button" onClick={() => runTerminalAction("copy")} data-tooltip="复制选中内容 · macOS ⌘C / Windows Ctrl+Shift+C" aria-label="复制选中内容"><Copy size={16} /></button>
-        <button className="toolbar-button" onClick={() => runTerminalAction("paste")} data-tooltip="粘贴到终端 · macOS ⌘V / Windows Ctrl+Shift+V" aria-label="粘贴到终端"><ClipboardPaste size={16} /></button>
-        <button className="toolbar-button" onClick={() => runTerminalAction("find")} data-tooltip="查找终端内容 · macOS ⌘F / Windows Ctrl+Shift+F" aria-label="查找终端内容"><Search size={16} /></button>
-        <span className="toolbar-group-divider" />
-        <button className="toolbar-button" onClick={() => runTerminalAction("saveLog")} data-tooltip="保存终端日志" aria-label="保存终端日志"><FileText size={16} /></button>
-        <button className="toolbar-button" onClick={() => runTerminalAction("clear")} data-tooltip="清空终端屏幕" aria-label="清空终端屏幕"><Eraser size={16} /></button>
-        <span className="toolbar-group-divider" />
-        <button
-          className={`toolbar-button ${sftpVisible ? "active" : ""}`}
-          onClick={() => setSftpVisible((value) => !value)}
-          disabled={!activeTab || activeTab.session.kind === "remoteDesktop"}
-          data-tooltip="SFTP 文件传输面板 · Alt+F"
-          aria-label="SFTP 文件传输"
-        >
-          <TransferArrowsIcon size={16} />
-        </button>
-        <button className="toolbar-button" onClick={() => setTransferManagerVisible(true)} data-tooltip="传输任务管理 · 后台上传 / 下载队列" aria-label="传输任务管理"><TaskQueueIcon size={16} /></button>
-        <button
-          className={`toolbar-button ${portForwardVisible ? "active" : ""}`}
-          onClick={() => setPortForwardVisible((value) => !value)}
-          disabled={!activeTab || !connectionIds[activeTab.id] || activeTab.session.kind === "remoteDesktop"}
-          data-tooltip="端口转发"
-          aria-label="端口转发"
-        >
-          <Globe2 size={16} />
-        </button>
-        <button
-          className={`toolbar-button ${remoteDesktopVisible ? "active" : ""}`}
-          onClick={() => setRemoteDesktopVisible((value) => !value)}
-          disabled={!activeTab || !connectionIds[activeTab.id]}
-          data-tooltip="VNC / RDP 远程桌面"
-          aria-label="VNC / RDP 远程桌面"
-        >
-          <Monitor size={16} />
-        </button>
-        <span className="toolbar-group-divider" />
-        <button className="toolbar-button command-center-trigger" onClick={() => setCommandCenterVisible(true)} data-tooltip="命令中心 · macOS ⌘⇧P / Windows Ctrl+Shift+P" aria-label="命令中心"><Command size={16} /></button>
-        <button className="toolbar-button" onClick={() => setHistoryVisible(true)} data-tooltip="命令历史" aria-label="命令历史"><History size={16} /></button>
-        <button className="toolbar-button" onClick={() => setBatchCommandVisible(true)} data-tooltip="批量命令 · 选择目标并逐会话汇总结果" aria-label="批量命令"><SendHorizontal size={16} /></button>
-        <span className="toolbar-group-divider" />
-        <button className="toolbar-button connection-manager-trigger" onClick={() => setConnectionManagerVisible(true)} data-tooltip={`连接管理 · 已连接 ${tabs.filter((tab) => tab.state === "connected").length}/${tabs.length}`} aria-label="连接管理"><Activity size={16} /></button>
-        <ToolbarAddress sessions={sessions} onOpenSession={openSession} />
-      </div>
+      <AppToolbar groups={toolbarGroups}>
+        <QuickConnect sessions={sessions} onOpen={openSession} onCreate={(address) => { openSshSessionEditor(); setQuickConnectAddress(address); }} />
+      </AppToolbar>
 
       <div className={`workspace ${sidebarVisible ? "" : "sidebar-hidden"}`}>
         {/* XShell-style split strip: the session-manager tab owns the left
@@ -2161,6 +2149,7 @@ function App() {
                   onTrigger={handleTerminalTrigger}
                   onEditSession={handleEditSession}
                   onDiagnose={runDiagnostic}
+                  onAiRequest={handleAiRequest}
                 />
                 );
               })}
@@ -2179,42 +2168,49 @@ function App() {
               />
             )}
             {!activeTab && (
-              <div className="welcome-panel">
-                <div className="welcome-glyph">$_</div>
-                <h1>选择一个会话开始连接</h1>
-                <p>从左侧目录打开服务器，或创建一个新的 SSH 会话。</p>
-                <button className="primary-button" onClick={() => setEditorSession(null)}><Plus size={15} />新建会话</button>
-                <div className="welcome-shortcuts">
-                  <span><kbd>⌘C / Ctrl⇧C</kbd>复制</span>
-                  <span><kbd>右键</kbd>安全粘贴</span>
-                  <span><kbd>⌘F / Ctrl⇧F</kbd>查找</span>
-                  <span><kbd>⌘/Ctrl</kbd><kbd>⇧</kbd><kbd>P</kbd>命令中心</span>
-                </div>
-              </div>
+              <WelcomePanel sessions={sessions} onOpen={openSession} onCreate={openSshSessionEditor} onRestoreWorkspace={() => setWorkspaceManagerVisible(true)}
+                onOpenGuide={openGuide} onOpenFiles={() => openGuide("files")} onOpenAi={() => setSideTool("ai")} />
             )}
           </div>
           <QuickCommandBar
+            manageRequested={quickCommandsManageRequested}
             items={quickCommands}
             canSend={canExecuteCommand}
             unavailableReason={commandExecutionUnavailableReason}
             targetName={activeTab?.session.name ?? null}
             terminalShortcutMode={preferences.terminalShortcutMode}
+            broadcastEnabled={broadcastEnabled}
+            broadcastTargetCount={connectedTabs.length}
             onChange={saveQuickCommands}
             onSend={sendQuickCommand}
             onToast={setToast}
           />
         </section>
 
-        {sftpVisible && activeTab && (
-          <Suspense fallback={<aside className="sftp-panel"><div className="panel-message">正在加载 SFTP…</div></aside>}>
-            <SftpPanel
-              key={activeTab.session.id}
-              session={activeTab.session}
-              globalTransferConcurrency={preferences.globalSftpTransferConcurrency}
-              onClose={() => setSftpVisible(false)}
-              onToast={setToast}
-            />
-          </Suspense>
+        {(sideTool !== null || aiPanelMounted) && (
+          <RightToolPanel tool={sideTool ?? "ai"} visible={sideTool !== null}
+            onOpenAiSettings={() => openSettings("ai")}
+            canShowFiles={Boolean(activeTab && activeTab.session.kind !== "remoteDesktop")}
+            onSelect={setSideTool} onClose={() => setSideTool(null)}>
+            {sftpVisible && activeTab && activeTab.session.kind !== "remoteDesktop" && (
+              <Suspense fallback={<div className="panel-message">正在加载 SFTP…</div>}>
+                <SftpPanel key={activeTab.session.id} session={activeTab.session}
+                  globalTransferConcurrency={preferences.globalSftpTransferConcurrency}
+                  onClose={() => setSftpVisible(false)} onToast={setToast} />
+              </Suspense>
+            )}
+            {(aiVisible || aiPanelMounted) && <div className="right-tool-page" hidden={!aiVisible}>
+              <Suspense fallback={<div className="panel-message">正在加载 AI 助手…</div>}>
+                <AiAssistantPanel
+                  openTabIds={tabs.filter((tab) => tab.session.kind !== "remoteDesktop").map((tab) => tab.id)}
+                  target={activeTab && activeTab.session.kind !== "remoteDesktop" ? { tabId: activeTab.id, name: activeTab.session.name, connectionVersion: activeTab.connectionVersion, connectionId: connectionIds[activeTab.id] ?? null, connected: activeTab.state === "connected" && Boolean(connectionIds[activeTab.id]) } : null}
+                  contextRequest={aiContextRequest} onOpenSettings={() => openSettings("ai")}
+                  onRequestSelection={(mode) => runTerminalAction(mode === "explain" ? "aiExplain" : "aiDiagnose")}
+                  onRequestRecentOutput={(mode) => runTerminalAction(mode === "explain" ? "aiRecentExplain" : "aiRecentDiagnose")}
+                  onClose={() => setSideTool(null)} onSendDraft={sendAiDraft} />
+              </Suspense>
+            </div>}
+          </RightToolPanel>
         )}
         </div>
       </div>
@@ -2276,13 +2272,15 @@ function App() {
               ? `${activeTab.session.username}@${activeTab.session.host} · ${sessions.length} 个会话`
               : `${sessions.length} 个会话 · 未连接`}
         </span>
-        <span className="status-bar-current">
+        <span className="status-bar-current" title={activeTab ? `${getTabLabel(activeTab)} · ${connectionStateLabel(activeTab.state)}` : "未选择会话"}>
           {workspaceOpening && (() => {
             const openingTabs = tabs.filter((tab) => workspaceOpening.sessionIds.includes(tab.session.id));
             const finished = openingTabs.filter((tab) => !["queued", "connecting", "reconnecting", "waiting-network", "authenticating", "awaitingHostKey"].includes(tab.state)).length;
             return `正在打开“${workspaceOpening.name}” · ${finished}/${workspaceOpening.sessionIds.length}${workspaceOpening.omitted > 0 ? ` · 跳过 ${workspaceOpening.omitted}` : ""}`;
           })()}
-          {!workspaceOpening && (activeTab ? `${getTabLabel(activeTab)} · ${connectionStateLabel(activeTab.state)}` : "未选择会话")} · 本地优先 · SSH2
+          {!workspaceOpening && (activeTab ? `${getTabLabel(activeTab)} · ${connectionStateLabel(activeTab.state)}` : "未选择会话")}
+          {activeTab && ` · ${activeTab.session.kind === "remoteDesktop" ? (activeTab.session.remoteDesktop?.kind ?? "远程桌面").toUpperCase() : "SSH2"}`}
+          {broadcastEnabled && ` · 广播 ${connectedTabs.length} 个会话`}
         </span>
       </footer>
 
@@ -2402,6 +2400,13 @@ function App() {
         />
       )}
 
+      {guideVisible && <BeginnerGuide open initialTopic={guideTopic}
+        connectedSessionName={activeTab?.state === "connected" && activeTab.session.kind !== "remoteDesktop" ? activeTab.session.name : null}
+        onClose={() => setGuideVisible(false)} onCreateSession={openSshSessionEditor}
+        onOpenFiles={() => setSftpVisible(true)} onOpenAi={() => setSideTool("ai")}
+        onOpenSettings={openSettings} onManageQuickCommands={() => setQuickCommandsManageRequested((current) => current + 1)}
+        onImportSessions={() => void importSessions()} />}
+
       {sessionFileDialog && (
         <PasswordPromptModal
           mode={sessionFileDialog.mode}
@@ -2423,6 +2428,7 @@ function App() {
           onSave={updatePreferences}
           onClose={() => setSettingsVisible(false)}
           onToast={setToast}
+          initialSection={settingsInitialSection}
         />
       )}
 
@@ -2462,7 +2468,8 @@ function App() {
             ? "remoteDesktop"
             : editorSession?.kind === "remoteDesktop" ? "remoteDesktop" : "ssh"}
           session={remoteDesktopCreateVisible ? undefined : editorSession ?? undefined}
-          onClose={() => { setEditorSession(undefined); setRemoteDesktopCreateVisible(false); }}
+          initialAddress={editorSession ? undefined : quickConnectAddress ?? undefined}
+          onClose={() => { setEditorSession(undefined); setRemoteDesktopCreateVisible(false); setQuickConnectAddress(null); }}
           onSaved={async (saved) => {
             // SessionEditor returns the fully persisted session, including the
             // new credentialRef. Replace the in-memory tab snapshot before

@@ -23,6 +23,7 @@ pub enum CredentialKind {
     Password,
     PrivateKeyPassphrase,
     KeyboardInteractive,
+    AiApiKey,
 }
 
 impl CredentialKind {
@@ -31,6 +32,7 @@ impl CredentialKind {
             Self::Password => "password",
             Self::PrivateKeyPassphrase => "key-passphrase",
             Self::KeyboardInteractive => "keyboard-interactive",
+            Self::AiApiKey => "ai-api-key",
         }
     }
 }

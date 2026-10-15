@@ -15,6 +15,7 @@ import {
   RefreshCw,
   Repeat2,
   Trash2,
+  TextCursorInput,
   X,
 } from "lucide-react";
 import { api } from "../api";
@@ -738,7 +739,7 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
     <aside className="sftp-panel">
       <header className="sftp-header">
         <div><strong>SFTP</strong><span>{session.name}</span></div>
-        <button className="icon-button" onClick={onClose}><X size={16} /></button>
+        <button className="icon-button" onClick={onClose} aria-label="关闭文件面板"><X size={16} /></button>
       </header>
       <div className="sftp-toolbar">
         <button onClick={() => connectionId && load(connectionId, parentPath())} title="上级目录">..</button>
@@ -758,7 +759,7 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
           <Pencil size={14} />
         </button>
         <button onClick={createDirectory} title="新建目录"><FolderPlus size={15} /></button>
-        <button onClick={rename} disabled={selectedEntries.length !== 1} title="重命名"><Pencil size={14} /></button>
+        <button onClick={rename} disabled={selectedEntries.length !== 1} title="重命名"><TextCursorInput size={14} /></button>
         <button onClick={remove} disabled={selectedEntries.length === 0} title="删除选中项"><Trash2 size={15} /></button>
         <button onClick={() => connectionId && load(connectionId, path)} title="刷新远程目录"><RefreshCw size={15} /></button>
       </div>

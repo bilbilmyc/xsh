@@ -1,0 +1,7 @@
+.terminal-stage .terminal-pane { display: grid; grid-template-rows: 30px minmax(0, 1fr); padding: 0; }
+.terminal-stage .terminal-toolbar { position: static; grid-row: 1; height: 30px; min-width: 0; padding: 1px 5px 1px 9px; border-bottom: 1px solid var(--line-soft); background: var(--xsh-terminal-background, var(--bg)); pointer-events: auto; }
+.terminal-toolbar-session { flex: 1; min-width: 0; overflow: hidden; color: var(--muted); font-size: var(--font-2xs); text-overflow: ellipsis; white-space: nowrap; }
+.terminal-stage .xterm-host { grid-row: 2; padding: 4px 5px 0 9px; }
+.terminal-stage .terminal-search { top: 34px; right: 7px; max-width: calc(100% - 14px); }
+.terminal-stage .terminal-search input { min-width: 0; }
+.terminal-stage .terminal-toolbar .terminal-selection-action { display: inline-flex; align-items: center; gap: 4px; width: auto; padding: 0 6px; color: var(--accent-strong); font-size: var(--font-2xs); white-space: nowrap; }

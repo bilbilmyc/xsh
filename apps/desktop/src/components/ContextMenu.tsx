@@ -45,42 +45,41 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
       onClose();
     };
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (event.key === "Escape" || event.key === "Tab") {
+        onClose();
+      } else if (event.key === "ArrowDown") {
+        setActiveIndex((current) => Math.min(items.length - 1, current + 1));
+      } else if (event.key === "ArrowUp") {
+        setActiveIndex((current) => Math.max(0, current - 1));
+      } else if (event.key === "Home") {
+        setActiveIndex(0);
+      } else if (event.key === "End") {
+        setActiveIndex(items.length - 1);
+      } else if (event.key === "Enter" || event.key === " ") {
+        const item = items[activeIndex];
+        if (item) {
+          onClose();
+          item.onClick();
+        }
+      }
     };
     window.addEventListener("pointerdown", onPointerDown);
     window.addEventListener("scroll", onClose, true);
-    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keydown", onKeyDown, true);
     return () => {
       window.removeEventListener("pointerdown", onPointerDown);
       window.removeEventListener("scroll", onClose, true);
-      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keydown", onKeyDown, true);
     };
-  }, [onClose]);
+  }, [onClose, activeIndex, items]);
 
   const runItem = (index: number) => {
     const item = items[index];
     if (!item) return;
     onClose();
     item.onClick();
-  };
-
-  const onMenuKeyDown = (event: React.KeyboardEvent) => {
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      setActiveIndex((current) => Math.min(items.length - 1, current + 1));
-    } else if (event.key === "ArrowUp") {
-      event.preventDefault();
-      setActiveIndex((current) => Math.max(0, current - 1));
-    } else if (event.key === "Home") {
-      event.preventDefault();
-      setActiveIndex(0);
-    } else if (event.key === "End") {
-      event.preventDefault();
-      setActiveIndex(items.length - 1);
-    } else if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      runItem(activeIndex);
-    }
   };
 
   return createPortal(
@@ -94,7 +93,6 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
       }}
       onPointerDown={(event) => event.stopPropagation()}
       onClick={(event) => event.stopPropagation()}
-      onKeyDown={onMenuKeyDown}
       tabIndex={-1}
       role="menu"
     >

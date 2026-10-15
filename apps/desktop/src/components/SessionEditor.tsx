@@ -19,11 +19,13 @@ import {
   type TerminalKeyMapping,
   type TerminalTrigger,
 } from "../types";
+import "./session-editor-help.css";
 
 interface SessionEditorProps {
   groups: SessionGroup[];
   sessions: SavedSession[];
   session?: SavedSession;
+  initialAddress?: { host: string; port: number; username: string };
   /** Editor flavor: remote-desktop sessions lead with VNC/RDP settings and
    * treat the SSH server purely as the encrypted transport. */
   mode?: "ssh" | "remoteDesktop";
@@ -43,6 +45,7 @@ export function SessionEditor({
   groups,
   sessions,
   session,
+  initialAddress,
   mode = "ssh",
   onClose,
   onSaved,
@@ -52,10 +55,10 @@ export function SessionEditor({
   const isRemoteDesktop = mode === "remoteDesktop" || session?.kind === "remoteDesktop";
   const existingAuthType = session?.authentication.type ?? "password";
   const existingProxyAuth = session?.proxyJumpAuthentication ?? null;
-  const [name, setName] = useState(session?.name ?? "");
-  const [host, setHost] = useState(session?.host ?? "");
-  const [port, setPort] = useState(String(session?.port ?? 22));
-  const [username, setUsername] = useState(session?.username ?? "");
+  const [name, setName] = useState(session?.name ?? initialAddress?.host ?? "");
+  const [host, setHost] = useState(session?.host ?? initialAddress?.host ?? "");
+  const [port, setPort] = useState(String(session?.port ?? initialAddress?.port ?? 22));
+  const [username, setUsername] = useState(session?.username ?? initialAddress?.username ?? "");
   const [proxyJump, setProxyJump] = useState(session?.proxyJump ?? "");
   const [proxyJumpUsername, setProxyJumpUsername] = useState(
     session?.proxyJumpUsername ?? "",
@@ -660,7 +663,7 @@ export function SessionEditor({
             <div className="section-heading"><Server size={15} />连接信息</div>
             <p className="section-description">{isRemoteDesktop
               ? "为这个远程桌面连接命名；VNC/RDP 桌面经由下方的 SSH 加密通道访问。"
-              : "先填写服务器地址和登录用户，其他选项可以稍后再配置。"}</p>
+              : "填写你已有服务器的地址和登录账号；这些信息由服务器管理员或云服务商提供。"}</p>
             <div className="form-grid">
               <label className="field field-span-2"><span>会话名称</span><input value={name} onChange={(e) => setName(e.target.value)} placeholder={isRemoteDesktop ? "机房工作站桌面" : "生产环境 API"} autoFocus /></label>
               <label className="field field-span-2"><span>所属目录</span><select value={groupId} onChange={(e) => setGroupId(e.target.value)}><option value="">未分类</option>{groups.map((group) => <option value={group.id} key={group.id}>{group.name}</option>)}</select></label>
@@ -692,6 +695,7 @@ export function SessionEditor({
           {usesSshTransport && (
           <div className="form-section">
             <div className="section-heading"><KeyRound size={15} />{isRemoteDesktop ? "SSH 服务器认证（加密通道）" : "目标主机认证"}</div>
+            <p className="section-description">{authType === "password" ? "使用服务器账号的登录密码，不是 XSH 或云平台网站的密码。" : authType === "privateKey" ? "选择保存在本机的私钥文件；公钥需已由管理员安装在服务器上。" : "使用本机 SSH Agent 已加载的密钥；不确定时可先选择密码或私钥。"}</p>
             <div className="segmented-control"><button className={authType === "password" ? "active" : ""} onClick={() => setAuthType("password")}>密码</button><button className={authType === "privateKey" ? "active" : ""} onClick={() => setAuthType("privateKey")}>SSH Key</button><button className={authType === "agent" ? "active" : ""} onClick={() => setAuthType("agent")}>SSH Agent</button></div>
             {authType === "password" ? <label className="field"><span>密码 {passwordSaved && <em className="credential-saved-badge">•••••••• 已保存</em>}</span><input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={passwordSaved ? "留空保持已保存的密码" : "请输入 SSH 密码"} autoComplete="new-password" /></label> : authType === "agent" ? <label className="field"><span>Agent 身份（可选）</span><select value={agentFingerprint} onChange={(e) => setAgentFingerprint(e.target.value)}><option value="">自动尝试 Agent 中的密钥</option>{agentKeys.map((key) => <option key={key.fingerprint} value={key.fingerprint}>{key.algorithm} · {key.fingerprint}{key.comment ? ` · ${key.comment}` : ""}{key.certificate ? " · 证书" : ""}</option>)}</select><small className="field-help">{agentLoading ? "正在读取本机 SSH Agent…" : agentKeys.length ? `已发现 ${agentKeys.length} 个 Agent 身份` : "未发现身份；保存后连接时会再次检测"}<button type="button" className="link-button" onClick={() => void refreshAgentKeys()}>刷新</button></small></label> : <div className="form-grid"><label className="field field-span-2"><span>私钥文件</span><div className="input-action-row"><input value={privateKeyPath} onChange={(e) => setPrivateKeyPath(e.target.value)} placeholder="~/.ssh/id_ed25519" /><button type="button" className="secondary-button" onClick={() => void choosePrivateKey()}>选择私钥</button></div><div className="private-key-actions"><button type="button" className="link-button private-key-directory-button" onClick={() => void openSshDirectory()}><FolderOpen size={13} />打开 ~/.ssh</button>{sshKeyDefaults?.defaultKeyPath && <button type="button" className="link-button" onClick={() => useDefaultPrivateKey()}>使用默认密钥</button>}</div><small className="field-help">选择器会默认打开 ~/.ssh，不需要在 Finder 中显示隐藏目录。</small></label><label className="field field-span-2"><span>Key Passphrase（没有则留空） {passphraseSaved && <em className="credential-saved-badge">•••••••• 已保存</em>}</span><input type="password" value={passphrase} onChange={(e) => setPassphrase(e.target.value)} placeholder={passphraseSaved ? "留空保持已保存的 Passphrase" : "没有则留空"} autoComplete="new-password" /></label></div>}
           </div>
@@ -699,8 +703,8 @@ export function SessionEditor({
 
 
           {!isRemoteDesktop && (
-          <div className="form-section session-advanced-section">
-            <div className="section-heading"><span>终端与高级</span></div>
+          <details className="form-section session-advanced-section" open={session ? true : undefined}>
+            <summary className="session-advanced-summary"><ChevronDown size={14} /><strong>高级选项</strong><span>初次连接可跳过</span></summary>
             <p className="section-description">连接后行为、终端外观和标签等低频设置按需配置。</p>
             <div className="form-grid">
               <label className="field"><span>环境</span><select value={environment} onChange={(e) => setEnvironment(e.target.value)}><option value="production">生产</option><option value="staging">预发布</option><option value="testing">测试</option><option value="development">开发</option></select></label>
@@ -753,7 +757,7 @@ export function SessionEditor({
             </details>
               <label className="field field-span-2"><span>标签（逗号分隔）</span><input value={tags} onChange={(e) => setTags(e.target.value)} placeholder="linux, api, production" /></label>
             </div>
-          </div>
+          </details>
           )}
           {isRemoteDesktop && remoteDesktopTransport === "sshTunnel" && (
             <div className="check-row"><label><input type="checkbox" checked={autoReconnect} onChange={(e) => setAutoReconnect(e.target.checked)} />断线自动重连（重连后自动恢复隧道并重新打开查看器）</label></div>
@@ -761,6 +765,7 @@ export function SessionEditor({
           {!isRemoteDesktop && (
             <div className="check-row"><label><input type="checkbox" checked={favorite} onChange={(e) => setFavorite(e.target.checked)} />加入收藏</label><label><input type="checkbox" checked={autoReconnect} onChange={(e) => setAutoReconnect(e.target.checked)} />断线自动重连</label></div>
           )}
+          {!session && !isRemoteDesktop && <p className="session-first-connection-note">首次连接会请你核对服务器指纹。请向管理员确认后再信任；「保存会话」仅保存，「保存并连接」才会开始登录。</p>}
           {error && <div className="form-error">{error}</div>}
         </div>
 

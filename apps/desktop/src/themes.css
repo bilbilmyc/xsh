@@ -1,0 +1,163 @@
+:root[data-scheme="light"] { color-scheme: light; }
+:root[data-scheme="dark"] { color-scheme: dark; }
+
+.theme-choice-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(164px, 1fr));
+  gap: 10px;
+}
+
+.theme-choice {
+  position: relative;
+  display: block;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  cursor: pointer;
+}
+
+.theme-choice:hover { border-color: var(--muted); }
+.theme-choice.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.theme-choice:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+.theme-choice-input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.theme-choice-preview { display: grid; height: 68px; grid-template-columns: 24% minmax(0, 1fr); grid-template-rows: 12px minmax(0, 1fr); overflow: hidden; border: 1px solid var(--line-soft); border-radius: 3px; background: var(--bg); }
+.theme-choice-chrome { grid-column: 1 / -1; display: flex; align-items: center; gap: 3px; padding: 0 5px; background: var(--chrome); }
+.theme-choice-chrome i { width: 3px; height: 3px; border-radius: 50%; background: var(--muted); }
+.theme-choice-sidebar { display: grid; align-content: start; gap: 5px; padding: 8px 4px; background: var(--panel); }
+.theme-choice-sidebar i { height: 3px; border-radius: 1px; background: var(--muted); opacity: .55; }
+.theme-choice-sidebar i:first-child { background: var(--accent); opacity: 1; }
+.theme-choice-terminal { display: grid; align-content: start; gap: 4px; min-width: 0; padding: 8px; background: var(--theme-terminal-background); color: var(--theme-terminal-foreground); font: 10px/1.4 var(--mono-font); white-space: nowrap; }
+.theme-choice-terminal b { color: var(--accent); font-weight: 500; }
+.theme-choice-success { color: var(--theme-terminal-green); }
+.theme-choice-title { display: flex; align-items: center; gap: 6px; margin-top: 8px; color: var(--text); }
+.theme-choice-title strong { flex: 1; font-size: var(--font-sm); font-weight: 550; }
+.theme-choice-title > span { color: var(--muted); font-size: var(--font-2xs); }
+.theme-choice-title svg { flex: none; color: var(--accent-strong); }
+.theme-choice > small { display: block; margin-top: 4px; color: var(--muted); font-size: var(--font-2xs); line-height: 1.5; }
+.settings-ai-save-note { margin-right: auto; color: var(--muted); font-size: var(--font-xs); }
+.settings-modal .terminal-font-preview .prompt,
+.settings-modal .terminal-font-preview .success { color: var(--theme-terminal-green); }
+.settings-modal .terminal-font-preview .path { color: var(--theme-terminal-blue); }
+
+:root[data-palette="extended"] :is(.app-shell, .terminal-workspace, .terminal-stage, .rd-pane, .settings-body, .settings-page) {
+  background: var(--bg);
+  color: var(--text);
+}
+
+:root[data-palette="extended"] :is(.title-bar, .menu-bar, .toolbar-bar, .modal-header, .sftp-header, .rd-pane-header) {
+  background: var(--chrome);
+  border-color: var(--line-soft);
+  color: var(--text);
+}
+
+:root[data-palette="extended"] :is(.tab-bar, .sidebar-pin-tab, .status-bar, .session-sidebar, .settings-nav, .modal-footer, .settings-footer, .sftp-pane-label, .sftp-transfer-rail, .connection-manager-actions, .quick-command-bar) {
+  background: var(--chrome-raised);
+  border-color: var(--line-soft);
+  color: var(--muted);
+}
+
+:root[data-palette="extended"] :is(.settings-modal, .session-editor, .group-editor-modal, .command-center-modal, .command-history-modal, .quick-command-editor-modal, .connection-manager-modal, .diagnostic-modal, .port-forward-modal, .backup-dialog, .sftp-sync-modal, .batch-command-modal, .onboarding-modal, .upload-conflict-modal, .dialog-card, .auth-challenge-card, .context-menu, .menu-dropdown, .toolbar-overflow-menu, .toolbar-address-suggestions, .toast) {
+  background: var(--panel-raised);
+  border-color: var(--line);
+  color: var(--text);
+}
+
+:root[data-palette="extended"] :is(.form-section, .font-preview, .known-host-card, .forward-config-card, .forward-running-card, .rd-card, .remote-edit-card, .sftp-browser, .remote-list, .transfer-list, .command-card, .session-batch-toolbar, .connection-manager-row, .shortcut-row, .terminal-search, .quick-command-button, .command-history-item, .batch-command-compose, .batch-command-results) {
+  background: var(--panel);
+  border-color: var(--line-soft);
+  color: var(--text);
+}
+
+:root[data-palette="extended"] :is(.sftp-panel, .sftp-browser-pane, .right-tool-panel, .ai-panel) {
+  background: var(--panel);
+  border-color: var(--line);
+  color: var(--text);
+}
+
+:root[data-palette="extended"] :is(.title-bar-text, .menu-bar-title > button, .terminal-tab, .session-row, .group-row, .group-toggle, .ungrouped-title, .sftp-browser-head strong, .quick-command-title, .remote-entry, .field, .check-row, .settings-nav button, .accent-picker button, .menu-item, .context-menu-item, .command-card-title, .dialog-message) {
+  color: var(--text);
+}
+
+:root[data-palette="extended"] :is(.modal-title-wrap h2, .modal-title-wrap strong, .settings-section-title, .settings-heading strong, .session-row-copy strong, .known-host-heading strong, .rd-pane-title strong, .rd-card-heading strong, .dialog-card h3) {
+  color: var(--text-strong);
+}
+
+:root[data-palette="extended"] :is(.sidebar-section-title, .sidebar-hint, .sidebar-search, .settings-heading span, .settings-tip, .field-help, .modal-title-wrap p, .modal-title-wrap small, .section-description, .sftp-header span, .sftp-toolbar, .sftp-selection-summary, .sftp-browser-head small, .sftp-pane-label, .remote-entry-size, .transfer-copy small, .transfer-copy span, .remote-edit-copy small, .remote-edit-copy strong, .known-host-meta, .known-host-heading small, .rd-pane-title small, .rd-card-heading span, .rd-hint, .connection-manager-summary, .connection-manager-row-copy small, .shortcut-row small, .quick-command-help, .quick-command-collapse, .toolbar-address-host) {
+  color: var(--muted);
+}
+
+:root[data-palette="extended"] :is(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), select, textarea, .command-search, .toolbar-address, .remote-path, .dialog-input) {
+  color: var(--text-strong);
+  background: var(--control-bg);
+  border-color: var(--control-border);
+}
+
+:root[data-palette="extended"] :is(input, textarea)::placeholder { color: var(--faint); }
+:root[data-palette="extended"] :is(input, select, textarea):hover { border-color: var(--muted); }
+:root[data-palette="extended"] :is(input, select, textarea):focus { border-color: var(--accent); }
+:root[data-palette="extended"] .toolbar-address input { background: transparent; border-color: transparent; box-shadow: none; }
+:root[data-palette="extended"] input[type="range"] { background: transparent; }
+:root[data-palette="extended"] input[type="checkbox"] { accent-color: var(--accent); }
+
+:root[data-palette="extended"] :is(.icon-button, .secondary-button, .sftp-toggle, .toolbar-button, .terminal-toolbar button, .pane-controls button, .sftp-toolbar button, .sftp-pane-label button, .sftp-transfer-rail button, .remote-entry > button, .transfer-item > button, .transfer-list-actions button, .transfer-actions button, .session-batch-toolbar button, .remote-edit-actions button, .forward-item-actions button, .connection-manager-row-actions button, .tab-new-button, .group-more, .color-clear) {
+  color: var(--control-text);
+  background: var(--control-bg-soft);
+  border-color: var(--control-border);
+}
+
+:root[data-palette="extended"] :is(.toolbar-button, .tab-new-button, .group-more, .menu-bar-title > button) { background: transparent; }
+
+:root[data-palette="extended"] :is(.icon-button, .secondary-button, .sftp-toggle, .toolbar-button, .terminal-toolbar button, .pane-controls button, .sftp-toolbar button, .sftp-pane-label button, .sftp-transfer-rail button, .remote-entry > button, .transfer-item > button, .transfer-list-actions button, .transfer-actions button, .session-batch-toolbar button, .remote-edit-actions button, .forward-item-actions button, .connection-manager-row-actions button, .tab-new-button, .group-more, .color-clear):hover:not(:disabled) {
+  color: var(--control-text-strong);
+  background: var(--control-bg-hover);
+  border-color: var(--control-border-hover);
+}
+
+:root[data-palette="extended"] :is(.primary-button, .primary-button:hover:not(:disabled)) {
+  color: var(--accent-contrast);
+  background: var(--accent);
+  border-color: var(--accent-strong);
+  box-shadow: none;
+}
+
+:root[data-palette="extended"] :is(.danger-button, .forward-stop-button) {
+  color: var(--danger-text);
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
+}
+
+:root[data-palette="extended"] :is(.danger-button, .forward-stop-button):hover:not(:disabled) { background: var(--danger-bg-hover); }
+
+:root[data-palette="extended"] :is(.session-row, .group-row, .connection-manager-row, .remote-entry, .shortcut-row, .terminal-tab, .menu-item, .context-menu-item):hover {
+  color: var(--text-strong);
+  background: var(--panel-hover);
+}
+
+:root[data-palette="extended"] :is(.session-row.active, .session-row.selected, .group-row.active, .remote-entry.selected, .settings-nav button.active, .pane-controls button.active, .toolbar-button.active, .accent-picker button.selected, .menu-item.active, .context-menu-item.active) {
+  color: var(--accent-strong);
+  background: var(--accent-bg);
+  border-color: var(--accent);
+}
+
+:root[data-palette="extended"] .terminal-tab.active { color: var(--text-strong); background: var(--tab-active-bg); border-color: var(--line); }
+:root[data-palette="extended"] .terminal-toolbar { background: var(--xsh-terminal-background); }
+:root[data-palette="extended"] :is(.terminal-search, .terminal-search input, .terminal-search button) { color: var(--text); }
+:root[data-palette="extended"] .terminal-search input { background: transparent; }
+:root[data-palette="extended"] :is(kbd, .session-tab-count, .credential-saved-badge) { color: var(--muted); background: var(--panel); border-color: var(--line); }
+:root[data-palette="extended"] :is(pre, .known-host-fingerprint code, .host-key-fingerprint) { color: var(--text); background: var(--bg); border-color: var(--line-soft); }
+:root[data-palette="extended"] :is(.security-note, .settings-tip.warning, .upload-conflict-warning, .ai-warning) { color: var(--text); background: var(--panel); border-color: var(--yellow); }
+:root[data-palette="extended"] :is(.panel-error, .connection-error-copy strong, .transfer-status.failed, .context-menu-item.danger, .dialog-card .danger) { color: var(--red); }
+:root[data-palette="extended"] :is(.panel-error, .terminal-connection-error) { background: var(--danger-bg); border-color: var(--danger-border); color: var(--danger-text); }
+:root[data-palette="extended"] :is(.transfer-status.completed, .forward-health.running) { color: var(--green); }
+:root[data-palette="extended"] :is(.transfer-status.queued, .forward-health.unknown) { color: var(--yellow); }
+:root[data-palette="extended"] :is(.transfer-status.running, .session-activity-dot.connected) { color: var(--accent-strong); }
+:root[data-palette="extended"] .progress-track { background: var(--line-soft); }
+:root[data-palette="extended"] .progress-track > div { background: var(--accent); }
+:root[data-palette="extended"] .transfer-limit-switch span { background: var(--panel-active); border-color: var(--line); }
+:root[data-palette="extended"] .transfer-limit-switch span::after { background: var(--muted); }
+:root[data-palette="extended"] .transfer-limit-switch input:checked + span { background: var(--accent-bg); border-color: var(--accent); }
+:root[data-palette="extended"] .transfer-limit-switch input:checked + span::after { background: var(--accent); }
+:root[data-palette="extended"] [data-tooltip]::after { color: var(--text-strong); background: var(--panel-raised); border-color: var(--line); }
+:root[data-palette="extended"][data-scheme="light"] :is(.modal-backdrop, .command-center-backdrop, .connection-manager-backdrop, .quick-command-modal-backdrop, .backup-dialog-backdrop, .upload-conflict-backdrop) { background: #25334344; }
