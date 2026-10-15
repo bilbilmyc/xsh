@@ -50,7 +50,23 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Lint Rust
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        shell: bash
+        env:
+          CARGO_TERM_COLOR: never
+        run: |
+          echo "::add-matcher::.github/clippy-matcher.json"
+          cargo clippy --workspace --all-targets -- -D warnings 2>&1 | tee clippy.log
+          exit ${PIPESTATUS[0]}
+
+      - name: Summarize lint failures
+        if: failure()
+        shell: bash
+        run: |
+          test -f clippy.log || exit 0
+          grep -aE "^(error|thread '.+' panicked)" clippy.log | head -40 | while IFS= read -r line; do
+            echo "::error::${line}"
+          done
+          exit 0
 
       - name: Test Rust workspace
         run: cargo test --workspace

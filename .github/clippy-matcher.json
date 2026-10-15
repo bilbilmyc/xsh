@@ -1,0 +1,37 @@
+{
+  "problemMatcher": [
+    {
+      "owner": "clippy",
+      "pattern": [
+        {
+          "regexp": "^error(?:\\[[A-Z\\d]+\\])?: (.*)$",
+          "message": 1
+        },
+        {
+          "regexp": "^\\s+-->\\s+([^:]+):(\\d+):(\\d+)$",
+          "file": 1,
+          "line": 2,
+          "column": 3
+        }
+      ]
+    },
+    {
+      "owner": "cargo",
+      "pattern": [
+        {
+          "regexp": "^(error: could not compile .+)$",
+          "message": 1
+        }
+      ]
+    },
+    {
+      "owner": "rustc-panic",
+      "pattern": [
+        {
+          "regexp": "^(thread '[^']+' panicked at .+)$",
+          "message": 1
+        }
+      ]
+    }
+  ]
+}
