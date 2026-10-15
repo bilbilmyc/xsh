@@ -746,9 +746,13 @@ async fn open_remote_desktop_viewer(
 }
 
 /// Login identity for the desktop itself (VNC password / RDP account),
-/// decrypted from the XSH credential vault only at launch time.
+/// decrypted from the XSH credential vault only at launch time. The fields
+/// are read solely by the Windows promptless-mstsc path, so other targets
+/// never touch them.
 struct RemoteDesktopViewerCredentials {
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     username: Option<String>,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     password: Option<zeroize::Zeroizing<String>>,
 }
 
