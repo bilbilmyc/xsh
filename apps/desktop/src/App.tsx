@@ -36,6 +36,7 @@ import { MenuBar, type MenuBarMenu } from "./components/MenuBar";
 import { AppToolbar, type ToolbarGroup } from "./components/AppToolbar";
 import { QuickConnect } from "./components/QuickConnect";
 import { WelcomePanel } from "./components/WelcomePanel";
+import { WorkspaceStatusBar } from "./components/WorkspaceStatusBar";
 import { RightToolPanel } from "./components/RightToolPanel";
 import type { AiContextRequest } from "./components/AiAssistantPanel";
 import type { BeginnerGuideTopic } from "./components/BeginnerGuide";
@@ -44,6 +45,7 @@ import { THEMES } from "./themes";
 import type { QuickConnectAddress } from "./quick-connect";
 import { recordRecentSession } from "./recent-sessions";
 import { normalizeAiTerminalCommand } from "./ai-context";
+import { AI_SETTINGS_CHANGED_EVENT } from "./ai-ui";
 import xshIcon from "./assets/xsh-icon.svg";
 import { colorDialog, confirmDialog, isDialogOpen, promptDialog, DialogHost } from "./components/DialogHost";
 import { GroupEditorModal } from "./components/GroupEditorModal";
@@ -444,6 +446,14 @@ function App() {
     return next ? "files" : current === "files" ? null : current;
   });
   const [aiContextRequest, setAiContextRequest] = useState<AiContextRequest | null>(null);
+  useEffect(() => {
+    const clearPendingContext = () => setAiContextRequest(null);
+    window.addEventListener(AI_SETTINGS_CHANGED_EVENT, clearPendingContext);
+    return () => window.removeEventListener(AI_SETTINGS_CHANGED_EVENT, clearPendingContext);
+  }, []);
+  useEffect(() => {
+    setAiContextRequest((current) => current && !tabs.some((tab) => tab.id === current.tabId) ? null : current);
+  }, [tabs]);
   const [aiPanelMounted, setAiPanelMounted] = useState(false);
   const aiRequestCounter = useRef(0);
   useEffect(() => { if (aiVisible) setAiPanelMounted(true); }, [aiVisible]);
@@ -1985,7 +1995,7 @@ function App() {
     <main className="app-shell">
       <div className="title-bar" data-tauri-drag-region>
         <span className="title-bar-logo"><AppLogo /></span>
-        <span className="title-bar-text">{activeTab ? `${getTabLabel(activeTab)} - xsh` : "xsh"}</span>
+        <span className="title-bar-text">{activeTab ? `${getTabLabel(activeTab)} · XSH` : "XSH"}</span>
         <WindowControls />
       </div>
       <MenuBar menus={menuBarMenus} />
@@ -2205,6 +2215,7 @@ function App() {
                   openTabIds={tabs.filter((tab) => tab.session.kind !== "remoteDesktop").map((tab) => tab.id)}
                   target={activeTab && activeTab.session.kind !== "remoteDesktop" ? { tabId: activeTab.id, name: activeTab.session.name, connectionVersion: activeTab.connectionVersion, connectionId: connectionIds[activeTab.id] ?? null, connected: activeTab.state === "connected" && Boolean(connectionIds[activeTab.id]) } : null}
                   contextRequest={aiContextRequest} onOpenSettings={() => openSettings("ai")}
+                  onContextConsumed={(requestId) => setAiContextRequest((current) => current?.id === requestId ? null : current)}
                   onRequestSelection={(mode) => runTerminalAction(mode === "explain" ? "aiExplain" : "aiDiagnose")}
                   onRequestRecentOutput={(mode) => runTerminalAction(mode === "explain" ? "aiRecentExplain" : "aiRecentDiagnose")}
                   onClose={() => setSideTool(null)} onSendDraft={sendAiDraft} />
@@ -2264,25 +2275,27 @@ function App() {
         );
       })()}
 
-      <footer className="status-bar">
-        <span>
-          {loading
-            ? "加载会话…"
-            : activeTab
-              ? `${activeTab.session.username}@${activeTab.session.host} · ${sessions.length} 个会话`
-              : `${sessions.length} 个会话 · 未连接`}
-        </span>
-        <span className="status-bar-current" title={activeTab ? `${getTabLabel(activeTab)} · ${connectionStateLabel(activeTab.state)}` : "未选择会话"}>
-          {workspaceOpening && (() => {
-            const openingTabs = tabs.filter((tab) => workspaceOpening.sessionIds.includes(tab.session.id));
-            const finished = openingTabs.filter((tab) => !["queued", "connecting", "reconnecting", "waiting-network", "authenticating", "awaitingHostKey"].includes(tab.state)).length;
-            return `正在打开“${workspaceOpening.name}” · ${finished}/${workspaceOpening.sessionIds.length}${workspaceOpening.omitted > 0 ? ` · 跳过 ${workspaceOpening.omitted}` : ""}`;
-          })()}
-          {!workspaceOpening && (activeTab ? `${getTabLabel(activeTab)} · ${connectionStateLabel(activeTab.state)}` : "未选择会话")}
-          {activeTab && ` · ${activeTab.session.kind === "remoteDesktop" ? (activeTab.session.remoteDesktop?.kind ?? "远程桌面").toUpperCase() : "SSH2"}`}
-          {broadcastEnabled && ` · 广播 ${connectedTabs.length} 个会话`}
-        </span>
-      </footer>
+      <WorkspaceStatusBar
+        loading={loading}
+        connection={activeTab ? {
+          name: getTabLabel(activeTab),
+          endpoint: activeTab.session.kind === "remoteDesktop"
+            ? activeTab.session.remoteDesktop?.targetHost ?? activeTab.session.host
+            : `${activeTab.session.username}@${activeTab.session.host}:${activeTab.session.port}`,
+          state: activeTab.state,
+          label: connectionStateLabel(activeTab.state),
+          protocol: activeTab.session.kind === "remoteDesktop" ? (activeTab.session.remoteDesktop?.kind ?? "远程桌面").toUpperCase() : "SSH2",
+        } : null}
+        openCount={tabs.length}
+        connectedCount={connectedTabs.length}
+        broadcastCount={broadcastEnabled ? connectedTabs.length : null}
+        workspace={workspaceOpening ? {
+          name: workspaceOpening.name,
+          finished: tabs.filter((tab) => workspaceOpening.sessionIds.includes(tab.session.id) && !["queued", "connecting", "reconnecting", "waiting-network", "authenticating", "awaitingHostKey"].includes(tab.state)).length,
+          total: workspaceOpening.sessionIds.length,
+          omitted: workspaceOpening.omitted,
+        } : null}
+      />
 
       <Suspense fallback={null}>
       {connectionManagerVisible && (

@@ -29,6 +29,9 @@ export function readRecentTerminalOutput(buffer: TerminalContextBuffer, maximumL
     if (logicalBytes > AI_CONTEXT_BYTES) oversized = true;
     const last = logicalLines.length - 1;
     logicalLines[last] = oversized ? "[已省略超过16 KiB的完整输出行]" : logicalLines[last] + text;
+    if (index === end && buffer.getLine(index + 1)?.isWrapped) {
+      logicalLines.pop();
+    }
   }
   const lines: string[] = [];
   let remainingBytes = AI_CONTEXT_BYTES;

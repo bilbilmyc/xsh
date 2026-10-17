@@ -45,12 +45,13 @@ const LEGACY_DEFAULT_TERMINAL_FONT_SIZE = 14;
 // v1.17 shipped a 15px UI baseline and 700-weight terminal bold; the defaults
 // were slimmed to 14px / 400 in v1.18.
 const LEGACY_DEFAULT_UI_FONT_SIZE = 15;
+const LEGACY_DEFAULT_UI_FONT_FAMILY = '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif';
 const LEGACY_DEFAULT_TERMINAL_FONT_WEIGHT_BOLD = 700;
 
 export const defaultPreferences: AppPreferences = {
   theme: "midnight",
   accent: "cyan",
-  uiFontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
+  uiFontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "PingFang SC", "Microsoft YaHei", sans-serif',
   uiFontSize: 14,
   terminalFontFamily: '"Cascadia Mono", "Cascadia Code", "SFMono-Regular", "SF Mono", Menlo, Consolas, "Courier New", monospace',
   terminalFontSize: 15,
@@ -76,6 +77,9 @@ export function loadPreferences(): AppPreferences {
     if (!stored) return defaultPreferences;
     const parsed = JSON.parse(stored) as Partial<AppPreferences>;
     const merged = { ...defaultPreferences, ...parsed };
+    if (parsed.uiFontFamily === LEGACY_DEFAULT_UI_FONT_FAMILY) {
+      merged.uiFontFamily = defaultPreferences.uiFontFamily;
+    }
     const hasFontWeightPreferences =
       parsed.terminalFontWeight !== undefined || parsed.terminalFontWeightBold !== undefined;
     const hasLegacyTerminalDefaults =

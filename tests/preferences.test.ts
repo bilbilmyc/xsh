@@ -70,6 +70,16 @@ test("normalizes SFTP concurrency in global then per-host order", () => {
   assert.equal(fallback.perHostSftpTransferConcurrency, 2);
 });
 
+test("upgrades the default UI font stack without replacing a custom font", () => {
+  const storage = createStorage({
+    "xsh.preferences.v1": JSON.stringify({ uiFontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif' }),
+  });
+  (globalThis as { localStorage?: unknown }).localStorage = storage;
+  assert.equal(loadPreferences().uiFontFamily, defaultPreferences.uiFontFamily);
+  storage.setItem("xsh.preferences.v1", JSON.stringify({ uiFontFamily: '"Custom UI", sans-serif' }));
+  assert.equal(loadPreferences().uiFontFamily, '"Custom UI", sans-serif');
+});
+
 test("normalizes unlimited and bounded aggregate bandwidth values", () => {
   const normalized = normalizePreferences({
     ...defaultPreferences,

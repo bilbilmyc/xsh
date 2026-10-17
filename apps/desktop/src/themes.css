@@ -52,7 +52,7 @@
   color: var(--text);
 }
 
-:root[data-palette="extended"] :is(.tab-bar, .sidebar-pin-tab, .status-bar, .session-sidebar, .settings-nav, .modal-footer, .settings-footer, .sftp-pane-label, .sftp-transfer-rail, .connection-manager-actions, .quick-command-bar) {
+:root[data-palette="extended"] :is(.tab-bar, .sidebar-pin-tab, .session-sidebar, .settings-nav, .modal-footer, .settings-footer, .sftp-pane-label, .sftp-transfer-rail, .connection-manager-actions, .quick-command-bar) {
   background: var(--chrome-raised);
   border-color: var(--line-soft);
   color: var(--muted);
@@ -84,7 +84,7 @@
   color: var(--text-strong);
 }
 
-:root[data-palette="extended"] :is(.sidebar-section-title, .sidebar-hint, .sidebar-search, .settings-heading span, .settings-tip, .field-help, .modal-title-wrap p, .modal-title-wrap small, .section-description, .sftp-header span, .sftp-toolbar, .sftp-selection-summary, .sftp-browser-head small, .sftp-pane-label, .remote-entry-size, .transfer-copy small, .transfer-copy span, .remote-edit-copy small, .remote-edit-copy strong, .known-host-meta, .known-host-heading small, .rd-pane-title small, .rd-card-heading span, .rd-hint, .connection-manager-summary, .connection-manager-row-copy small, .shortcut-row small, .quick-command-help, .quick-command-collapse, .toolbar-address-host) {
+:root[data-palette="extended"] :is(.sidebar-section-title, .sidebar-search, .settings-heading span, .settings-tip, .field-help, .modal-title-wrap p, .modal-title-wrap small, .section-description, .sftp-header span, .sftp-toolbar, .sftp-selection-summary, .sftp-browser-head small, .sftp-pane-label, .remote-entry-size, .transfer-copy small, .transfer-copy span, .remote-edit-copy small, .remote-edit-copy strong, .known-host-meta, .known-host-heading small, .rd-pane-title small, .rd-card-heading span, .rd-hint, .connection-manager-summary, .connection-manager-row-copy small, .shortcut-row small, .quick-command-help, .quick-command-collapse, .toolbar-address-host) {
   color: var(--muted);
 }
 

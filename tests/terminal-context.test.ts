@@ -44,6 +44,17 @@ test("a window starting inside a soft wrap drops the incomplete logical line", (
   assert.ok(huge.endsWith("last output"));
 });
 
+test("a window ending inside a soft wrap drops the entire incomplete logical line", () => {
+  const lines = ["complete output", "status: sk-abcdef", "ghijklmnopqrstuv"];
+  const buffer = { ...createBuffer(lines, 1), getLine: (index: number) => ({ isWrapped: index === 2, translateToString: () => lines[index] }) };
+  assert.equal(readRecentTerminalOutput(buffer), "complete output");
+
+  const wrappedLines = ["complete output", "status: sk-abc", "defghi", "jklmnopqrstuv"];
+  const wrappedBuffer = { ...createBuffer(wrappedLines, 2), getLine: (index: number) => ({ isWrapped: index >= 2 && index < wrappedLines.length, translateToString: () => wrappedLines[index] }) };
+  assert.equal(readRecentTerminalOutput(wrappedBuffer), "complete output");
+  assert.equal(readRecentTerminalOutput({ ...buffer, baseY: 0, cursorY: 2 }), lines[0] + "\n" + lines[1] + lines[2]);
+});
+
 test("soft wrap reconstruction retains meaningful spaces at the wrap boundary", () => {
   const lines = ["printf hello ", "world"];
   const buffer = { ...createBuffer(lines), getLine: (index: number) => ({ isWrapped: index === 1, translateToString: (trimRight: boolean) => trimRight ? lines[index].trimEnd() : lines[index] }) };

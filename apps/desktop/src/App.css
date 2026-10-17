@@ -2,7 +2,7 @@
 
 :root {
   color-scheme: dark;
-  font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -17,6 +17,7 @@
   --text: #dbe4ed;
   --text-strong: #f4f7fa;
   --muted: #8090a2;
+  --chrome-text: color-mix(in srgb, var(--muted) 80%, var(--text) 20%);
   --faint: #59697a;
   --accent: #39b8d6;
   --accent-strong: #59d1ec;
@@ -30,7 +31,7 @@
   --menubar-height: 28px;
   --toolbar-height: 38px;
   --tabbar-height: 32px;
-  --status-height: 26px;
+  --status-height: 28px;
   /* Chrome rows (title/menu/toolbar/tabs/status) share one flat surface. */
   --chrome: #121a24;
   --chrome-raised: #16202c;
@@ -159,8 +160,9 @@ select {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--muted);
+  color: var(--text);
   font-size: var(--font-sm);
+  font-weight: 500;
   /* Let mousedown fall through to the drag region instead of the text node. */
   pointer-events: none;
 }
@@ -992,24 +994,6 @@ select {
   color: #5d6e7f;
   text-align: center;
   font-size: var(--font-xs);
-}
-
-.sidebar-hint {
-  min-height: 42px;
-  height: auto;
-  display: grid;
-  place-items: center start;
-  padding: 7px 10px;
-  border-top: 1px solid var(--line-soft);
-  color: #8ca2b2;
-  font-size: var(--font-sm);
-  line-height: 1.4;
-  text-align: left;
-}
-
-.sidebar-hint.drag-feedback {
-  color: #9deaf3;
-  background: rgba(31, 128, 151, 0.14);
 }
 
 .terminal-workspace {
@@ -2397,33 +2381,6 @@ kbd {
   transition: width 180ms ease;
 }
 
-.status-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 0 8px 0 12px;
-  border-top: 1px solid var(--line-soft);
-  color: var(--faint);
-  background: var(--chrome);
-  min-height: var(--status-height);
-  font-size: var(--font-xs);
-  overflow: hidden;
-}
-
-.status-bar > span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.status-bar-current {
-  flex: 1;
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-
 .modal-backdrop {
   position: fixed;
   z-index: 100;
@@ -3104,7 +3061,7 @@ kbd {
 
 /* Appearance preferences and high-DPI readability. */
 :root {
-  --ui-font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --ui-font-family: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   --ui-font-size: 14px;
   --ui-font-adjust: 0px;
   /* Typography guardrails: readable first, emphasis through weight before size. */
@@ -3168,7 +3125,6 @@ body {
 :root[data-theme="light"] .toolbar-bar,
 :root[data-theme="light"] .tab-bar,
 :root[data-theme="light"] .session-sidebar,
-:root[data-theme="light"] .status-bar,
 :root[data-theme="light"] .terminal-stage,
 :root[data-theme="light"] .welcome-panel,
 :root[data-theme="light"] .sftp-panel {
@@ -3183,8 +3139,7 @@ body {
 }
 
 :root[data-theme="light"] .tab-bar,
-:root[data-theme="light"] .session-sidebar,
-:root[data-theme="light"] .status-bar {
+:root[data-theme="light"] .session-sidebar {
   background: var(--chrome-raised);
 }
 
@@ -3284,8 +3239,6 @@ body {
 .sidebar-section-title { font-size: var(--font-xs); color: #8e9eac; font-weight: 500; }
 .group-toggle { font-size: var(--font-md); font-weight: 500; }
 .session-row-copy strong { font-size: var(--font-md); font-weight: 400; line-height: 1.25; }
-.sidebar-hint,
-.status-bar { font-size: var(--font-sm); color: #92a6b5; font-weight: 400; }
 .welcome-panel h1 { font-size: var(--font-display); font-weight: 550; }
 .welcome-panel p { font-size: var(--font-md); color: #8595a5; }
 .welcome-shortcuts { font-size: var(--font-xs); }
@@ -5456,9 +5409,7 @@ body.resizing-terminal-split .split-divider.horizontal * { cursor: row-resize !i
   background: #ffffff;
 }
 
-:root[data-theme="light"] .sidebar-section-title,
-:root[data-theme="light"] .sidebar-hint,
-:root[data-theme="light"] .status-bar {
+:root[data-theme="light"] .sidebar-section-title {
   color: #617886;
 }
 
@@ -5503,10 +5454,6 @@ body.resizing-terminal-split .split-divider.horizontal * { cursor: row-resize !i
   border-color: #8bb9c8;
   color: #05657f;
   background: #eaf6f9;
-}
-
-:root[data-theme="light"] .status-bar {
-  border-top-color: #d6d6d6;
 }
 
 :root[data-theme="light"] .welcome-panel {

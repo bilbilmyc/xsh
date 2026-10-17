@@ -1,0 +1,104 @@
+.workspace-statusbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  min-width: 0;
+  min-height: var(--status-height);
+  padding: 0 14px;
+  border-top: 1px solid var(--line);
+  background: var(--chrome);
+  color: var(--chrome-text);
+  font-size: clamp(11px, var(--font-xs), 13px);
+  font-weight: 400;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.workspace-status-main,
+.workspace-status-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  height: 100%;
+}
+
+.workspace-status-main {
+  flex: 1;
+  overflow: hidden;
+}
+
+.workspace-status-state,
+.workspace-status-broadcast {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  white-space: nowrap;
+}
+
+.workspace-status-state i {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+}
+
+.workspace-status-state[data-state="connected"] i {
+  border-color: var(--green);
+  background: var(--green);
+}
+
+.workspace-status-state:is([data-state="failed"], [data-state="error"]) i {
+  border-color: var(--red);
+  background: var(--red);
+}
+
+.workspace-status-state:is([data-state="connecting"], [data-state="authenticating"], [data-state="awaitingHostKey"], [data-state="reconnecting"], [data-state="waiting-network"]) i {
+  border-color: var(--yellow);
+  background: var(--yellow);
+}
+
+.workspace-status-target,
+.workspace-status-progress {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.workspace-status-target {
+  font-family: var(--mono-font);
+  font-size: .95em;
+}
+
+.workspace-status-meta {
+  flex: none;
+  white-space: nowrap;
+}
+
+.workspace-status-meta > span + span {
+  padding-left: 12px;
+  border-left: 1px solid var(--line);
+}
+
+.workspace-status-broadcast {
+  color: var(--text);
+}
+
+.workspace-status-broadcast svg {
+  color: var(--yellow);
+}
+
+.workspace-status-version,
+.workspace-status-protocol {
+  color: inherit;
+  font-size: .95em;
+  letter-spacing: .02em;
+}
+
+@media (max-width: 1100px) {
+  .workspace-status-protocol { display: none; }
+  .workspace-statusbar { gap: 12px; }
+}

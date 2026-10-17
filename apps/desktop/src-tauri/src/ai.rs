@@ -19,6 +19,7 @@ const MAX_CONTEXT_BYTES: usize = 16 * 1024;
 const MAX_PROMPT_BYTES: usize = 4 * 1024;
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 const MAX_HISTORY_BYTES: usize = 32 * 1024;
+const MAX_HISTORY_MESSAGE_BYTES: usize = 16 * 1024;
 const MAX_HISTORY_RAW_BYTES: usize = 512 * 1024;
 const MAX_HISTORY_MESSAGES: usize = 12;
 const MAX_CANCELLED_REQUESTS: usize = 512;
@@ -482,10 +483,10 @@ fn request_messages(request: &AiCompletionRequest) -> Result<Vec<serde_json::Val
             return Err("AI 历史必须为 user / assistant 交替的完整问答".into());
         }
         raw_bytes = raw_bytes.saturating_add(history.content.len());
-        if history.content.len() > MAX_HISTORY_BYTES || raw_bytes > MAX_HISTORY_RAW_BYTES {
+        if history.content.len() > MAX_HISTORY_MESSAGE_BYTES || raw_bytes > MAX_HISTORY_RAW_BYTES {
             return Err("AI 历史内容过长，请开始新对话".into());
         }
-        let content = redact_text(&history.content, MAX_HISTORY_BYTES);
+        let content = redact_text(&history.content, MAX_HISTORY_MESSAGE_BYTES);
         redacted_bytes = redacted_bytes.saturating_add(content.len());
         if redacted_bytes > MAX_HISTORY_BYTES {
             return Err("AI 历史超过 32 KiB，请开始新对话".into());

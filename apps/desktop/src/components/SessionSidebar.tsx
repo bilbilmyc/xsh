@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   Check,
   ChevronDown,
@@ -6,6 +6,7 @@ import {
   Folder,
   FolderPlus,
   ListChecks,
+  Keyboard,
   Monitor,
   MoreHorizontal,
   Pencil,
@@ -100,6 +101,7 @@ export function SessionSidebar({
   const [selectedSessionIds, setSelectedSessionIds] = useState<Set<string>>(new Set());
   const [selectionAnchorId, setSelectionAnchorId] = useState<string | null>(null);
   const [multiSelectMode, setMultiSelectMode] = useState(false);
+  const shortcutsId = useId();
   const [batchGroupId, setBatchGroupId] = useState("");
   const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
   const [isResizing, setIsResizing] = useState(false);
@@ -830,11 +832,26 @@ export function SessionSidebar({
           {visibleSessions.length === 0 && <div className="sidebar-empty">没有匹配的会话</div>}
         </section>
       </div>
-      <div className={`sidebar-hint ${dragFeedback ? "drag-feedback" : ""}`} role="status">
-        {dragFeedback ?? (multiSelectMode
-          ? `多选模式：点击勾选 · Shift 连选 · 已选 ${selectedSessions.length} 个 · Esc 退出`
-          : `${visibleSessions.length}/${sessions.length} 个会话 · 多选模式可批量删除 · ${IS_MACOS ? "⌘" : "Ctrl"} 多选 · Shift 连选`)}
-      </div>
+      <footer className={`sidebar-footer ${dragFeedback ? "has-feedback" : ""}`} aria-label="会话列表状态">
+        <div className="sidebar-summary" role="status">
+          {dragFeedback
+            ? <span className="sidebar-feedback" title={dragFeedback}>{dragFeedback}</span>
+            : <><strong>{visibleSessions.length}</strong>{visibleSessions.length !== sessions.length && <span className="sidebar-total">/ {sessions.length}</span>}<span>个会话</span>{selectedSessions.length > 0 && <span className="sidebar-selected-count">已选 {selectedSessions.length}</span>}</>}
+        </div>
+        {multiSelectMode
+          ? <button key="selection-done" type="button" className="sidebar-selection-done" onClick={exitMultiSelectMode}>完成</button>
+          : <button key="shortcuts" type="button" className="sidebar-shortcuts-toggle" popoverTarget={shortcutsId} aria-label="会话列表操作提示"><Keyboard size={15} /></button>}
+        <div id={shortcutsId} popover="auto" className="sidebar-shortcuts-popover">
+          <h3>会话列表操作</h3>
+          <dl>
+            <div><dt><kbd>{IS_MACOS ? "⌘" : "Ctrl"}</kbd> + 点击</dt><dd>选择多个会话</dd></div>
+            <div><dt><kbd>Shift</kbd> + 点击</dt><dd>连续选择</dd></div>
+            <div><dt>右键</dt><dd>连接与批量操作</dd></div>
+            <div><dt>拖动会话</dt><dd>移动到目录</dd></div>
+          </dl>
+          <p>点击筛选框右侧的多选按钮，可批量移动、编辑或删除会话。</p>
+        </div>
+      </footer>
       {contextTarget && (
         <ContextMenu
           x={contextTarget.x}

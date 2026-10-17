@@ -133,6 +133,32 @@ fn default_history_is_backward_compatible_and_sanitized() {
 }
 
 #[test]
+fn history_enforces_individual_and_total_utf8_byte_limits() {
+    let mut request = request();
+    request.history = vec![
+        history("user", &"x".repeat(16 * 1024)),
+        history("assistant", &"x".repeat(16 * 1024)),
+    ];
+    assert!(request_messages(&request).is_ok());
+    request.history[0].content.push('x');
+    request.history[1].content = "ok".into();
+    assert!(request_messages(&request).is_err());
+
+    request.history[0].content = "你".repeat(16 * 1024 / 3);
+    assert!(request_messages(&request).is_ok());
+    request.history[0].content.push('你');
+    assert!(request_messages(&request).is_err());
+
+    request.history = vec![
+        history("user", &"x".repeat(16 * 1024)),
+        history("assistant", &"x".repeat(16 * 1024)),
+        history("user", "x"),
+        history("assistant", "x"),
+    ];
+    assert!(request_messages(&request).is_err());
+}
+
+#[test]
 fn history_rejects_invalid_pairs_roles_and_all_byte_bounds() {
     for entries in [
         vec![history("user", "odd")],

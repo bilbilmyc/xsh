@@ -121,9 +121,7 @@ pub(super) fn json_content(bytes: &[u8]) -> Result<String, String> {
         .ok_or("AI 服务未返回文本回复；当前仅支持 Chat Completions 文本协议")?;
     let message = choice.get("message").ok_or("AI 服务未返回文本回复")?;
     reject_tools(message)?;
-    if let Some(reason) = choice.get("finish_reason").filter(|value| !value.is_null()) {
-        validate_finish_reason(reason)?;
-    }
+    validate_finish_reason(choice.get("finish_reason").unwrap_or(&Value::Null))?;
     message
         .get("content")
         .and_then(Value::as_str)
@@ -273,7 +271,10 @@ mod tests {
         for body in [
             br#"{"choices":[{"message":{"content":"partial"},"finish_reason":"length"}]}"#
                 .as_slice(),
-            br#"{"choices":[{"message":{"content":"bad","tool_calls":[]}}]}"#.as_slice(),
+            br#"{"choices":[{"message":{"content":"```sh\nls\n```"},"finish_reason":null}]}"#
+                .as_slice(),
+            br#"{"choices":[{"message":{"content":"```sh\nls\n```"}}]}"#.as_slice(),
+            br#"{"choices":[{"message":{"content":"bad","tool_calls":[]},"finish_reason":"stop"}]}"#.as_slice(),
             b"private-invalid-json".as_slice(),
         ] {
             assert!(json_content(body).is_err());

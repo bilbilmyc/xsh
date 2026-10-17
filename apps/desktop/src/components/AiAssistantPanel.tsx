@@ -32,6 +32,7 @@ interface AiAssistantPanelProps {
   target: AiTarget | null;
   openTabIds: string[];
   contextRequest: AiContextRequest | null;
+  onContextConsumed: (requestId: number) => void;
   onOpenSettings?: () => void;
   onRequestSelection?: (mode: "explain" | "diagnose") => void;
   onRequestRecentOutput?: (mode: "explain" | "diagnose") => void;
@@ -39,7 +40,7 @@ interface AiAssistantPanelProps {
   onSendDraft: (command: string, tabId: string, connectionVersion: number, connectionId: string | null) => Promise<void>;
 }
 
-export function AiAssistantPanel({ target, openTabIds, contextRequest, onOpenSettings, onRequestSelection, onRequestRecentOutput, onClose, onSendDraft }: AiAssistantPanelProps) {
+export function AiAssistantPanel({ target, openTabIds, contextRequest, onContextConsumed, onOpenSettings, onRequestSelection, onRequestRecentOutput, onClose, onSendDraft }: AiAssistantPanelProps) {
   const [settings, setSettings] = useState<AiSettings | null>(null);
   const [loadingSettings, setLoadingSettings] = useState(true);
   const [settingsError, setSettingsError] = useState<string | null>(null);
@@ -84,6 +85,7 @@ export function AiAssistantPanel({ target, openTabIds, contextRequest, onOpenSet
       error: null,
       notice: safeContext.truncated ? `${sourceName}已截取至 16 KiB，请检查预览内容。` : safeContext.redacted ? `${sourceName}中的常见密钥和密码已隐藏，请继续检查。` : `已载入${sourceName}，请检查后发送。`,
     }));
+    onContextConsumed(contextRequest.id);
   }, [contextRequest?.id]);
 
   const contextLabel = context ? `${contextSource === "selection" ? "终端选区" : contextSource === "recent-output" ? "最近50行输出" : "手动输入"}${contextTarget ? ` · ${contextTarget.name}` : ""}` : "未附加终端内容";

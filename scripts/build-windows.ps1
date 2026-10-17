@@ -44,7 +44,9 @@ if (-not $SkipInstall) {
   }
 }
 
-Write-Host '构建 Windows 安装包...' -ForegroundColor Cyan
+$TauriConfig = Get-Content -LiteralPath (Join-Path $RootDir 'apps\desktop\src-tauri\tauri.conf.json') -Raw | ConvertFrom-Json
+$PackagePrefix = "$($TauriConfig.productName)_$($TauriConfig.version)_"
+Write-Host "构建 Windows $($TauriConfig.version) 安装包..." -ForegroundColor Cyan
 & $PnpmCommand --filter desktop exec tauri build --bundles nsis,msi
 if ($LASTEXITCODE -ne 0) {
   throw "Tauri Windows 构建失败，退出码：$LASTEXITCODE"
@@ -52,8 +54,8 @@ if ($LASTEXITCODE -ne 0) {
 
 $NsisDir = Join-Path $RootDir 'target\release\bundle\nsis'
 $MsiDir = Join-Path $RootDir 'target\release\bundle\msi'
-$NsisPackages = @(Get-ChildItem -Path $NsisDir -Filter '*.exe' -File -ErrorAction SilentlyContinue)
-$MsiPackages = @(Get-ChildItem -Path $MsiDir -Filter '*.msi' -File -ErrorAction SilentlyContinue)
+$NsisPackages = @(Get-ChildItem -LiteralPath $NsisDir -Filter "$PackagePrefix*.exe" -File -ErrorAction SilentlyContinue)
+$MsiPackages = @(Get-ChildItem -LiteralPath $MsiDir -Filter "$PackagePrefix*.msi" -File -ErrorAction SilentlyContinue)
 
 if ($NsisPackages.Count -eq 0 -or $MsiPackages.Count -eq 0) {
   throw "构建命令执行完毕，但没有找到预期的安装包。请检查：`n  $NsisDir`n  $MsiDir"
