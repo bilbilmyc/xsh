@@ -1,0 +1,130 @@
+/* Hallmark · component: remote files · genre: modern-minimal · theme: XSH existing tokens */
+/* Hallmark · pre-emit critique: P4 H4 E4 S5 R4 V3 */
+.sftp-panel.sftp-workspace { grid-template-rows: auto auto auto auto minmax(0, 1fr) auto; background: var(--panel); }
+.sftp-workspace .sftp-header { min-height: 36px; color: var(--text); }
+.sftp-workspace .sftp-header > div { min-width: 0; display: flex; align-items: baseline; gap: 9px; }
+.sftp-workspace .sftp-header strong { font-size: var(--font-sm); font-weight: 550; letter-spacing: 0; }
+.sftp-workspace .sftp-header span { overflow: hidden; color: var(--muted); font-size: var(--font-xs); text-overflow: ellipsis; white-space: nowrap; }
+.sftp-workspace .sftp-primary-actions { flex-wrap: nowrap; padding: 9px 10px; gap: 5px; overflow: visible; }
+.sftp-workspace .sftp-primary-actions > button { display: inline-flex; justify-content: center; align-items: center; gap: 5px; width: auto; min-height: 29px; height: auto; padding: 4px 9px; border: 1px solid var(--line); color: var(--text); background: var(--panel-raised); font-size: var(--font-xs); white-space: nowrap; }
+.sftp-workspace .sftp-primary-actions > .sftp-upload-button { border-color: color-mix(in srgb, var(--accent) 35%, var(--line)); color: var(--accent-strong); background: var(--accent-bg); }
+.sftp-workspace .sftp-primary-actions > .sftp-refresh-button { margin-left: auto; padding: 4px 6px; border-color: transparent; background: transparent; }
+.sftp-primary-actions button:disabled, .sftp-location button:disabled, .sftp-drop-hint:disabled { opacity: .4; cursor: default; }
+.sftp-more-actions { position: relative; flex: none; }
+.sftp-more-actions > summary { display: inline-flex; align-items: center; justify-content: center; gap: 3px; min-height: 29px; padding: 4px 5px; border-radius: 4px; color: var(--muted); font-size: var(--font-xs); cursor: pointer; list-style: none; }
+.sftp-more-actions > summary::-webkit-details-marker { display: none; }
+.sftp-more-actions > summary:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+.sftp-more-actions > summary:hover, .sftp-more-actions[open] > summary { color: var(--text); background: var(--panel-hover); }
+.sftp-more-menu { position: absolute; z-index: 25; top: calc(100% + 5px); right: 0; display: grid; min-width: 158px; padding: 4px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-raised); box-shadow: 0 6px 20px color-mix(in srgb, var(--bg-deep) 70%, transparent); }
+.sftp-workspace .sftp-more-menu > button { display: flex; align-items: center; justify-content: flex-start; gap: 8px; width: 100%; height: auto; min-height: 31px; padding: 5px 8px; color: var(--text); font-size: var(--font-xs); text-align: left; }
+.sftp-more-menu > button.danger { color: var(--red); }
+.sftp-location { min-width: 0; padding: 8px 10px 6px; border-bottom: 1px solid var(--line-soft); }
+.sftp-path-row { display: flex; gap: 3px; align-items: center; }
+.sftp-path-row > button { flex: none; display: grid; place-items: center; width: 25px; height: 28px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--muted); cursor: pointer; }
+.sftp-path-row > button:hover:not(:disabled) { color: var(--text); background: var(--panel-hover); }
+.sftp-workspace .remote-path { height: auto; padding: 0; }
+.sftp-workspace .remote-path input { height: 28px; min-height: 0; padding: 4px 7px; border-color: var(--line); border-radius: 4px; background: var(--bg); font: var(--font-xs)/1.5 var(--mono-font); }
+.sftp-breadcrumbs { display: flex; align-items: center; min-width: 0; gap: 1px; margin-top: 5px; overflow-x: auto; scrollbar-width: thin; }
+.sftp-breadcrumbs > span { display: inline-flex; align-items: center; flex: none; color: var(--faint); }
+.sftp-breadcrumbs button { max-width: 150px; overflow: hidden; padding: 3px 5px; border: 0; border-radius: 3px; background: transparent; color: var(--muted); font: var(--font-xs)/1.4 var(--mono-font); text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.sftp-breadcrumbs button[aria-current] { color: var(--text); }
+.sftp-breadcrumbs button:hover:not(:disabled) { background: var(--panel-hover); color: var(--accent-strong); }
+.sftp-workspace .sftp-browser-pane { min-height: 0; display: flex; flex-direction: column; background: var(--panel); }
+.sftp-filter-row { display: flex; flex: none; align-items: center; gap: 8px; padding: 8px 10px; }
+.sftp-search { flex: 1; display: flex; align-items: center; gap: 6px; min-width: 0; padding: 0 7px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); background: var(--bg); }
+.sftp-search:focus-within { border-color: var(--accent); }
+.sftp-search > svg { flex: none; }
+.sftp-search input { min-width: 0; height: 28px; min-height: 0; padding: 0; border: 0; border-radius: 0; outline: none; box-shadow: none; background: transparent; font-size: var(--font-xs); }
+.sftp-search > button { display: grid; place-items: center; flex: none; width: 18px; height: 22px; padding: 0; border: 0; border-radius: 3px; color: var(--muted); background: transparent; cursor: pointer; }
+.sftp-hidden-toggle { display: inline-flex; align-items: center; gap: 4px; flex: none; color: var(--muted); font-size: var(--font-xs); cursor: pointer; }
+.sftp-hidden-toggle > input { width: 12px; height: 12px; margin: 0; accent-color: var(--accent); }
+.sftp-column-head, .sftp-workspace .remote-entry { grid-template-columns: 16px minmax(0, 1fr) calc(var(--font-xs) * 7) calc(var(--font-xs) * 4.5); gap: 6px; }
+.sftp-column-head { display: grid; flex: none; align-items: center; padding: 0 13px 5px; border-bottom: 1px solid var(--line-soft); }
+.sftp-column-head > button { display: inline-flex; align-items: center; gap: 4px; min-height: 23px; padding: 0; border: 0; background: transparent; color: var(--muted); font-size: var(--font-xs); text-align: left; cursor: pointer; }
+.sftp-column-head > button:last-child { justify-content: end; }
+.sftp-column-head > button:hover { color: var(--text); }
+.sftp-workspace .remote-list { position: relative; flex: 1; min-height: 0; padding: 4px 5px; }
+.sftp-workspace .remote-entry { min-height: 34px; padding: 0 7px; border-radius: 3px; color: var(--text); font-size: var(--font-sm); }
+.sftp-workspace .remote-entry-size, .sftp-workspace .remote-entry-time { display: block; min-width: 0; overflow: hidden; color: var(--muted); font: var(--font-xs)/1.6 var(--mono-font); text-overflow: ellipsis; white-space: nowrap; }
+.sftp-workspace .remote-entry-size { text-align: right; }
+.sftp-workspace .remote-entry > svg { color: var(--muted); }
+.sftp-workspace .remote-entry > .lucide-folder { color: var(--yellow); }
+.sftp-workspace .remote-entry:hover { background: var(--panel-hover); }
+.sftp-workspace .remote-entry.selected { color: var(--text-strong); background: var(--accent-bg); border-color: color-mix(in srgb, var(--accent) 30%, transparent); }
+.sftp-drop-hint { display: flex; flex: none; align-items: center; justify-content: center; gap: 6px; width: calc(100% - 20px); margin: 5px 10px; padding: 7px 6px; border: 1px dashed var(--line); border-radius: 4px; background: transparent; color: var(--muted); font-size: var(--font-xs); cursor: pointer; }
+.sftp-drop-hint:hover:not(:disabled) { color: var(--accent-strong); border-color: var(--accent); background: var(--accent-bg); }
+.sftp-drop-overlay { position: absolute; z-index: 20; inset: 0; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 10px; padding: 20px; border: 2px dashed var(--accent); border-radius: 5px; background: color-mix(in srgb, var(--panel) 94%, transparent); pointer-events: none; color: var(--accent-strong); text-align: center; }
+.sftp-drop-overlay strong { font-size: var(--font-md); }
+.sftp-drop-overlay span { max-width: 100%; color: var(--text); font: var(--font-xs)/1.5 var(--mono-font); overflow-wrap: anywhere; }
+.sftp-directory-summary { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 5px; padding: 6px 10px; color: var(--muted); font-size: var(--font-xs); }
+.sftp-inline-link { display: block; margin: 8px auto 0; border: 0; color: var(--accent-strong); background: transparent; font-size: var(--font-xs); cursor: pointer; }
+.sftp-transfer-section { max-height: min(42vh, 350px); padding: 8px 10px; background: var(--bg); scrollbar-width: thin; }
+.sftp-transfer-section .transfer-title-row { position: sticky; z-index: 2; top: -8px; display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin: -1px 0 5px; padding: 5px 0; background: var(--bg); }
+.transfer-section-toggle { display: inline-flex; align-items: center; gap: 5px; min-height: 22px; padding: 0; border: 0; color: var(--text); background: transparent; font-size: var(--font-xs); cursor: pointer; }
+.transfer-section-toggle[aria-expanded="false"] > svg { transform: rotate(-90deg); }
+.transfer-section-toggle > span { color: var(--muted); font-size: var(--font-xs); font-weight: 400; }
+.transfer-section-toggle > .transfer-failure-count { color: var(--red); }
+.sftp-transfer-section .transfer-list-actions { margin-left: auto; }
+.sftp-transfer-section .transfer-list-actions button { min-height: 22px; font-size: var(--font-xs); }
+.sftp-transfer-section .transfer-filters { margin-bottom: 7px; }
+.sftp-transfer-section .transfer-filters > button { padding: 3px 7px; font-size: var(--font-xs); }
+.sftp-transfer-section .transfer-card { padding: 9px 10px; }
+.sftp-transfer-section .pending-upload { padding: 8px 5px; color: var(--muted); font-size: var(--font-xs); }
+.sftp-transfer-section[data-collapsed="true"] { padding-top: 4px; padding-bottom: 4px; }
+.sftp-transfer-section[data-collapsed="true"] .transfer-title-row { margin: 0; padding: 0; }
+@media (prefers-reduced-motion: reduce) { .sftp-workspace * { scroll-behavior: auto; } }
+.sftp-directory-tools { display: flex; align-items: center; gap: 5px; margin-top: 6px; }
+.sftp-directory-tools > select { flex: 1; min-width: 0; height: 25px; padding: 2px 5px; color: var(--muted); border: 1px solid var(--line); background: var(--bg); font-size: var(--font-xs); }
+.sftp-directory-tools > button, .sftp-local-destination > button { flex: none; display: inline-flex; align-items: center; padding: 4px 5px; border: 0; border-radius: 3px; color: var(--muted); background: transparent; font-size: var(--font-xs); cursor: pointer; }
+.sftp-directory-tools > button[aria-pressed="true"], .sftp-local-destination > button[aria-pressed="true"] { color: var(--accent-strong); background: var(--accent-bg); }
+.sftp-directory-tools > button:disabled { opacity: .4; cursor: default; }
+.sftp-local-destination { display: flex; align-items: center; gap: 6px; padding: 7px 10px; border-bottom: 1px solid var(--line); }
+.sftp-local-destination > div { flex: 1; min-width: 0; }
+.sftp-local-destination span { display: block; margin-bottom: 2px; color: var(--faint); font-size: var(--font-xs); }
+.sftp-local-destination strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font: var(--font-xs)/1.5 var(--mono-font); }
+.sftp-browser.sftp-browser-dual { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); min-height: 0; }
+.sftp-local-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; padding: 7px; border-right: 1px solid var(--line); }
+.sftp-local-pane > header { display: flex; flex: none; align-items: center; gap: 4px; font-size: var(--font-xs); }
+.sftp-local-pane > header > strong { flex: 1; font-weight: 500; }
+.sftp-local-path { flex: none; margin: 4px 0 7px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font: var(--font-xs)/1.5 var(--mono-font); }
+.sftp-local-pane > .sftp-search { flex: none; height: 28px; margin-bottom: 5px; }
+.sftp-local-list { flex: 1; min-height: 0; overflow: auto; scrollbar-width: thin; }
+.sftp-local-list > .sftp-local-entry { display: flex; align-items: center; gap: 6px; width: 100%; min-height: 34px; padding: 4px 6px; border: 0; border-radius: 3px; background: transparent; color: var(--text); font-size: var(--font-xs); cursor: pointer; }
+.sftp-local-entry > span { flex: 1; min-width: 0; overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.sftp-local-entry > small { color: var(--muted); font: var(--font-xs)/1.4 var(--mono-font); }
+.sftp-local-list > .sftp-local-entry.selected { background: var(--accent-bg); }
+.sftp-local-list > .sftp-local-entry:hover { background: var(--panel-hover); }
+.sftp-local-entry > .lucide-folder { color: var(--yellow); }
+.sftp-local-pane > .secondary-button { flex: none; margin-top: 7px; font-size: var(--font-xs); }
+.sftp-workspace .sftp-header .sftp-connection-state { flex-shrink: 0; margin-left: auto; font-size: var(--font-xs); }
+.sftp-workspace .sftp-connection-state[data-state="connected"] { color: var(--green); }
+.sftp-workspace .sftp-connection-state[data-state="failed"] { color: var(--red); }
+.sftp-recovery p { margin: 0 0 8px; overflow-wrap: anywhere; }
+.sftp-recovery > div { display: flex; flex-wrap: wrap; gap: 10px; }
+.sftp-recovery button { font-size: var(--font-xs); }
+.sftp-local-entry:disabled { opacity: .5; cursor: default; }
+.sftp-workspace .remote-path input { height: auto; min-height: max(28px, calc(var(--font-xs) * 1.5 + 8px)); }
+.sftp-workspace .sftp-search, .sftp-local-pane > .sftp-search { height: auto; min-height: max(28px, calc(var(--font-xs) * 1.5 + 8px)); }
+.sftp-workspace .sftp-search input { height: auto; min-height: 28px; }
+.sftp-directory-tools > select { height: auto; min-height: max(25px, calc(var(--font-xs) * 1.5 + 6px)); }
+.right-tool-panel:not(.expanded) .sftp-column-head,
+.right-tool-panel:not(.expanded) .sftp-workspace .remote-entry { grid-template-columns: 16px minmax(0, 1fr) calc(var(--font-xs) * 4.5); }
+.right-tool-panel:not(.expanded) .sftp-column-head > [data-sort="modified"],
+.right-tool-panel:not(.expanded) .sftp-workspace .remote-entry-time { display: none; }
+@media (max-width: 1180px) {
+  .sftp-column-head, .sftp-workspace .remote-entry { grid-template-columns: 16px minmax(0, 1fr) calc(var(--font-xs) * 4.5); }
+  .sftp-column-head > [data-sort="modified"], .sftp-workspace .remote-entry-time { display: none; }
+}
+@media (max-height: 700px) {
+  .right-tool-panel.expanded .sftp-location { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 6px; }
+  .right-tool-panel.expanded .sftp-path-row { grid-column: 1 / -1; }
+  .right-tool-panel.expanded .sftp-breadcrumbs, .right-tool-panel.expanded .sftp-directory-tools { margin-top: 0; }
+  .right-tool-panel.expanded .sftp-local-destination > div { display: flex; align-items: center; gap: 8px; }
+  .right-tool-panel.expanded .sftp-local-destination span { flex: none; margin-bottom: 0; white-space: nowrap; }
+  .right-tool-panel.expanded .sftp-local-destination strong { flex: 1; min-width: 0; }
+  .sftp-local-pane { padding-top: 5px; padding-bottom: 5px; }
+  .sftp-local-path { margin-top: 3px; margin-bottom: 4px; }
+  .right-tool-panel.expanded .sftp-local-path { display: none; }
+  .sftp-local-pane > .secondary-button { margin-top: 5px; }
+  .sftp-workspace .sftp-drop-hint { display: none; }
+}

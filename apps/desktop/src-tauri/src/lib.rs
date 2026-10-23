@@ -1134,6 +1134,7 @@ async fn connect_sftp(
     match state
         .sftp
         .connect(SftpConnectOptions {
+            session_id: Some(session_id),
             host: session.host,
             port: session.port,
             username: session.username,
@@ -1231,6 +1232,27 @@ async fn remove_transfer(state: State<'_, AppState>, transfer_id: TransferId) ->
 }
 
 #[tauri::command]
+async fn retry_transfer(
+    state: State<'_, AppState>,
+    transfer_id: TransferId,
+    on_event: Channel<TransferEvent>,
+) -> CommandResult<TransferId> {
+    let subscription = state.sftp.retry_transfer(transfer_id).await.map_err(|error| {
+        format!("无法重试原传输：{error}。请确认原主机连接仍可用；连接失效时需在原主机重新选择文件。")
+    })?;
+    let transfer_id = subscription.transfer_id;
+    let mut events = subscription.events;
+    tauri::async_runtime::spawn(async move {
+        while let Some(event) = events.recv().await {
+            if on_event.send(event).is_err() {
+                break;
+            }
+        }
+    });
+    Ok(transfer_id)
+}
+
+#[tauri::command]
 async fn sftp_canonicalize(
     state: State<'_, AppState>,
     connection_id: ConnectionId,
@@ -1293,6 +1315,92 @@ async fn sftp_stat(
         .stat(connection_id, path)
         .await
         .map_err(display_error)
+}
+
+/// A single lstat for transfer previews/conflicts, without recursively scanning a tree.
+#[tauri::command]
+async fn local_file_info(path: PathBuf) -> CommandResult<Option<RemoteEntry>> {
+    validate_local_path(&path, "本地文件路径")?;
+    let metadata = match tokio::fs::symlink_metadata(&path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("无法读取本地文件信息：{error}")),
+    };
+    let file_type = if metadata.is_symlink() {
+        xsh_domain::RemoteFileType::Symlink
+    } else if metadata.is_dir() {
+        xsh_domain::RemoteFileType::Directory
+    } else if metadata.is_file() {
+        xsh_domain::RemoteFileType::File
+    } else {
+        xsh_domain::RemoteFileType::Other
+    };
+    Ok(Some(RemoteEntry {
+        name: path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned(),
+        path: path.to_string_lossy().into_owned(),
+        file_type,
+        size: metadata.len(),
+        modified_at_unix: metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|elapsed| elapsed.as_secs()),
+        permissions: None,
+        owner: None,
+        group: None,
+    }))
+}
+
+#[tauri::command]
+async fn local_download_directory(app: AppHandle) -> CommandResult<PathBuf> {
+    app.path().download_dir().map_err(display_error)
+}
+
+/// Shallow local listing for the optional file workspace; never walks subdirectories.
+#[tauri::command]
+async fn list_local_directory(path: PathBuf) -> CommandResult<Vec<RemoteEntry>> {
+    validate_local_path(&path, "本地目录路径")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut entries = Vec::new();
+        for entry in std::fs::read_dir(path).map_err(display_error)? {
+            let entry = entry.map_err(display_error)?;
+            if entries.len() >= 5000 {
+                return Err("本地目录超过 5000 项，请选择范围更小的目录".to_owned());
+            }
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path).map_err(display_error)?;
+            let file_type = if metadata.is_symlink() {
+                xsh_domain::RemoteFileType::Symlink
+            } else if metadata.is_dir() {
+                xsh_domain::RemoteFileType::Directory
+            } else if metadata.is_file() {
+                xsh_domain::RemoteFileType::File
+            } else {
+                xsh_domain::RemoteFileType::Other
+            };
+            entries.push(RemoteEntry {
+                name: entry.file_name().to_string_lossy().into_owned(),
+                path: path.to_string_lossy().into_owned(),
+                file_type,
+                size: metadata.len(),
+                modified_at_unix: metadata
+                    .modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|elapsed| elapsed.as_secs()),
+                permissions: None,
+                owner: None,
+                group: None,
+            });
+        }
+        Ok(entries)
+    })
+    .await
+    .map_err(|error| format!("XSH 本地目录读取线程异常：{error}"))?
 }
 
 #[tauri::command]
@@ -1423,6 +1531,7 @@ async fn sftp_upload(
     remote_path: String,
     overwrite: bool,
     on_event: Channel<TransferEvent>,
+    batch_id: Option<Uuid>,
 ) -> CommandResult<TransferId> {
     validate_local_path(&local_path, "上传文件路径")?;
     let metadata = tokio::fs::metadata(&local_path)
@@ -1433,7 +1542,7 @@ async fn sftp_upload(
     }
     let subscription = state
         .sftp
-        .upload(connection_id, local_path, remote_path, overwrite)
+        .upload_in_batch(connection_id, local_path, remote_path, overwrite, batch_id)
         .await
         .map_err(display_error)?;
     let transfer_id = subscription.transfer_id;
@@ -1456,11 +1565,12 @@ async fn sftp_download(
     local_path: PathBuf,
     overwrite: bool,
     on_event: Channel<TransferEvent>,
+    batch_id: Option<Uuid>,
 ) -> CommandResult<TransferId> {
     validate_local_path(&local_path, "下载文件路径")?;
     let subscription = state
         .sftp
-        .download(connection_id, remote_path, local_path, overwrite)
+        .download_in_batch(connection_id, remote_path, local_path, overwrite, batch_id)
         .await
         .map_err(display_error)?;
     let transfer_id = subscription.transfer_id;
@@ -2573,10 +2683,14 @@ pub fn run() {
             pause_transfer,
             resume_transfer,
             remove_transfer,
+            retry_transfer,
             sftp_canonicalize,
             sftp_list_directory,
             list_local_sync_entries,
             sftp_stat,
+            local_file_info,
+            list_local_directory,
+            local_download_directory,
             prepare_remote_edit_path,
             create_local_directory,
             open_local_path,

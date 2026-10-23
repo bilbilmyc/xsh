@@ -57,6 +57,7 @@ export function saveCommandHistory(entries: CommandHistoryEntry[]) {
     .filter((entry) => !containsSensitiveCommand(entry.command))
     .slice(0, MAX_ENTRIES);
   localStorage.setItem(STORAGE_KEY, JSON.stringify(safeEntries));
+  if (typeof window !== "undefined") window.dispatchEvent(new Event("xsh:command-history-changed"));
 }
 
 function isEntry(value: unknown): value is CommandHistoryEntry {

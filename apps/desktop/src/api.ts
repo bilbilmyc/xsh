@@ -134,6 +134,8 @@ export const api = {
   pauseTransfer: (transferId: Uuid) => invoke<TransferEvent>("pause_transfer", { transferId }),
   resumeTransfer: (transferId: Uuid) => invoke<TransferEvent>("resume_transfer", { transferId }),
   removeTransfer: (transferId: Uuid) => invoke<void>("remove_transfer", { transferId }),
+  retryTransfer: (transferId: Uuid, onEvent: Channel<TransferEvent> = new Channel<TransferEvent>()) =>
+    invoke<Uuid>("retry_transfer", { transferId, onEvent }),
   sftpCanonicalize: (connectionId: Uuid, path: string) =>
     invoke<string>("sftp_canonicalize", { connectionId, path }),
   sftpListDirectory: (connectionId: Uuid, path: string) =>
@@ -142,6 +144,9 @@ export const api = {
     invoke<LocalSyncEntry[]>("list_local_sync_entries", { rootPath, excludePatterns }),
   sftpStat: (connectionId: Uuid, path: string) =>
     invoke<RemoteEntry>("sftp_stat", { connectionId, path }),
+  localFileInfo: (path: string) => invoke<RemoteEntry | null>("local_file_info", { path }),
+  listLocalDirectory: (path: string) => invoke<RemoteEntry[]>("list_local_directory", { path }),
+  localDownloadDirectory: () => invoke<string>("local_download_directory"),
   prepareRemoteEditPath: (remoteName: string) =>
     invoke<string>("prepare_remote_edit_path", { remoteName }),
   createLocalDirectory: (path: string) => invoke<void>("create_local_directory", { path }),
@@ -158,6 +163,7 @@ export const api = {
     remotePath: string,
     overwrite: boolean,
     onEvent: Channel<TransferEvent>,
+    batchId?: Uuid,
   ) =>
     invoke<Uuid>("sftp_upload", {
       connectionId,
@@ -165,6 +171,7 @@ export const api = {
       remotePath,
       overwrite,
       onEvent,
+      batchId,
     }),
   sftpDownload: (
     connectionId: Uuid,
@@ -172,6 +179,7 @@ export const api = {
     localPath: string,
     overwrite: boolean,
     onEvent: Channel<TransferEvent>,
+    batchId?: Uuid,
   ) =>
     invoke<Uuid>("sftp_download", {
       connectionId,
@@ -179,6 +187,7 @@ export const api = {
       localPath,
       overwrite,
       onEvent,
+      batchId,
     }),
   cancelTransfer: (transferId: Uuid) =>
     invoke<TransferEvent>("cancel_transfer", { transferId }),

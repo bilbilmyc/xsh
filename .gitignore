@@ -10,3 +10,6 @@ target/
 .env.*
 !.env.example
 .tmp-shim/
+.hallmark/
+.playwright-cli/
+output/

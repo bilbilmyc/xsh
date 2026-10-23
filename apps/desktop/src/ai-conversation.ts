@@ -5,6 +5,8 @@ export const AI_HISTORY_BYTES = 32 * 1024;
 export const AI_HISTORY_MESSAGE_BYTES = 16 * 1024;
 export const AI_TRANSCRIPT_TURNS = 24;
 export const AI_TRANSCRIPT_BYTES = 512 * 1024;
+export const AI_ARCHIVE_LIMIT = 3;
+export const AI_ARCHIVE_BYTES = 512 * 1024;
 
 export interface AiHistoryMessage {
   role: "user" | "assistant";
@@ -25,6 +27,59 @@ export interface AiHistoryResult {
   omittedTurns: number;
   truncatedMessages: number;
   bytes: number;
+}
+
+export interface AiConversationArchive<Turn extends AiHistoryTurn = AiHistoryTurn> {
+  id: string;
+  createdAt: string;
+  reason: "new-conversation" | "service-change";
+  turns: Turn[];
+  draftPrompt: string;
+}
+
+/** Archives are display-only; buildAiHistory accepts the current turns alone. */
+export function archiveAiConversation<Turn extends AiHistoryTurn>(
+  archives: readonly AiConversationArchive<Turn>[],
+  turns: readonly Turn[],
+  draftPrompt: string,
+  reason: AiConversationArchive["reason"],
+): AiConversationArchive<Turn>[] {
+  if (!turns.length && !draftPrompt.trim()) return [...archives];
+  const boundedText = (text: string, maximum: number) => {
+    const prepared = prepareAiText(text, maximum);
+    const marker = "\n[旧对话内容已截短]";
+    return prepared.truncated ? `${truncateUtf8(prepared.text, maximum - byteLength(marker))}${marker}` : prepared.text;
+  };
+  const draft = boundedText(draftPrompt, 4 * 1024);
+  const boundedTurns = limitAiConversation(turns.map((turn) => ({
+    ...turn,
+    prompt: boundedText(turn.prompt, 4 * 1024),
+    context: boundedText(turn.context, 16 * 1024),
+    text: boundedText(turn.text, 128 * 1024),
+    status: turn.status === "streaming" ? "stopped" as const : turn.status,
+  })));
+  const archiveBytes = (items: readonly AiHistoryTurn[]) => items.reduce((sum, turn) => sum + byteLength(turn.prompt) + byteLength(turn.context) + byteLength(turn.text), 0);
+  while (boundedTurns.length > 1 && archiveBytes(boundedTurns) + byteLength(draft) > AI_ARCHIVE_BYTES) boundedTurns.shift();
+  const entry: AiConversationArchive<Turn> = {
+    id: crypto.randomUUID(),
+    createdAt: new Date().toISOString(),
+    reason,
+    turns: boundedTurns,
+    draftPrompt: draft,
+  };
+  const result = [entry, ...archives].slice(0, AI_ARCHIVE_LIMIT);
+  let bytes = 0;
+  return result.filter((archive) => {
+    bytes += byteLength(archive.draftPrompt) + archive.turns.reduce((sum, turn) => sum + byteLength(turn.prompt) + byteLength(turn.context) + byteLength(turn.text), 0);
+    return bytes <= AI_ARCHIVE_BYTES;
+  });
+}
+
+export function formatAiArchive(archive: AiConversationArchive): string {
+  const turns = archive.turns.map((turn, index) =>
+    `第 ${index + 1} 轮\n问题：${turn.prompt || "分析附加内容"}${turn.context ? `\n上下文：\n${turn.context}` : ""}\n\nAI：\n${turn.text || "（未收到回复）"}${turn.status === "complete" ? "" : "\n[回复未完成]"}`
+  );
+  return [`保存时间：${archive.createdAt}`, ...turns, archive.draftPrompt ? `未发送的问题：\n${archive.draftPrompt}` : ""].filter(Boolean).join("\n\n");
 }
 
 export function formatAiUserMessage(turn: Pick<AiHistoryTurn, "mode" | "prompt" | "context">): string {

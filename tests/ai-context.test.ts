@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { AI_COMMAND_BYTES, AI_CONTEXT_BYTES, byteLength, extractCommandDraft, normalizeAiTerminalCommand, prepareAiText, redactAiText, truncateUtf8 } from "../apps/desktop/src/ai-context.ts";
+import { AI_COMMAND_BYTES, AI_CONTEXT_BYTES, byteLength, commandDraftFromCode, extractCommandDraft, normalizeAiTerminalCommand, prepareAiText, redactAiText, truncateUtf8 } from "../apps/desktop/src/ai-context.ts";
 
 test("AI context removes common credentials without reading any storage", () => {
   const source = [
@@ -49,6 +49,22 @@ test("only explicit fenced command blocks can become editable drafts", () => {
   assert.equal(extractCommandDraft("```sh\r\necho one\r\necho two\r\n```"), "echo one\r\necho two");
   assert.equal(extractCommandDraft("```sh\necho \x1b[31m\n```"), null);
   assert.equal(extractCommandDraft(`\`\`\`sh\n${"x".repeat(8193)}\n\`\`\``), null);
+});
+
+test("a diagnosis can contain configuration and multiple independently usable shell checks", () => {
+  const answer = "配置内容：\n```yaml\nport: 8080\n```\n先查监听：\n```bash\nss -ltnp\n```\n再查服务：\n```sh\nsystemctl status app\n```";
+  assert.equal(extractCommandDraft(answer), "ss -ltnp");
+  assert.equal(commandDraftFromCode("systemctl status app", "sh"), "systemctl status app");
+  for (const language of ["text", "json", "yaml", "log", "console", ""]) {
+    assert.equal(commandDraftFromCode("Permission denied", language), null, language);
+  }
+});
+
+test("unfinished or invalid command blocks cannot become executable drafts", () => {
+  assert.equal(extractCommandDraft("```bash\nrm -"), null);
+  assert.equal(extractCommandDraft("```text\nerror output\n```"), null);
+  assert.equal(extractCommandDraft("```sh\necho \x1b[31m\n```\n```powershell\nGet-Process\n```"), "Get-Process");
+  assert.equal(commandDraftFromCode(" Get-Process ", "PowerShell"), "Get-Process");
 });
 
 test("AI command normalization preserves shell backslash escapes in sed and printf", () => {

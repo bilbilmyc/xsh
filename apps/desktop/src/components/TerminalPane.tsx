@@ -6,7 +6,7 @@ import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
-import { Activity, Bot, ChevronDown, ChevronUp, Copy, Minus, Plus, RefreshCw, Search, X } from "lucide-react";
+import { Activity, Bot, ChevronDown, ChevronUp, Copy, Minus, Plus, RefreshCw, Search, Sparkles, X } from "lucide-react";
 import { api } from "../api";
 import { writeClipboardText } from "../clipboard";
 import { ContextMenu } from "./ContextMenu";
@@ -19,9 +19,15 @@ import { confirmDialog, hostKeyDialog } from "./DialogHost";
 import { BoundedSessionLogBuffer } from "../session-log-buffer";
 import { CumulativeTerminalOutputAcknowledger } from "../terminal-output-ack";
 import { readRecentTerminalOutput } from "../terminal-context";
+import { loadCommandHistory, recordCommandHistory } from "../command-history";
+import { completionSuffix, safeCompletionCommand, sameTerminalPrompt, SHELL_INTEGRATION_COMMAND, TerminalPromptTracker, type TerminalPromptSnapshot } from "../terminal-completion";
+import { TerminalCommandSuggestions, type TerminalCommandSuggestionsHandle } from "./TerminalCommandSuggestions";
+import { TerminalExecutionLedger, executionAiContext, type TerminalExecution, type TerminalExecutionRequest } from "../terminal-execution";
+import { TerminalExecutionList } from "./TerminalExecutionList";
 import "@xterm/xterm/css/xterm.css";
 import "./terminal-pane-layout.css";
 import { resolveTerminalTheme } from "../themes";
+import { parseTerminalDirectory } from "../directory-workspace";
 
 export interface TerminalCommandRequest {
   id: string;
@@ -44,7 +50,10 @@ interface TerminalPaneProps {
   onTrigger?: (event: { triggerId: string; label: string; matchedText: string }) => void;
   onEditSession?: (session: SavedSession) => void;
   onDiagnose?: (session: SavedSession) => void;
-  onAiRequest?: (mode: "explain" | "diagnose", text: string, source?: "selection" | "recent-output") => void;
+  onAiRequest?: (mode: "explain" | "diagnose" | "command", text: string, source?: "selection" | "recent-output" | "execution") => void;
+  initialExecutions?: readonly TerminalExecution[];
+  onExecutionsChange?: (records: readonly TerminalExecution[]) => void;
+  onDirectoryChange?: (connectionId: string | null, directory: string | null) => void;
 }
 
 type OutputAcknowledge = (bytes: number) => void;
@@ -70,6 +79,9 @@ export function TerminalPane({
   onEditSession,
   onDiagnose,
   onAiRequest,
+  initialExecutions,
+  onExecutionsChange,
+  onDirectoryChange,
 }: TerminalPaneProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -98,11 +110,56 @@ export function TerminalPane({
   const preferencesRef = useRef(preferences);
   const onAiRequestRef = useRef(onAiRequest);
   onAiRequestRef.current = onAiRequest;
+  const onDirectoryChangeRef = useRef(onDirectoryChange);
+  onDirectoryChangeRef.current = onDirectoryChange;
   preferencesRef.current = preferences;
   const sessionFontEnabled = preferences.useSessionTerminalFont;
   const baseFontSize = sessionFontEnabled ? session.terminal.fontSize || preferences.terminalFontSize : preferences.terminalFontSize;
   const [currentFontSize, setCurrentFontSize] = useState(baseFontSize);
   const currentFontSizeRef = useRef(baseFontSize);
+  const [promptTracker] = useState(() => new TerminalPromptTracker());
+  const [executionLedger] = useState(() => new TerminalExecutionLedger(initialExecutions));
+  const [executions, setExecutions] = useState(() => executionLedger.getSnapshot());
+  const [executionsVisible, setExecutionsVisible] = useState(false);
+  const onExecutionsChangeRef = useRef(onExecutionsChange);
+  onExecutionsChangeRef.current = onExecutionsChange;
+  const publishExecutions = () => {
+    const records = executionLedger.getSnapshot();
+    setExecutions(records);
+    onExecutionsChangeRef.current?.(records);
+  };
+  const [promptSnapshot, setPromptSnapshot] = useState<TerminalPromptSnapshot>({
+    connectionId: null, promptId: 0, revision: 0, integrated: false, phase: "unknown", command: null, ready: false,
+  });
+  const [suggestionStyle, setSuggestionStyle] = useState<CSSProperties>({ left: 10, bottom: 12 });
+  const suggestionsRef = useRef<TerminalCommandSuggestionsHandle>(null);
+  const publishPromptRef = useRef<(() => void) | null>(null);
+  const sendCommandRef = useRef<((text: string, source: "ai" | "command", executionId?: string) => Promise<void>) | null>(null);
+  const setupShellRef = useRef<((owner: TerminalPromptSnapshot) => Promise<void>) | null>(null);
+
+  const readPromptSnapshot = (): TerminalPromptSnapshot => {
+    const terminal = terminalRef.current;
+    return terminal
+      ? promptTracker.snapshot(connectionIdRef.current, terminal.buffer.active)
+      : { ...promptSnapshot, connectionId: null, ready: false };
+  };
+
+  const openCommandSuggestions = () => {
+    terminalRef.current?.scrollToBottom();
+    publishPromptRef.current?.();
+    suggestionsRef.current?.open();
+  };
+
+  const acceptCommandSuggestion = (text: string, owner: TerminalPromptSnapshot): boolean => {
+    if (!visible || !focused || authChallenge) return false;
+    const suffix = completionSuffix(text, owner, readPromptSnapshot());
+    const terminal = terminalRef.current;
+    if (!suffix || !terminal) return false;
+    terminal.scrollToBottom();
+    terminal.paste(suffix);
+    terminal.focus();
+    return true;
+  };
 
   const applyTerminalFontSize = (value: number) => {
     const next = Math.min(32, Math.max(10, Math.round(value)));
@@ -129,6 +186,7 @@ export function TerminalPane({
     let wakeCheckTimer: number | undefined;
     let selectionCopyTimer: number | undefined;
     let outputFlushFrame: number | undefined;
+    let promptFrame: number | undefined;
     let pendingOutput: PendingTerminalOutput[] = [];
     let pendingOutputHead = 0;
     let pendingOutputBytes = 0;
@@ -141,6 +199,8 @@ export function TerminalPane({
     let flushDurationSinceSample = 0;
     let lastOutputSampleAt = performance.now();
     let pendingInput = "";
+    let pendingExecutionIds: string[] = [];
+    let inputWrites = 0;
     let connectGeneration = 0;
     let reconnectAttempt = 0;
     let wasConnected = false;
@@ -148,6 +208,7 @@ export function TerminalPane({
     let networkOnline = navigator.onLine !== false;
     let connectPendingForNetwork = false;
     let currentState = "connecting";
+    promptTracker.reset();
     let lastWakeCheckAt = Date.now();
     const triggerMatcher = new TerminalTriggerMatcher();
     setConnectionError(null);
@@ -189,6 +250,59 @@ export function TerminalPane({
     terminal.loadAddon(searchAddon);
     terminal.loadAddon(webLinksAddon);
     terminal.open(host);
+    const publishPrompt = () => {
+      if (disposed || promptFrame !== undefined) return;
+      promptFrame = window.requestAnimationFrame(() => {
+        promptFrame = undefined;
+        if (disposed) return;
+        const next = promptTracker.snapshot(connectionIdRef.current, terminal.buffer.active);
+        setPromptSnapshot((previous) => Object.keys(next).every((key) => next[key as keyof TerminalPromptSnapshot] === previous[key as keyof TerminalPromptSnapshot]) ? previous : next);
+        const screen = host.querySelector(".xterm-screen")?.getBoundingClientRect();
+        const pane = host.parentElement?.getBoundingClientRect();
+        let position: CSSProperties = { left: 10, bottom: 12 };
+        if (screen && pane && screen.height > 0 && next.phase === "prompt") {
+          const buffer = terminal.buffer.active;
+          const cursorRow = buffer.baseY + buffer.cursorY - buffer.viewportY;
+          const cellHeight = screen.height / terminal.rows;
+          const cursorTop = screen.top - pane.top + cursorRow * cellHeight;
+          if (cursorRow >= 0 && cursorRow < terminal.rows) {
+            const spaceBelow = Math.max(0, pane.height - cursorTop - cellHeight - 14);
+            const spaceAbove = Math.max(0, cursorTop - 38);
+            const showBelow = spaceBelow >= 300 || spaceBelow >= spaceAbove;
+            position = {
+              left: Math.max(10, Math.min(pane.width - Math.min(570, pane.width - 20) - 10, screen.left - pane.left + buffer.cursorX * screen.width / terminal.cols)),
+              ...(showBelow
+                ? { top: cursorTop + cellHeight + 4, maxHeight: spaceBelow }
+                : { bottom: Math.max(10, pane.height - cursorTop + 4), maxHeight: spaceAbove }),
+            };
+          }
+        }
+        setSuggestionStyle((previous) => JSON.stringify(previous) === JSON.stringify(position) ? previous : position);
+      });
+    };
+    publishPromptRef.current = publishPrompt;
+    const executionCursor = () => ({ buffer: terminal.buffer.active, marker: () => terminal.registerMarker(0) });
+    const promptDisposable = terminal.parser.registerOscHandler(133, (data) => {
+      const previous = executionLedger.getSnapshot();
+      executionLedger.osc(data, executionCursor());
+      if (previous !== executionLedger.getSnapshot()) publishExecutions();
+      promptTracker.osc(data, terminal.buffer.active.cursorX, () => terminal.registerMarker(0));
+      publishPrompt();
+      return true;
+    });
+    const directoryDisposable = terminal.parser.registerOscHandler(7, (data) => {
+      const directory = parseTerminalDirectory(data);
+      if (directory && connectionIdRef.current) onDirectoryChangeRef.current?.(connectionIdRef.current, directory);
+      return true;
+    });
+    const promptOutputDisposable = terminal.onWriteParsed(publishPrompt);
+    const promptBufferDisposable = terminal.buffer.onBufferChange(() => {
+      // A full-screen app can restore a buffer containing an old prompt. Its
+      // input state must not be reused after the app exits.
+      promptTracker.input("\x1b");
+      publishPrompt();
+    });
+    const promptScrollDisposable = terminal.onScroll(publishPrompt);
     const searchResultsDisposable = searchAddon.onDidChangeResults((result) => {
       setSearchResults(result.resultCount > 0
         ? { index: result.resultIndex, count: result.resultCount }
@@ -343,19 +457,95 @@ export function TerminalPane({
       const connectionId = connectionIdRef.current;
       if (!connectionId || pendingInput.length === 0) {
         pendingInput = "";
+        pendingExecutionIds = [];
         return;
       }
       const data = pendingInput;
+      const recordIds = pendingExecutionIds;
       pendingInput = "";
+      pendingExecutionIds = [];
+      inputWrites += 1;
       void api.terminalWrite(connectionId, data).catch((error) => {
+        recordIds.forEach((id) => executionLedger.failed(id));
+        if (recordIds.length) publishExecutions();
         terminal.writeln(`\r\n\x1b[31m输入发送失败：${String(error)}\x1b[0m`);
-      });
+      }).finally(() => { inputWrites -= 1; });
     };
     const queueText = (text: string) => {
+      const before = promptTracker.snapshot(connectionIdRef.current, terminal.buffer.active);
+      const submitted = promptTracker.input(text);
+      if (submitted && !/^\s/.test(submitted) && safeCompletionCommand(submitted)) {
+        if (connectionIdRef.current) {
+          pendingExecutionIds.push(executionLedger.sent(submitted, connectionIdRef.current, "terminal", executionCursor(), before.integrated && before.command === submitted, before.ready));
+          publishExecutions();
+        }
+        try {
+          recordCommandHistory(loadCommandHistory(), { sessionId: session.id, sessionName: session.name, command: submitted, source: "terminal" });
+        } catch {
+          // Storage failure must never interrupt terminal input.
+        }
+      }
+      publishPrompt();
       pendingInput += text;
       if (pendingInput.length >= 4096) flushInput();
       else if (inputTimer === undefined) inputTimer = window.setTimeout(flushInput, 8);
     };
+    setupShellRef.current = async (owner) => {
+      const connectionId = connectionIdRef.current;
+      const current = promptTracker.snapshot(connectionId, terminal.buffer.active);
+      if (disposed || !connectionId || !sameTerminalPrompt(owner, current)
+        || pendingInput || inputWrites > 0 || terminal.buffer.active.type !== "normal"
+        || (current.integrated && (!current.ready || current.command !== ""))) {
+        throw new Error("终端连接或输入已变化，请回到空白的 Shell 提示符后重试。");
+      }
+      // This path sends only our fixed per-shell initializer, after explicit
+      // confirmation. It never executes the generated AI suggestion.
+      const text = `${SHELL_INTEGRATION_COMMAND}\r`;
+      promptTracker.input(text);
+      publishPrompt();
+      inputWrites += 1;
+      try {
+        await api.terminalWrite(connectionId, text);
+      } finally {
+        inputWrites -= 1;
+      }
+    };
+    sendCommandRef.current = async (text, source, executionId) => {
+      const connectionId = connectionIdRef.current;
+      if (!connectionId || disposed) throw new Error("目标终端尚未连接。");
+      const before = promptTracker.snapshot(connectionId, terminal.buffer.active);
+      if (source === "ai" && (pendingInput || inputWrites > 0 || (before.integrated && (!before.ready || before.command !== "")))) {
+        throw new Error("请先回到空白的 Shell 提示符，再发送 AI 命令；当前命令尚未结束或输入行有内容。");
+      }
+      const id = executionLedger.sent(text, connectionId, source, executionCursor(), before.ready && before.command === "", false, executionId);
+      publishExecutions();
+      promptTracker.input(text);
+      publishPrompt();
+      inputWrites += 1;
+      try {
+        await api.terminalWrite(connectionId, text);
+      } catch (error) {
+        executionLedger.failed(id);
+        publishExecutions();
+        throw error;
+      } finally {
+        inputWrites -= 1;
+      }
+    };
+    const executeAiCommand = (event: Event) => {
+      const request = (event as CustomEvent<TerminalExecutionRequest>).detail;
+      if (request.connectionId === connectionIdRef.current) request.accept(sendCommandRef.current!(request.text, "ai", request.executionId));
+    };
+    window.addEventListener("xsh:execute-ai-command", executeAiCommand);
+    const suggestAfterExecution = (event: Event) => {
+      const request = (event as CustomEvent<{ connectionId: string; context: string }>).detail;
+      if (request.connectionId !== connectionIdRef.current || !visibleRef.current) return;
+      setExecutionsVisible(false);
+      terminal.scrollToBottom();
+      publishPrompt();
+      suggestionsRef.current?.open({ goal: "根据这次命令的实际结果，给出下一步检查命令", output: request.context });
+    };
+    window.addEventListener("xsh:execution-next-command", suggestAfterExecution);
     const queueBinary = (bytes: Uint8Array) => {
       flushInput();
       const connectionId = connectionIdRef.current;
@@ -448,6 +638,7 @@ export function TerminalPane({
     };
 
     terminal.attachCustomKeyEventHandler((event) => {
+      if (event.isComposing) return true;
       const mapping = (session.terminal.keyMappings ?? []).find((candidate) =>
         candidate.enabled && candidate.text && matchesTerminalShortcut(event, candidate.shortcut),
       );
@@ -455,6 +646,29 @@ export function TerminalPane({
         event.preventDefault();
         event.stopImmediatePropagation();
         queueText(decodeTerminalKeyMapping(mapping.text));
+        return false;
+      }
+      const appShortcuts = isMac || preferencesRef.current.terminalShortcutMode !== "remote-first";
+      const completionShortcut = event.code === "Space" && event.shiftKey && !event.altKey
+        && (isMac ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey);
+      if (appShortcuts && completionShortcut) {
+        if (event.type === "keydown") {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          terminal.scrollToBottom();
+          publishPrompt();
+          suggestionsRef.current?.open();
+        }
+        return false;
+      }
+      if (appShortcuts && event.type === "keydown" && event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey && event.key === "Enter" && suggestionsRef.current?.accept()) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        return false;
+      }
+      if (appShortcuts && event.type === "keydown" && event.key === "Escape" && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey && suggestionsRef.current?.dismiss()) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
         return false;
       }
       const copy = isCopyShortcut(event);
@@ -597,6 +811,7 @@ export function TerminalPane({
       queueBinary(Uint8Array.from(data, (character) => character.charCodeAt(0)));
     });
     const resizeDisposable = terminal.onResize(({ cols, rows }) => {
+      publishPrompt();
       if (resizeTimer) window.clearTimeout(resizeTimer);
       resizeTimer = window.setTimeout(() => {
         const connectionId = connectionIdRef.current;
@@ -699,8 +914,15 @@ export function TerminalPane({
         reconnectTimer = undefined;
       }
       const previousConnectionId = connectionIdRef.current;
+      executionLedger.disconnected(terminal.buffer.active);
+      publishExecutions();
       connectionIdRef.current = null;
+      pendingInput = "";
+      pendingExecutionIds = [];
+      promptTracker.reset();
+      publishPrompt();
       onConnectionChange?.(null);
+      onDirectoryChangeRef.current?.(null, null);
       if (previousConnectionId) {
         void api.disconnectTerminal(previousConnectionId).catch(() => undefined);
       }
@@ -756,8 +978,15 @@ export function TerminalPane({
             } else if (state === "disconnected") {
               connectionEnded = true;
               outputAcknowledger.stop();
+              executionLedger.disconnected(terminal.buffer.active);
+              publishExecutions();
               connectionIdRef.current = null;
+              pendingInput = "";
+              pendingExecutionIds = [];
+              promptTracker.reset();
+              publishPrompt();
               onConnectionChange?.(null);
+              onDirectoryChangeRef.current?.(null, null);
               if (scheduleReconnect()) break;
             }
             reportState(state);
@@ -823,6 +1052,7 @@ export function TerminalPane({
           await api.terminalAcknowledgeOutput(id, consumedBytes);
         });
         connectionIdRef.current = id;
+        publishPrompt();
         onConnectionChange?.(id);
         setConnectionError(null);
         setConnectionEpoch((current) => current + 1);
@@ -923,6 +1153,15 @@ export function TerminalPane({
       if (wakeCheckTimer) window.clearInterval(wakeCheckTimer);
       if (selectionCopyTimer) window.clearTimeout(selectionCopyTimer);
       if (outputFlushFrame !== undefined) window.cancelAnimationFrame(outputFlushFrame);
+      if (promptFrame !== undefined) window.cancelAnimationFrame(promptFrame);
+      publishPromptRef.current = null;
+      sendCommandRef.current = null;
+      setupShellRef.current = null;
+      window.removeEventListener("xsh:execute-ai-command", executeAiCommand);
+      window.removeEventListener("xsh:execution-next-command", suggestAfterExecution);
+      executionLedger.disconnected(terminal.buffer.active);
+      publishExecutions();
+      promptTracker.reset();
       pendingOutput = [];
       pendingOutputHead = 0;
       pendingOutputBytes = 0;
@@ -934,6 +1173,11 @@ export function TerminalPane({
       binaryDisposable.dispose();
       resizeDisposable.dispose();
       searchResultsDisposable.dispose();
+      promptDisposable.dispose();
+      directoryDisposable.dispose();
+      promptOutputDisposable.dispose();
+      promptBufferDisposable.dispose();
+      promptScrollDisposable.dispose();
       resizeObserver.disconnect();
       setContextMenu(null);
       host.removeEventListener("contextmenu", nativeContextMenu, true);
@@ -964,7 +1208,7 @@ export function TerminalPane({
     lastCommandIdRef.current = command.id;
     const terminal = terminalRef.current;
     const text = normalizeTerminalCommand(command.text);
-    void api.terminalWrite(connectionId, text)
+    void (sendCommandRef.current?.(text, "command") ?? Promise.reject(new Error("终端尚未就绪")))
       .then(() => {
         terminal?.focus();
         onCommandResult({ id: command.id, ok: true, batchRunId: command.batchRunId, targetTabId: command.targetTabId });
@@ -1016,13 +1260,13 @@ export function TerminalPane({
     terminalRef.current?.focus();
   };
 
-  const requestAiContext = (mode: "explain" | "diagnose") => {
+  const requestAiContext = (mode: "explain" | "diagnose" | "command") => {
     const selection = terminalRef.current?.getSelection() ?? "";
     if (!selection.trim()) { setConnectionNotice("请先在终端选择文本，再使用 AI 解释或分析报错。"); return; }
     onAiRequestRef.current?.(mode, selection, "selection");
   };
 
-  const requestRecentAiContext = (mode: "explain" | "diagnose") => {
+  const requestRecentAiContext = (mode: "explain" | "diagnose" | "command") => {
     const terminal = terminalRef.current;
     const text = terminal ? readRecentTerminalOutput(terminal.buffer.active) : "";
     if (!text) { setConnectionNotice("终端还没有可用输出。连接服务器后再附加，或在 AI 面板手动粘贴。"); return; }
@@ -1083,8 +1327,17 @@ export function TerminalPane({
   useEffect(() => {
     if (!focused) return;
     const onShellCommand = (event: Event) => {
-      const kind = (event as CustomEvent<{ kind?: string }>).detail?.kind;
-      if (kind === "aiExplain" || kind === "aiDiagnose") {
+      const detail = (event as CustomEvent<{ kind?: string; mode?: string }>).detail;
+      const kind = detail?.kind;
+      if (kind === "aiSelection" || kind === "aiRecentOutput") {
+        const mode = detail.mode;
+        if (mode === "command" || mode === "explain" || mode === "diagnose") {
+          if (kind === "aiSelection") requestAiContext(mode);
+          else requestRecentAiContext(mode);
+        }
+      } else if (kind === "aiComplete") {
+        openCommandSuggestions();
+      } else if (kind === "aiExplain" || kind === "aiDiagnose") {
         requestAiContext(kind === "aiExplain" ? "explain" : "diagnose");
       } else if (kind === "aiRecentExplain" || kind === "aiRecentDiagnose") {
         requestRecentAiContext(kind === "aiRecentExplain" ? "explain" : "diagnose");
@@ -1140,11 +1393,18 @@ export function TerminalPane({
         <button type="button" onClick={() => applyTerminalFontSize(currentFontSize - 1)} title={`缩小当前终端字号 · ${IS_MACOS ? "⌘-" : "Ctrl+Shift+-"}`} aria-label="缩小当前终端字号"><Minus size={14} /></button>
         <button type="button" className="terminal-font-size-reset" onClick={() => applyTerminalFontSize(preferences.useSessionTerminalFont ? session.terminal.fontSize || preferences.terminalFontSize : preferences.terminalFontSize)} title={`恢复当前终端字号 · ${IS_MACOS ? "⌘0" : "Ctrl+Shift+0"}`} aria-label="恢复当前终端字号">{currentFontSize}</button>
         <button type="button" onClick={() => applyTerminalFontSize(currentFontSize + 1)} title={`放大当前终端字号 · ${IS_MACOS ? "⌘+" : "Ctrl+Shift++"}`} aria-label="放大当前终端字号"><Plus size={14} /></button>
-        <button type="button" onClick={() => requestAiContext("explain")} title="AI 解释选区（先预览，再发送）" aria-label="AI 解释选区"><Bot size={14} /></button>
+        <button type="button" className="terminal-command-suggestion-toggle" onMouseDown={(event) => event.preventDefault()} onClick={openCommandSuggestions} title={`终端内命令建议 · ${IS_MACOS ? "⌘⇧Space" : preferences.terminalShortcutMode === "remote-first" ? "点击打开，快捷键交给远端" : "Ctrl+Shift+Space"}`} aria-label="终端内命令建议"><Sparkles size={13} /><span>命令建议</span></button>
+        <button type="button" className="terminal-selection-action" aria-label="命令执行记录" aria-expanded={executionsVisible} onClick={() => setExecutionsVisible((value) => !value)}><Activity size={13} /><span>执行记录{executions.length ? ` ${executions.length}` : ""}</span></button>
         <button type="button" onClick={() => terminalRef.current?.scrollToBottom()} title="滚动到底部" aria-label="滚动到底部"><ChevronDown size={14} /></button>
         <button type="button" onClick={() => reconnectRef.current?.()} title="重新连接" aria-label="重新连接"><RefreshCw size={14} /></button>
         </>}
       </div>
+      {executionsVisible && <section className="terminal-execution-popover" aria-label="本标签执行记录">
+        <header><strong>本标签执行记录</strong><button type="button" className="icon-button" aria-label="关闭执行记录" onClick={() => setExecutionsVisible(false)}><X size={14} /></button></header>
+        <TerminalExecutionList records={executions} connectionId={connectionIdRef.current}
+          onAnalyze={(record) => { const context = executionAiContext(record); if (context !== null) { onAiRequestRef.current?.("diagnose", context, "execution"); setExecutionsVisible(false); } }}
+          onSuggestNext={(record) => { const context = executionAiContext(record); if (context !== null) { setExecutionsVisible(false); terminalRef.current?.scrollToBottom(); suggestionsRef.current?.open({ goal: "根据这次命令的实际结果，给出下一步检查命令", output: context }); } }} />
+      </section>}
       {connectionError && (
         <div className="terminal-connection-error" role="alert">
           <div className="connection-error-copy">
@@ -1214,6 +1474,46 @@ export function TerminalPane({
         </div>
       )}
       <div className="xterm-host" ref={hostRef} />
+      {visible && focused && !authChallenge && (
+        <TerminalCommandSuggestions
+          ref={suggestionsRef}
+          sessionId={session.id}
+          sessionName={session.name}
+          shortcutsEnabled={IS_MACOS || preferences.terminalShortcutMode !== "remote-first"}
+          snapshot={promptSnapshot}
+          style={suggestionStyle}
+          getSnapshot={readPromptSnapshot}
+          getContext={() => terminalRef.current ? readRecentTerminalOutput(terminalRef.current.buffer.active) : ""}
+          onAccept={acceptCommandSuggestion}
+          onSetup={async (owner, isCurrent) => {
+            const terminal = terminalRef.current;
+            const prompt = readPromptSnapshot();
+            if (!isCurrent() || !terminal || terminal.buffer.active.type !== "normal"
+              || !sameTerminalPrompt(owner, prompt)
+              || (prompt.integrated && (!prompt.ready || prompt.command !== ""))) {
+              throw new Error("请先回到空白的 Bash / Zsh 提示符，再启用 Shell 集成。");
+            }
+            const confirmed = await confirmDialog({
+              title: "启用 Shell 集成",
+              message: <div className="shell-setup-confirm">
+                <p>将在「{session.name}」的当前连接启用命令填入、执行结果识别和目录跟随。仅本次 Shell 生效，不修改远端配置文件。</p>
+                <p>请确认终端正停在空白的 Bash / Zsh 提示符，当前没有程序正在运行或等待密码。</p>
+                <details><summary>查看将执行的集成命令</summary><code>{SHELL_INTEGRATION_COMMAND}</code></details>
+              </div>,
+              confirmLabel: "确认启用",
+            });
+            if (!confirmed || !isCurrent()) return false;
+            if (terminal !== terminalRef.current || !visibleRef.current || !setupShellRef.current) {
+              throw new Error("原终端已关闭或切换，请回到目标终端后重试。");
+            }
+            terminal.scrollToBottom();
+            await setupShellRef.current(owner);
+            terminal.focus();
+            return true;
+          }}
+          onFocusTerminal={() => terminalRef.current?.focus()}
+        />
+      )}
       {contextMenu && (
         <ContextMenu
           x={contextMenu.x}

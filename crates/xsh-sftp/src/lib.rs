@@ -31,6 +31,7 @@ use xsh_ssh::config::resolve_proxy_jump_async;
 
 #[derive(Debug)]
 pub struct SftpConnectOptions {
+    pub session_id: Option<Uuid>,
     pub host: String,
     pub port: u16,
     pub username: String,
@@ -131,12 +132,16 @@ struct DownloadFileRequest<'a> {
 struct TerminalTransferContext {
     transfer_id: TransferId,
     connection_id: ConnectionId,
+    session_id: Option<Uuid>,
+    batch_id: Option<Uuid>,
     endpoint: String,
     submission_sequence: u64,
     direction: TransferDirection,
     local_path: PathBuf,
     remote_path: String,
     total_bytes: u64,
+    retry_of: Option<TransferId>,
+    retry_count: u32,
 }
 
 impl TerminalTransferContext {
@@ -150,6 +155,8 @@ impl TerminalTransferContext {
         TransferEvent {
             transfer_id: self.transfer_id,
             connection_id: self.connection_id,
+            session_id: self.session_id,
+            batch_id: self.batch_id,
             endpoint: self.endpoint.clone(),
             direction: self.direction.clone(),
             local_path: self.local_path.clone(),
@@ -162,6 +169,8 @@ impl TerminalTransferContext {
             submission_sequence: self.submission_sequence,
             queue_position: None,
             waiting_reason: None,
+            retry_of: self.retry_of,
+            retry_count: self.retry_count,
         }
     }
 }
@@ -1011,6 +1020,19 @@ struct ManagedTransfer {
     /// Set when the worker reaches a terminal state; drives retention-based
     /// pruning so finished transfers cannot accumulate unboundedly.
     finished_at: Option<Instant>,
+    overwrite: bool,
+    retry_pending: bool,
+}
+
+fn transfer_keeps_connection(transfer: &ManagedTransfer) -> bool {
+    !transfer.worker_finished.load(Ordering::Acquire)
+        || transfer.retry_pending
+        || transfer.snapshot.lock().is_ok_and(|snapshot| {
+            matches!(
+                snapshot.status,
+                TransferStatus::Failed | TransferStatus::Cancelled
+            )
+        })
 }
 
 struct ManagedTransferParams {
@@ -1022,6 +1044,17 @@ struct ManagedTransferParams {
     scheduler_host_key: String,
     destination_lease: TransferDestinationLease,
     session: Arc<SftpSession>,
+    overwrite: bool,
+    retry_of: Option<TransferId>,
+    retry_count: u32,
+    batch_id: Option<Uuid>,
+}
+
+#[derive(Default)]
+struct TransferLineage {
+    retry_of: Option<TransferId>,
+    retry_count: u32,
+    batch_id: Option<Uuid>,
 }
 
 /// Owns the per-transfer progress reporter plus the last reported byte count
@@ -1532,6 +1565,7 @@ async fn authenticate_sftp_session(
 }
 
 struct ActiveSftpConnection {
+    session_id: Option<Uuid>,
     sftp: Arc<SftpSession>,
     download_source_identity: String,
     scheduler_host_key: String,
@@ -1547,6 +1581,7 @@ struct SftpManagerInner {
     active_destinations: StdMutex<HashSet<TransferArtifact>>,
     scheduler: TransferScheduler,
     next_submission_sequence: AtomicU64,
+    retention_cleanup_scheduled: AtomicBool,
 }
 
 #[derive(Clone, Default)]
@@ -1724,6 +1759,7 @@ impl SftpManager {
         self.inner.connections.lock().await.insert(
             connection_id,
             ActiveSftpConnection {
+                session_id: options.session_id,
                 sftp: Arc::new(sftp),
                 download_source_identity,
                 scheduler_host_key,
@@ -1747,23 +1783,12 @@ impl SftpManager {
         &self,
         connection_id: ConnectionId,
     ) -> Result<(), SftpManagerError> {
-        let has_active_transfers = self
-            .inner
-            .transfers
+        self.inner
+            .released_connections
             .lock()
             .await
-            .values()
-            .filter(|transfer| transfer.connection_id == connection_id)
-            .any(|transfer| !transfer.worker_finished.load(Ordering::Acquire));
-        if has_active_transfers {
-            self.inner
-                .released_connections
-                .lock()
-                .await
-                .insert(connection_id);
-            return Ok(());
-        }
-        self.close_connection(connection_id).await
+            .insert(connection_id);
+        self.close_released_connection_if_idle(connection_id).await
     }
 
     pub async fn list_transfers(&self) -> TransferListSnapshot {
@@ -1828,7 +1853,7 @@ impl SftpManager {
                 // flows stay idempotent.
                 return Ok(());
             };
-            if !transfer.worker_finished.load(Ordering::Acquire) {
+            if !transfer.worker_finished.load(Ordering::Acquire) || transfer.retry_pending {
                 return Err(SftpManagerError::Operation(anyhow::anyhow!(
                     "cannot remove an active transfer"
                 )));
@@ -1857,8 +1882,9 @@ impl SftpManager {
             let mut finished: Vec<(Instant, TransferId)> = transfers
                 .iter()
                 .filter_map(|(transfer_id, transfer)| {
-                    transfer
-                        .finished_at
+                    (!transfer.retry_pending)
+                        .then_some(transfer.finished_at)
+                        .flatten()
                         .map(|finished_at| (finished_at, *transfer_id))
                 })
                 .collect();
@@ -1975,7 +2001,7 @@ impl SftpManager {
             .await
             .values()
             .filter(|transfer| transfer.connection_id == connection_id)
-            .any(|transfer| !transfer.worker_finished.load(Ordering::Acquire));
+            .any(transfer_keeps_connection);
         if has_active_transfers {
             return Ok(());
         }
@@ -2124,11 +2150,49 @@ impl SftpManager {
         remote_path: String,
         overwrite: bool,
     ) -> Result<TransferSubscription, SftpManagerError> {
+        self.upload_in_batch(connection_id, local_path, remote_path, overwrite, None)
+            .await
+    }
+
+    pub async fn upload_in_batch(
+        &self,
+        connection_id: ConnectionId,
+        local_path: PathBuf,
+        remote_path: String,
+        overwrite: bool,
+        batch_id: Option<Uuid>,
+    ) -> Result<TransferSubscription, SftpManagerError> {
+        self.upload_with_retry(
+            connection_id,
+            local_path,
+            remote_path,
+            overwrite,
+            TransferLineage {
+                batch_id,
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    async fn upload_with_retry(
+        &self,
+        connection_id: ConnectionId,
+        local_path: PathBuf,
+        remote_path: String,
+        overwrite: bool,
+        lineage: TransferLineage,
+    ) -> Result<TransferSubscription, SftpManagerError> {
         let (session, source_identity, scheduler_host_key) =
             self.transfer_connection(connection_id).await?;
         let local_metadata = tokio::fs::metadata(&local_path)
             .await
             .with_context(|| format!("failed to read {}", local_path.display()))?;
+        if !local_metadata.is_file() {
+            return Err(SftpManagerError::Operation(anyhow::anyhow!(
+                "上传路径不是普通文件"
+            )));
+        }
         let upload_metadata =
             make_upload_resume_metadata(&local_path, &remote_path, &local_metadata);
         let destination_lease = self.reserve_destination(TransferDestination::remote(
@@ -2145,6 +2209,10 @@ impl SftpManager {
                 scheduler_host_key,
                 destination_lease,
                 session,
+                overwrite,
+                retry_of: lineage.retry_of,
+                retry_count: lineage.retry_count,
+                batch_id: lineage.batch_id,
             },
             move |session, control, run_gate, progress_sink| async move {
                 let mut control = control;
@@ -2176,6 +2244,39 @@ impl SftpManager {
         local_path: PathBuf,
         overwrite: bool,
     ) -> Result<TransferSubscription, SftpManagerError> {
+        self.download_in_batch(connection_id, remote_path, local_path, overwrite, None)
+            .await
+    }
+
+    pub async fn download_in_batch(
+        &self,
+        connection_id: ConnectionId,
+        remote_path: String,
+        local_path: PathBuf,
+        overwrite: bool,
+        batch_id: Option<Uuid>,
+    ) -> Result<TransferSubscription, SftpManagerError> {
+        self.download_with_retry(
+            connection_id,
+            remote_path,
+            local_path,
+            overwrite,
+            TransferLineage {
+                batch_id,
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    async fn download_with_retry(
+        &self,
+        connection_id: ConnectionId,
+        remote_path: String,
+        local_path: PathBuf,
+        overwrite: bool,
+        lineage: TransferLineage,
+    ) -> Result<TransferSubscription, SftpManagerError> {
         let (session, source_identity, scheduler_host_key) =
             self.transfer_connection(connection_id).await?;
         let remote_metadata = session
@@ -2196,6 +2297,10 @@ impl SftpManager {
                 scheduler_host_key,
                 destination_lease,
                 session,
+                overwrite,
+                retry_of: lineage.retry_of,
+                retry_count: lineage.retry_count,
+                batch_id: lineage.batch_id,
             },
             move |session, control, run_gate, progress_sink| async move {
                 let session = &session;
@@ -2221,6 +2326,105 @@ impl SftpManager {
             },
         )
         .await
+    }
+
+    /// Retry only the original backend-owned target and overwrite decision.
+    /// The failed record stays available for diagnosis; a new job carries its lineage.
+    pub async fn retry_transfer(
+        &self,
+        transfer_id: TransferId,
+    ) -> Result<TransferSubscription, SftpManagerError> {
+        let (original, overwrite) = {
+            let mut transfers = self.inner.transfers.lock().await;
+            let transfer = transfers
+                .get_mut(&transfer_id)
+                .ok_or(SftpManagerError::TransferNotFound(transfer_id))?;
+            let original = transfer
+                .snapshot
+                .lock()
+                .map_err(|_| {
+                    SftpManagerError::Operation(anyhow::anyhow!("transfer state lock poisoned"))
+                })?
+                .clone();
+            if transfer.retry_pending
+                || !transfer.worker_finished.load(Ordering::Acquire)
+                || !matches!(
+                    original.status,
+                    TransferStatus::Failed | TransferStatus::Cancelled
+                )
+            {
+                return Err(SftpManagerError::Operation(anyhow::anyhow!(
+                    "只能重试已经结束的失败或已取消任务"
+                )));
+            }
+            transfer.retry_pending = true;
+            (original, transfer.overwrite)
+        };
+        let count = original.retry_count.saturating_add(1);
+        let result = match original.direction {
+            TransferDirection::Upload => {
+                self.upload_with_retry(
+                    original.connection_id,
+                    original.local_path,
+                    original.remote_path,
+                    overwrite,
+                    TransferLineage {
+                        retry_of: Some(transfer_id),
+                        retry_count: count,
+                        batch_id: original.batch_id,
+                    },
+                )
+                .await
+            }
+            TransferDirection::Download => {
+                self.download_with_retry(
+                    original.connection_id,
+                    original.remote_path,
+                    original.local_path,
+                    overwrite,
+                    TransferLineage {
+                        retry_of: Some(transfer_id),
+                        retry_count: count,
+                        batch_id: original.batch_id,
+                    },
+                )
+                .await
+            }
+        };
+        if let Some(transfer) = self.inner.transfers.lock().await.get_mut(&transfer_id) {
+            transfer.retry_pending = false;
+        }
+        result
+    }
+
+    fn schedule_retention_cleanup(&self) {
+        if self
+            .inner
+            .retention_cleanup_scheduled
+            .swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+        let weak = Arc::downgrade(&self.inner);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                let Some(inner) = weak.upgrade() else { return };
+                let manager = SftpManager { inner };
+                manager.prune_finished_transfers().await;
+                let transfers = manager.inner.transfers.lock().await;
+                if !transfers
+                    .values()
+                    .any(|transfer| transfer.finished_at.is_some())
+                {
+                    manager
+                        .inner
+                        .retention_cleanup_scheduled
+                        .store(false, Ordering::Release);
+                    return;
+                }
+            }
+        });
     }
 
     /// Shared submission scaffolding for upload/download: admission queue,
@@ -2255,7 +2459,18 @@ impl SftpManager {
             scheduler_host_key,
             destination_lease,
             session,
+            overwrite,
+            retry_of,
+            retry_count,
+            batch_id,
         } = params;
+        let session_id = self
+            .inner
+            .connections
+            .lock()
+            .await
+            .get(&connection_id)
+            .and_then(|connection| connection.session_id);
         let submission_sequence = self.next_submission_sequence();
         let transfer_id = Uuid::new_v4();
         self.inner
@@ -2267,12 +2482,16 @@ impl SftpManager {
         let context = TerminalTransferContext {
             transfer_id,
             connection_id,
+            session_id,
+            batch_id,
             endpoint: scheduler_host_key.clone(),
             submission_sequence,
             direction,
             local_path,
             remote_path,
             total_bytes,
+            retry_of,
+            retry_count,
         };
         let snapshot = Arc::new(StdMutex::new(context.event(
             TransferStatus::Queued,
@@ -2289,6 +2508,8 @@ impl SftpManager {
                 snapshot: Arc::clone(&snapshot),
                 worker_finished: Arc::clone(&worker_finished),
                 finished_at: None,
+                overwrite,
+                retry_pending: false,
             },
         );
         let _ = event_tx.try_send(
@@ -2328,6 +2549,7 @@ impl SftpManager {
                 .close_released_connection_if_idle(connection_id)
                 .await;
             manager.prune_finished_transfers().await;
+            manager.schedule_retention_cleanup();
         });
 
         Ok(TransferSubscription {
@@ -3921,12 +4143,16 @@ mod tests {
         TerminalTransferContext {
             transfer_id,
             connection_id: Uuid::new_v4(),
+            session_id: None,
+            batch_id: None,
             endpoint: "files.example.com:22".into(),
             submission_sequence: sequence,
             direction,
             local_path: PathBuf::from("C:/tmp/archive.tar"),
             remote_path: "/tmp/archive.tar".into(),
             total_bytes: 2_048,
+            retry_of: None,
+            retry_count: 0,
         }
         .event(status, 512, speed, None)
     }
@@ -4125,12 +4351,16 @@ mod tests {
         let context = TerminalTransferContext {
             transfer_id: Uuid::new_v4(),
             connection_id: Uuid::new_v4(),
+            session_id: None,
+            batch_id: None,
             endpoint: "files.example.com:22".into(),
             submission_sequence: 0,
             direction: TransferDirection::Upload,
             local_path: PathBuf::from("C:/tmp/archive.tar"),
             remote_path: "/tmp/archive.tar".into(),
             total_bytes: 2_048,
+            retry_of: None,
+            retry_count: 0,
         };
         let snapshot = Arc::new(StdMutex::new(context.event(
             TransferStatus::Queued,
@@ -4153,12 +4383,16 @@ mod tests {
         let context = TerminalTransferContext {
             transfer_id: Uuid::new_v4(),
             connection_id: Uuid::new_v4(),
+            session_id: None,
+            batch_id: None,
             endpoint: "files.example.com:22".into(),
             submission_sequence: 0,
             direction: TransferDirection::Upload,
             local_path: PathBuf::from("C:/tmp/archive.tar"),
             remote_path: "/tmp/archive.tar".into(),
             total_bytes: 2_048,
+            retry_of: None,
+            retry_count: 0,
         };
         let snapshot = Arc::new(StdMutex::new(context.event(
             TransferStatus::Paused,
@@ -4189,12 +4423,16 @@ mod tests {
         let context = TerminalTransferContext {
             transfer_id: Uuid::new_v4(),
             connection_id: Uuid::new_v4(),
+            session_id: None,
+            batch_id: None,
             endpoint: "files.example.com:22".into(),
             submission_sequence: 0,
             direction: TransferDirection::Download,
             local_path: PathBuf::from("C:/tmp/archive.tar"),
             remote_path: "/tmp/archive.tar".into(),
             total_bytes: 2_048,
+            retry_of: None,
+            retry_count: 0,
         };
         let event = terminal_transfer_event(context, 1_024, Ok(TransferStatus::Completed));
         assert_eq!(event.status, TransferStatus::Completed);
@@ -4371,12 +4609,16 @@ mod tests {
         let context = TerminalTransferContext {
             transfer_id,
             connection_id,
+            session_id: None,
+            batch_id: None,
             endpoint: "files.example.com:22".into(),
             submission_sequence: 0,
             direction: TransferDirection::Download,
             local_path: PathBuf::from("C:/tmp/archive.tar"),
             remote_path: "/tmp/archive.tar".into(),
             total_bytes: 2048,
+            retry_of: None,
+            retry_count: 0,
         };
         let snapshot = Arc::new(StdMutex::new(context.event(
             TransferStatus::Queued,
@@ -4844,12 +5086,16 @@ mod tests {
         let context = TerminalTransferContext {
             transfer_id,
             connection_id,
+            session_id: None,
+            batch_id: None,
             endpoint: "files.example.com:22".into(),
             submission_sequence: 0,
             direction: TransferDirection::Upload,
             local_path: PathBuf::from("C:/tmp/archive.tar"),
             remote_path: "/tmp/archive.tar".into(),
             total_bytes: 2_048,
+            retry_of: None,
+            retry_count: 0,
         };
         let (control, _control_receiver) = watch::channel(TransferControl::Running);
         let worker_finished = Arc::new(AtomicBool::new(false));
@@ -4860,6 +5106,8 @@ mod tests {
                 control,
                 worker_finished: Arc::clone(&worker_finished),
                 finished_at: None,
+                overwrite: false,
+                retry_pending: false,
                 snapshot: Arc::new(StdMutex::new(context.event(
                     TransferStatus::Running,
                     512,
@@ -4889,6 +5137,154 @@ mod tests {
         assert!(manager.remove_transfer(transfer_id).await.is_err());
         worker_finished.store(true, Ordering::Release);
         assert!(manager.remove_transfer(transfer_id).await.is_ok());
+    }
+
+    async fn register_finished_fixture(
+        manager: &SftpManager,
+        status: TransferStatus,
+        direction: TransferDirection,
+        overwrite: bool,
+    ) -> TransferEvent {
+        let mut event = test_transfer_event(Uuid::new_v4(), 1, status, direction, None);
+        event.error = Some("original fixture failure".into());
+        let (control, _) = watch::channel(TransferControl::Running);
+        manager.inner.transfers.lock().await.insert(
+            event.transfer_id,
+            ManagedTransfer {
+                connection_id: event.connection_id,
+                control,
+                snapshot: Arc::new(StdMutex::new(event.clone())),
+                worker_finished: Arc::new(AtomicBool::new(true)),
+                finished_at: Some(Instant::now()),
+                overwrite,
+                retry_pending: false,
+            },
+        );
+        event
+    }
+
+    #[tokio::test]
+    async fn retry_uses_original_connection_and_preserves_failure_and_overwrite_policy() {
+        for direction in [TransferDirection::Upload, TransferDirection::Download] {
+            for overwrite in [false, true] {
+                let manager = SftpManager::new();
+                let original = register_finished_fixture(
+                    &manager,
+                    TransferStatus::Failed,
+                    direction.clone(),
+                    overwrite,
+                )
+                .await;
+                let error = manager
+                    .retry_transfer(original.transfer_id)
+                    .await
+                    .expect_err("missing original connection");
+                assert!(
+                    matches!(error, SftpManagerError::ConnectionNotFound(id) if id == original.connection_id)
+                );
+                let records = manager.inner.transfers.lock().await;
+                let retained = records.get(&original.transfer_id).unwrap();
+                assert_eq!(*retained.snapshot.lock().unwrap(), original);
+                assert_eq!(retained.overwrite, overwrite);
+                assert!(
+                    !retained.retry_pending,
+                    "an unsuccessful submission must unlock retry"
+                );
+                assert_eq!(records.len(), 1, "must not replace the original failure");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn retry_rejects_completed_active_and_concurrent_submissions() {
+        let manager = SftpManager::new();
+        for status in [
+            TransferStatus::Completed,
+            TransferStatus::Running,
+            TransferStatus::Queued,
+            TransferStatus::Paused,
+        ] {
+            let record =
+                register_finished_fixture(&manager, status, TransferDirection::Upload, false).await;
+            assert!(matches!(
+                manager.retry_transfer(record.transfer_id).await,
+                Err(SftpManagerError::Operation(_))
+            ));
+        }
+        let record = register_finished_fixture(
+            &manager,
+            TransferStatus::Failed,
+            TransferDirection::Download,
+            false,
+        )
+        .await;
+        manager
+            .inner
+            .transfers
+            .lock()
+            .await
+            .get_mut(&record.transfer_id)
+            .unwrap()
+            .retry_pending = true;
+        assert!(matches!(
+            manager.retry_transfer(record.transfer_id).await,
+            Err(SftpManagerError::Operation(_))
+        ));
+        assert!(manager.remove_transfer(record.transfer_id).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn closing_panel_retains_retryable_connection_until_record_expiry() {
+        let manager = SftpManager::new();
+        let original = register_finished_fixture(
+            &manager,
+            TransferStatus::Failed,
+            TransferDirection::Upload,
+            false,
+        )
+        .await;
+        manager
+            .release_connection(original.connection_id)
+            .await
+            .unwrap();
+        assert!(
+            manager
+                .inner
+                .released_connections
+                .lock()
+                .await
+                .contains(&original.connection_id)
+        );
+        manager
+            .inner
+            .transfers
+            .lock()
+            .await
+            .get_mut(&original.transfer_id)
+            .unwrap()
+            .finished_at =
+            Some(Instant::now() - FINISHED_TRANSFER_RETENTION - Duration::from_secs(1));
+        manager.prune_finished_transfers().await;
+        assert!(
+            !manager
+                .inner
+                .transfers
+                .lock()
+                .await
+                .contains_key(&original.transfer_id)
+        );
+        assert!(
+            !manager
+                .inner
+                .released_connections
+                .lock()
+                .await
+                .contains(&original.connection_id)
+        );
+        assert!(matches!(
+            manager.retry_transfer(original.transfer_id).await,
+            Err(SftpManagerError::TransferNotFound(_))
+        ));
     }
 
     #[test]

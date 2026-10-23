@@ -28,6 +28,9 @@ import {
   X,
 } from "lucide-react";
 import { api } from "./api";
+import { executeAiTerminalCommand, executionAiContext, mergeTerminalExecutions, type TerminalExecution } from "./terminal-execution";
+import { directoryCommand } from "./directory-workspace";
+import type { TransferFilter } from "./transfer-queue";
 import { writeClipboardText } from "./clipboard";
 import { CommandCenterModal } from "./components/CommandCenterModal";
 import type { BatchCommandRun, BatchCommandTarget } from "./components/BatchCommandModal";
@@ -38,13 +41,14 @@ import { QuickConnect } from "./components/QuickConnect";
 import { WelcomePanel } from "./components/WelcomePanel";
 import { WorkspaceStatusBar } from "./components/WorkspaceStatusBar";
 import { RightToolPanel } from "./components/RightToolPanel";
+import { ModalFocusManager } from "./components/ModalFocusManager";
 import type { AiContextRequest } from "./components/AiAssistantPanel";
 import type { BeginnerGuideTopic } from "./components/BeginnerGuide";
 import type { SettingsSection } from "./components/SettingsModal";
 import { THEMES } from "./themes";
 import type { QuickConnectAddress } from "./quick-connect";
 import { recordRecentSession } from "./recent-sessions";
-import { normalizeAiTerminalCommand } from "./ai-context";
+import { normalizeAiTerminalCommand, type AiMode } from "./ai-context";
 import { AI_SETTINGS_CHANGED_EVENT } from "./ai-ui";
 import xshIcon from "./assets/xsh-icon.svg";
 import { colorDialog, confirmDialog, isDialogOpen, promptDialog, DialogHost } from "./components/DialogHost";
@@ -131,7 +135,10 @@ interface TerminalPaneHostProps {
   onTrigger: (tabId: string, event: { triggerId: string; label: string; matchedText: string }) => void;
   onEditSession: (session: SavedSession) => void;
   onDiagnose: (session: SavedSession) => void;
-  onAiRequest: (tabId: string, mode: "explain" | "diagnose", text: string, source?: "selection" | "recent-output") => void;
+  onAiRequest: (tabId: string, mode: AiMode, text: string, source?: "selection" | "recent-output" | "execution") => void;
+  initialExecutions?: readonly TerminalExecution[];
+  onExecutionsChange: (tabId: string, records: readonly TerminalExecution[]) => void;
+  onDirectoryChange: (tabId: string, connectionId: string | null, directory: string | null) => void;
 }
 
 const TerminalPaneHost = memo(function TerminalPaneHost({
@@ -149,11 +156,16 @@ const TerminalPaneHost = memo(function TerminalPaneHost({
   onEditSession,
   onDiagnose,
   onAiRequest,
+  initialExecutions,
+  onExecutionsChange,
+  onDirectoryChange,
 }: TerminalPaneHostProps) {
   const handleStateChange = useCallback((state: string) => onStateChange(tab.id, state), [onStateChange, tab.id]);
   const handleConnectionChange = useCallback((connectionId: string | null) => onConnectionChange(tab.id, connectionId), [onConnectionChange, tab.id]);
   const handleFocus = useCallback(() => onFocus(tab.id), [onFocus, tab.id]);
-  const handleAiRequest = useCallback((mode: "explain" | "diagnose", text: string, source?: "selection" | "recent-output") => onAiRequest(tab.id, mode, text, source), [onAiRequest, tab.id]);
+  const handleAiRequest = useCallback((mode: AiMode, text: string, source?: "selection" | "recent-output" | "execution") => onAiRequest(tab.id, mode, text, source), [onAiRequest, tab.id]);
+  const handleExecutionsChange = useCallback((records: readonly TerminalExecution[]) => onExecutionsChange(tab.id, records), [onExecutionsChange, tab.id]);
+  const handleDirectoryChange = useCallback((connectionId: string | null, directory: string | null) => onDirectoryChange(tab.id, connectionId, directory), [onDirectoryChange, tab.id]);
   const handleTrigger = useCallback(
     (event: { triggerId: string; label: string; matchedText: string }) => onTrigger(tab.id, event),
     [onTrigger, tab.id],
@@ -175,6 +187,9 @@ const TerminalPaneHost = memo(function TerminalPaneHost({
       onEditSession={onEditSession}
       onDiagnose={onDiagnose}
       onAiRequest={handleAiRequest}
+      initialExecutions={initialExecutions}
+      onExecutionsChange={handleExecutionsChange}
+      onDirectoryChange={handleDirectoryChange}
     />
   );
 });
@@ -188,7 +203,7 @@ const RemoteDesktopPaneHost = memo(function RemoteDesktopPaneHost({
   onConnectionChange,
   onFocus,
   onEditSession,
-}: Omit<TerminalPaneHostProps, "preferences" | "command" | "onCommandResult" | "onTrigger" | "onDiagnose" | "onAiRequest">) {
+}: Omit<TerminalPaneHostProps, "preferences" | "command" | "onCommandResult" | "onTrigger" | "onDiagnose" | "onAiRequest" | "onExecutionsChange" | "initialExecutions" | "onDirectoryChange">) {
   const handleStateChange = useCallback((state: string) => onStateChange(tab.id, state), [onStateChange, tab.id]);
   const handleConnectionChange = useCallback((connectionId: string | null) => onConnectionChange(tab.id, connectionId), [onConnectionChange, tab.id]);
   const handleFocus = useCallback(() => onFocus(tab.id), [onFocus, tab.id]);
@@ -379,11 +394,14 @@ type TerminalShellCommand =
   | "aiExplain"
   | "aiDiagnose"
   | "aiRecentExplain"
-  | "aiRecentDiagnose";
+  | "aiRecentDiagnose"
+  | "aiComplete"
+  | "aiSelection"
+  | "aiRecentOutput";
 
 /** Sends a chrome command (menu bar / toolbar) to the focused terminal pane. */
-function runTerminalAction(kind: TerminalShellCommand) {
-  window.dispatchEvent(new CustomEvent("xsh:terminal-action", { detail: { kind } }));
+function runTerminalAction(kind: TerminalShellCommand, mode?: AiMode) {
+  window.dispatchEvent(new CustomEvent("xsh:terminal-action", { detail: { kind, mode } }));
 }
 
 function AppLogo({ size = 16 }: { size?: number }) {
@@ -439,6 +457,8 @@ function App() {
   const [groupEditor, setGroupEditor] = useState<GroupEditorState | null>(null);
   const [preferences, setPreferences] = useState<AppPreferences>(() => loadPreferences());
   const [sideTool, setSideTool] = useState<"files" | "ai" | null>(null);
+  const [fileWorkspaceExpanded, setFileWorkspaceExpanded] = useState(false);
+  const [remoteLocationRequest, setRemoteLocationRequest] = useState<{ id: string; sessionId: string; path: string } | null>(null);
   const sftpVisible = sideTool === "files";
   const aiVisible = sideTool === "ai";
   const setSftpVisible = (value: boolean | ((previous: boolean) => boolean)) => setSideTool((current) => {
@@ -446,6 +466,9 @@ function App() {
     return next ? "files" : current === "files" ? null : current;
   });
   const [aiContextRequest, setAiContextRequest] = useState<AiContextRequest | null>(null);
+  const [terminalDirectories, setTerminalDirectories] = useState<Record<string, { connectionId: string; path: string }>>({});
+  const terminalDirectoriesRef = useRef(terminalDirectories);
+  terminalDirectoriesRef.current = terminalDirectories;
   useEffect(() => {
     const clearPendingContext = () => setAiContextRequest(null);
     window.addEventListener(AI_SETTINGS_CHANGED_EVENT, clearPendingContext);
@@ -458,9 +481,21 @@ function App() {
   const aiRequestCounter = useRef(0);
   useEffect(() => { if (aiVisible) setAiPanelMounted(true); }, [aiVisible]);
   const [transferManagerVisible, setTransferManagerVisible] = useState(false);
+  const [transferManagerFilter, setTransferManagerFilter] = useState<TransferFilter>("all");
+  const openTransferManager = (filter: TransferFilter = "all") => {
+    setTransferManagerFilter(filter);
+    setTransferManagerVisible(true);
+  };
   const [portForwardVisible, setPortForwardVisible] = useState(false);
   const [remoteDesktopVisible, setRemoteDesktopVisible] = useState(false);
   const [connectionIds, setConnectionIds] = useState<Record<string, string | null>>({});
+  const [terminalExecutions, setTerminalExecutions] = useState<Record<string, readonly TerminalExecution[]>>({});
+  useEffect(() => {
+    setTerminalExecutions((previous) => {
+      const retained = Object.entries(previous).filter(([tabId]) => tabs.some((tab) => tab.id === tabId));
+      return retained.length === Object.keys(previous).length ? previous : Object.fromEntries(retained);
+    });
+  }, [tabs]);
   const connectionIdsRef = useRef(connectionIds);
   connectionIdsRef.current = connectionIds;
   const [settingsVisible, setSettingsVisible] = useState(false);
@@ -478,6 +513,11 @@ function App() {
   const [batchCommandRun, setBatchCommandRun] = useState<BatchCommandRun | null>(null);
   const [commands, setCommands] = useState<CommandSnippet[]>(() => loadCommandLibrary());
   const [commandHistory, setCommandHistory] = useState<CommandHistoryEntry[]>(() => loadCommandHistory());
+  useEffect(() => {
+    const refresh = () => setCommandHistory(loadCommandHistory());
+    window.addEventListener("xsh:command-history-changed", refresh);
+    return () => window.removeEventListener("xsh:command-history-changed", refresh);
+  }, []);
   const [historyVisible, setHistoryVisible] = useState(false);
   const [quickCommands, setQuickCommands] = useState<Array<QuickCommandItem | null>>(() => loadQuickCommandBar());
   const [pendingTerminalCommands, setPendingTerminalCommands] = useState<Record<string, TerminalCommandRequest>>({});
@@ -801,7 +841,7 @@ function App() {
     ]));
     if (source !== "命令历史" && activeTab) {
       const historySource = source === "命令中心" ? "command-center" : "quick-command";
-      const nextHistory = recordCommandHistory(commandHistory, {
+      const nextHistory = recordCommandHistory(loadCommandHistory(), {
         sessionId: activeTab.session.id,
         sessionName: activeTab.session.name,
         command: text,
@@ -837,14 +877,31 @@ function App() {
     setConnectionIds((current) => ({ ...current, [tabId]: connectionId }));
   }, []);
 
-  const handleAiRequest = useCallback((tabId: string, mode: "explain" | "diagnose", text: string, source: "selection" | "recent-output" = "selection") => {
+  const handleExecutionsChange = useCallback((tabId: string, records: readonly TerminalExecution[]) => {
+    if (!tabsRef.current.some((tab) => tab.id === tabId)) return;
+    setTerminalExecutions((previous) => ({ ...previous, [tabId]: mergeTerminalExecutions(previous[tabId] ?? [], records) }));
+  }, []);
+  const handleDirectoryChange = useCallback((tabId: string, connectionId: string | null, directory: string | null) => {
+    if (!tabsRef.current.some((tab) => tab.id === tabId) || (connectionId && connectionIdsRef.current[tabId] !== connectionId)) return;
+    setTerminalDirectories((previous) => {
+      if (!connectionId || !directory) {
+        if (!previous[tabId]) return previous;
+        const next = { ...previous }; delete next[tabId]; return next;
+      }
+      return previous[tabId]?.connectionId === connectionId && previous[tabId]?.path === directory ? previous : { ...previous, [tabId]: { connectionId, path: directory } };
+    });
+  }, []);
+
+  const handleAiRequest = useCallback((tabId: string, mode: AiMode, text: string, source: "selection" | "recent-output" | "execution" = "selection") => {
     const tab = tabsRef.current.find((candidate) => candidate.id === tabId);
     if (!tab || tab.session.kind === "remoteDesktop") return;
-    setAiContextRequest({ id: ++aiRequestCounter.current, tabId, sessionName: tab.session.name, connectionVersion: tab.connectionVersion, connectionId: connectionIdsRef.current[tabId] ?? null, mode, text, source });
+    const directory = terminalDirectoriesRef.current[tabId];
+    const connectionId = connectionIdsRef.current[tabId] ?? null;
+    setAiContextRequest({ id: ++aiRequestCounter.current, tabId, sessionName: tab.session.name, connectionVersion: tab.connectionVersion, connectionId, mode, text, source, host: `${tab.session.username}@${tab.session.host}:${tab.session.port}`, directory: directory?.connectionId === connectionId ? directory.path : null });
     setSideTool("ai");
   }, []);
 
-  const sendAiDraft = async (text: string, tabId: string, generationVersion: number, generationConnectionId: string | null) => {
+  const sendAiDraft = async (text: string, tabId: string, generationVersion: number, generationConnectionId: string | null, executionId?: string) => {
     const command = text.trim();
     const terminalData = normalizeAiTerminalCommand(command);
     const target = tabsRef.current.find((tab) => tab.id === tabId);
@@ -856,11 +913,12 @@ function App() {
       message: `本次执行目标：${target.session.name}\n${target.session.username}@${target.session.host}:${target.session.port}\n仅发送到此一个会话。\n\n${command}`,
       confirmLabel: "发送到此会话",
     });
-    if (!confirmed) return;
+    if (!confirmed) return false;
     const current = tabsRef.current.find((tab) => tab.id === tabId);
     if (!current || current.state !== "connected" || current.connectionVersion !== target.connectionVersion || connectionIdsRef.current[tabId] !== connectionId) throw new Error("确认期间目标连接已变化，请重新检查目标后生成草稿。");
-    await api.terminalWrite(connectionId, terminalData);
+    await executeAiTerminalCommand(connectionId, terminalData, executionId);
     setToast(`AI 命令已发送到“${target.session.name}”。`);
+    return true;
   };
 
   const handleTerminalFocus = useCallback((tabId: string) => {
@@ -1881,6 +1939,7 @@ function App() {
         { label: "会话管理器", shortcut: "Ctrl+Shift+B", checked: sidebarVisible, onClick: toggleSidebar },
         { label: "SFTP 文件面板", checked: sftpVisible, disabled: !activeTab || activeTab.session.kind === "remoteDesktop", onClick: () => setSftpVisible((value) => !value) },
         { label: "AI 助手", checked: aiVisible, onClick: () => setSideTool((current) => current === "ai" ? null : "ai") },
+        { label: "终端内命令建议", shortcut: IS_MACOS ? "⌘⇧Space" : "Ctrl+Shift+Space", disabled: !activeTab || activeTab.session.kind === "remoteDesktop", onClick: () => runTerminalAction("aiComplete") },
         { label: "端口转发", checked: portForwardVisible, disabled: !activeTabConnected || activeTabConnected.session.kind === "remoteDesktop", onClick: () => setPortForwardVisible((value) => !value) },
         { label: "远程桌面面板", checked: remoteDesktopVisible, disabled: !activeTabConnected, onClick: () => setRemoteDesktopVisible((value) => !value) },
         { label: "单终端", separatorBefore: true, checked: paneLayout === "single", onClick: () => updatePaneLayout("single") },
@@ -1903,7 +1962,7 @@ function App() {
         { label: "SFTP 文件传输", checked: sftpVisible, disabled: !activeTab || activeTab.session.kind === "remoteDesktop", onClick: () => setSftpVisible((value) => !value) },
         { label: "会话自动化…", separatorBefore: true, disabled: !activeTab, onClick: () => activeTab && setEditorSession(activeTab.session) },
         { label: "连接管理器…", onClick: () => setConnectionManagerVisible(true) },
-        { label: "传输管理器…", onClick: () => setTransferManagerVisible(true) },
+        { label: "传输管理器…", onClick: () => openTransferManager() },
         { label: "连接诊断…", disabled: !activeTab, onClick: () => activeTab && void runDiagnostic(activeTab.session) },
         { label: "工作区管理…", separatorBefore: true, onClick: () => setWorkspaceManagerVisible(true) },
       ],
@@ -1977,7 +2036,7 @@ function App() {
     ] },
     { label: "会话与网络", secondary: true, actions: [
       { id: "desktop", label: "新建远程桌面", icon: <ScreenShare size={16} />, onClick: openRemoteDesktopEditor },
-      { id: "transfer", label: "传输任务", icon: <TaskQueueIcon />, onClick: () => setTransferManagerVisible(true) },
+      { id: "transfer", label: "传输任务", icon: <TaskQueueIcon />, onClick: () => openTransferManager() },
       { id: "forward", label: "端口转发", icon: <Globe2 size={16} />, onClick: () => setPortForwardVisible((current) => !current), disabled: !activeTabConnected || !terminalAvailable, active: portForwardVisible },
       { id: "remote", label: "远程桌面", icon: <Monitor size={16} />, onClick: () => setRemoteDesktopVisible((current) => !current), disabled: !activeTabConnected, active: remoteDesktopVisible },
       { id: "connections", label: "连接管理", tooltip: `连接管理 · 已连接 ${tabs.filter((tab) => tab.state === "connected").length}/${tabs.length}`, icon: <Activity size={16} />, onClick: () => setConnectionManagerVisible(true) },
@@ -2113,7 +2172,7 @@ function App() {
         />}
 
         <div className="terminal-column">
-        <section className="terminal-workspace">
+        <section className="terminal-workspace" inert={sftpVisible && fileWorkspaceExpanded}>
           <div
             ref={terminalStageRef}
             className={`terminal-stage ${paneLayout !== "single" ? `split-${paneLayout}` : ""}`}
@@ -2160,6 +2219,9 @@ function App() {
                   onEditSession={handleEditSession}
                   onDiagnose={runDiagnostic}
                   onAiRequest={handleAiRequest}
+                  initialExecutions={terminalExecutions[tab.id]}
+                  onExecutionsChange={handleExecutionsChange}
+                  onDirectoryChange={handleDirectoryChange}
                 />
                 );
               })}
@@ -2199,13 +2261,23 @@ function App() {
 
         {(sideTool !== null || aiPanelMounted) && (
           <RightToolPanel tool={sideTool ?? "ai"} visible={sideTool !== null}
+            expanded={sftpVisible && fileWorkspaceExpanded}
+            onCollapseFiles={() => setFileWorkspaceExpanded(false)}
             onOpenAiSettings={() => openSettings("ai")}
             canShowFiles={Boolean(activeTab && activeTab.session.kind !== "remoteDesktop")}
             onSelect={setSideTool} onClose={() => setSideTool(null)}>
             {sftpVisible && activeTab && activeTab.session.kind !== "remoteDesktop" && (
               <Suspense fallback={<div className="panel-message">正在加载 SFTP…</div>}>
-                <SftpPanel key={activeTab.session.id} session={activeTab.session}
+                <SftpPanel key={`${activeTab.session.id}:${activeTab.session.username}@${activeTab.session.host}:${activeTab.session.port}`} session={activeTab.session}
+                  locationRequest={remoteLocationRequest?.sessionId === activeTab.session.id ? remoteLocationRequest : null}
+                  terminalDirectory={terminalDirectories[activeTab.id]?.connectionId === connectionIds[activeTab.id] ? terminalDirectories[activeTab.id]?.path : null}
+                  onOpenTerminalDirectory={(path) => {
+                    const command = directoryCommand(path);
+                    if (command) void sendAiDraft(command, activeTab.id, activeTab.connectionVersion, connectionIds[activeTab.id] ?? null).catch((caught) => setToast(String(caught)));
+                  }}
                   globalTransferConcurrency={preferences.globalSftpTransferConcurrency}
+                  expanded={fileWorkspaceExpanded}
+                  onExpandedChange={setFileWorkspaceExpanded}
                   onClose={() => setSftpVisible(false)} onToast={setToast} />
               </Suspense>
             )}
@@ -2213,11 +2285,14 @@ function App() {
               <Suspense fallback={<div className="panel-message">正在加载 AI 助手…</div>}>
                 <AiAssistantPanel
                   openTabIds={tabs.filter((tab) => tab.session.kind !== "remoteDesktop").map((tab) => tab.id)}
-                  target={activeTab && activeTab.session.kind !== "remoteDesktop" ? { tabId: activeTab.id, name: activeTab.session.name, connectionVersion: activeTab.connectionVersion, connectionId: connectionIds[activeTab.id] ?? null, connected: activeTab.state === "connected" && Boolean(connectionIds[activeTab.id]) } : null}
+                  target={activeTab && activeTab.session.kind !== "remoteDesktop" ? { tabId: activeTab.id, name: activeTab.session.name, connectionVersion: activeTab.connectionVersion, connectionId: connectionIds[activeTab.id] ?? null, connected: activeTab.state === "connected" && Boolean(connectionIds[activeTab.id]), host: `${activeTab.session.username}@${activeTab.session.host}:${activeTab.session.port}`, directory: terminalDirectories[activeTab.id]?.connectionId === connectionIds[activeTab.id] ? terminalDirectories[activeTab.id]?.path : null } : null}
+                  executions={activeTab ? terminalExecutions[activeTab.id] ?? [] : []}
+                  onAnalyzeExecution={(record) => { const context = executionAiContext(record); if (activeTab && record.connectionId === connectionIds[activeTab.id] && context !== null) handleAiRequest(activeTab.id, "diagnose", context, "execution"); }}
+                  onSuggestNextExecution={(record) => { const context = executionAiContext(record); if (activeTab && record.connectionId === connectionIds[activeTab.id] && context !== null) window.dispatchEvent(new CustomEvent("xsh:execution-next-command", { detail: { connectionId: record.connectionId, context } })); }}
                   contextRequest={aiContextRequest} onOpenSettings={() => openSettings("ai")}
                   onContextConsumed={(requestId) => setAiContextRequest((current) => current?.id === requestId ? null : current)}
-                  onRequestSelection={(mode) => runTerminalAction(mode === "explain" ? "aiExplain" : "aiDiagnose")}
-                  onRequestRecentOutput={(mode) => runTerminalAction(mode === "explain" ? "aiRecentExplain" : "aiRecentDiagnose")}
+                  onRequestSelection={(mode) => runTerminalAction("aiSelection", mode)}
+                  onRequestRecentOutput={(mode) => runTerminalAction("aiRecentOutput", mode)}
                   onClose={() => setSideTool(null)} onSendDraft={sendAiDraft} />
               </Suspense>
             </div>}
@@ -2276,6 +2351,7 @@ function App() {
       })()}
 
       <WorkspaceStatusBar
+        onOpenTransfers={openTransferManager}
         loading={loading}
         connection={activeTab ? {
           name: getTabLabel(activeTab),
@@ -2432,7 +2508,13 @@ function App() {
       )}
 
       {transferManagerVisible && (
-        <TransferManagerModal onClose={() => setTransferManagerVisible(false)} onToast={setToast} />
+        <TransferManagerModal initialFilter={transferManagerFilter} onClose={() => setTransferManagerVisible(false)} onToast={setToast} onLocateRemote={(transfer) => {
+          const session = sessions.find((candidate) => candidate.id === transfer.sessionId && `${candidate.host.toLowerCase()}:${candidate.port}` === transfer.endpoint);
+          if (!session || session.kind === "remoteDesktop") { setToast("原会话已移除或地址已变化，请手动打开对应主机查看目录。"); return; }
+          const directory = transfer.remotePath.slice(0, transfer.remotePath.lastIndexOf("/")) || "/";
+          setRemoteLocationRequest({ id: crypto.randomUUID(), sessionId: session.id, path: directory });
+          openSession(session); setSideTool("files"); setTransferManagerVisible(false);
+        }} />
       )}
 
       {settingsVisible && (
@@ -2524,6 +2606,7 @@ function App() {
       </Suspense>
       {toast && <button className="toast" role="status" aria-live="polite" onClick={() => setToast(null)}>{toast}<X size={13} /></button>}
       <DialogHost />
+      <ModalFocusManager />
     </main>
   );
 }

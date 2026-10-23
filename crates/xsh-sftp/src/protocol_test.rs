@@ -177,6 +177,69 @@ async fn connect_read_server(
     (session, observations)
 }
 
+#[tokio::test]
+async fn managed_retry_events_keep_lineage_and_original_write_policy() {
+    let (session, _) = connect_read_server(Arc::new(vec![1, 2, 3]), 1024, None).await;
+    let manager = SftpManager::new();
+    let directory = std::env::temp_dir().join(format!("xsh-retry-events-{}", Uuid::new_v4()));
+    let local_path = directory.join("output.bin");
+    let lease = manager
+        .reserve_destination(TransferDestination::local(&local_path))
+        .unwrap();
+    let original_id = Uuid::new_v4();
+    let batch_id = Uuid::new_v4();
+    let mut subscription = manager
+        .submit_managed_transfer(
+            ManagedTransferParams {
+                connection_id: Uuid::new_v4(),
+                direction: TransferDirection::Download,
+                local_path,
+                remote_path: REMOTE_PATH.into(),
+                total_bytes: 3,
+                scheduler_host_key: "fixture.example.com:22".into(),
+                destination_lease: lease,
+                session: Arc::new(session),
+                overwrite: false,
+                retry_of: Some(original_id),
+                retry_count: 2,
+                batch_id: Some(batch_id),
+            },
+            |_session, _control, _gate, sink| async move {
+                (Err(anyhow::anyhow!("injected retry failure")), sink)
+            },
+        )
+        .await
+        .unwrap();
+    let events = tokio::time::timeout(PROTOCOL_TEST_TIMEOUT, async {
+        let mut events = Vec::new();
+        while let Some(event) = subscription.events.recv().await {
+            let ended = event.status == TransferStatus::Failed;
+            events.push(event);
+            if ended {
+                break;
+            }
+        }
+        events
+    })
+    .await
+    .expect("managed worker timed out");
+    assert!(events.len() >= 2);
+    assert!(
+        events
+            .iter()
+            .all(|event| event.retry_of == Some(original_id) && event.retry_count == 2)
+    );
+    assert!(events.iter().all(|event| event.batch_id == Some(batch_id)));
+    assert_eq!(
+        events.last().unwrap().error.as_deref(),
+        Some("injected retry failure")
+    );
+    let transfers = manager.inner.transfers.lock().await;
+    let transfer = transfers.get(&subscription.transfer_id).unwrap();
+    assert!(!transfer.overwrite);
+    assert!(transfer_keeps_connection(transfer));
+}
+
 fn fixture_bytes(len: usize) -> Arc<Vec<u8>> {
     Arc::new(
         (0..len)

@@ -1,0 +1,44 @@
+/* Hallmark · component: transfer task · genre: modern-minimal · theme: XSH existing tokens */
+/* Hallmark · pre-emit critique: P4 H4 E4 S5 R4 V3 */
+.transfer-card { min-width: 0; padding: 11px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
+.transfer-card + .transfer-card { margin-top: 8px; }
+.transfer-card-heading { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.transfer-card-heading > strong { flex: 1; min-width: 0; overflow: hidden; color: var(--text-strong); font-size: var(--font-sm); font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
+.transfer-direction { display: grid; place-items: center; color: var(--accent-strong); }
+.transfer-direction.download { color: var(--green); }
+.transfer-badge { display: inline-flex; align-items: center; gap: 3px; color: var(--muted); font-size: var(--font-xs); white-space: nowrap; }
+.transfer-badge.running { color: var(--accent-strong); }
+.transfer-badge.failed { color: var(--red); }
+.transfer-badge.completed { color: var(--green); }
+.transfer-badge.paused { color: var(--yellow); }
+.transfer-route { display: grid; gap: 4px; margin: 9px 0; }
+.transfer-route > div { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.transfer-route dt { flex: none; color: var(--muted); font-size: var(--font-xs); }
+.transfer-route dt span { margin-left: 4px; color: var(--muted); }
+.transfer-route dd { min-width: 0; margin: 0; overflow: hidden; color: var(--text); font: var(--font-xs)/1.6 var(--mono-font); text-overflow: ellipsis; white-space: nowrap; user-select: text; }
+.transfer-card-progress { height: 4px; overflow: hidden; border-radius: 2px; background: var(--line-soft); }
+.transfer-card-progress > div { height: 100%; background: var(--accent); transition: width 180ms ease; }
+.transfer-card-paused .transfer-card-progress > div { background: var(--yellow); }
+.transfer-card-progress.indeterminate > div { animation: transfer-progress-pending 1.6s ease-in-out infinite alternate; }
+.transfer-card-paused .transfer-card-progress > div, .transfer-card-queued .transfer-card-progress > div, .transfer-card-cancelling .transfer-card-progress > div { animation: none; }
+.transfer-card-footer { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 5px; margin-top: 7px; min-height: 25px; }
+.transfer-card-metrics { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px; color: var(--muted); font: var(--font-xs)/1.6 var(--mono-font); }
+.transfer-card-metrics > strong { color: var(--text); font-weight: 500; }
+.transfer-card-metrics > small { color: var(--muted); font-size: inherit; }
+.transfer-card-actions { display: flex; align-items: center; gap: 3px; margin-left: auto; }
+.transfer-card-actions button { display: inline-flex; align-items: center; justify-content: center; gap: 4px; min-width: 25px; min-height: 25px; padding: 3px 5px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--muted); font-size: var(--font-xs); cursor: pointer; }
+.transfer-card-actions button:hover:not(:disabled) { border-color: var(--line); color: var(--text-strong); background: var(--panel-hover); }
+.transfer-card-actions button:disabled { opacity: .5; cursor: wait; }
+.transfer-card-waiting, .transfer-card-error { margin: 5px 0 0; color: var(--muted); font-size: var(--font-xs); line-height: 1.6; overflow-wrap: anywhere; user-select: text; }
+.transfer-card-error { color: var(--red); }
+.transfer-card-failed { border-color: color-mix(in srgb, var(--red) 30%, var(--line)); }
+.transfer-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; }
+.transfer-filters > button { display: inline-flex; align-items: center; gap: 5px; min-height: 28px; padding: 4px 8px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--muted); font-size: var(--font-xs); cursor: pointer; }
+.transfer-filters > button:hover { color: var(--text); background: var(--panel-hover); }
+.transfer-filters > button[aria-pressed="true"] { color: var(--accent-strong); background: var(--accent-bg); }
+.transfer-filters > button > span { font-size: var(--font-xs); font-variant-numeric: tabular-nums; }
+.transfer-empty-filter { margin: 0; padding: 18px 8px; color: var(--muted); font-size: var(--font-sm); text-align: center; }
+.transfer-action-pending { color: var(--muted); animation: transfer-pending-spin 1s linear infinite; }
+@keyframes transfer-progress-pending { from { transform: translateX(0); } to { transform: translateX(230%); } }
+@keyframes transfer-pending-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .transfer-card-progress > div { animation: none; transition: none; } .transfer-action-pending { animation: none; } }

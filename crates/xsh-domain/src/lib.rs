@@ -618,6 +618,10 @@ impl Default for SftpTransferPolicy {
 pub struct TransferEvent {
     pub transfer_id: TransferId,
     pub connection_id: ConnectionId,
+    #[serde(default)]
+    pub session_id: Option<SessionId>,
+    #[serde(default)]
+    pub batch_id: Option<Uuid>,
     pub endpoint: String,
     pub direction: TransferDirection,
     pub local_path: PathBuf,
@@ -633,6 +637,10 @@ pub struct TransferEvent {
     pub queue_position: Option<u32>,
     #[serde(default)]
     pub waiting_reason: Option<TransferWaitingReason>,
+    #[serde(default)]
+    pub retry_of: Option<TransferId>,
+    #[serde(default)]
+    pub retry_count: u32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

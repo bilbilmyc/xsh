@@ -1,0 +1,19 @@
+.execution-list { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.execution-record { border: 1px solid var(--line); border-radius: 6px; padding: 10px; min-width: 0; background: var(--panel); }
+.execution-meta { display: flex; justify-content: space-between; gap: 8px; color: var(--muted); font-size: var(--font-xs); margin-bottom: 6px; }
+.execution-meta > span { display: inline-flex; align-items: center; gap: 5px; }
+.execution-record.running .execution-meta > span { color: var(--accent-strong); }
+.execution-command { display: block; white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--font-sm); line-height: 1.55; }
+.execution-note, .execution-empty { color: var(--muted); font-size: var(--font-xs); line-height: 1.6; margin: 6px 0; }
+.execution-output { margin-top: 8px; font-size: var(--font-xs); }
+.execution-output summary { cursor: pointer; color: var(--muted); }
+.execution-output pre { max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: var(--font-xs)/1.6 var(--font-mono, monospace); margin-bottom: 4px; }
+.execution-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+.execution-actions button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 5px 7px; border: 1px solid var(--line); border-radius: 4px; background: transparent; color: var(--text); font-size: var(--font-xs); cursor: pointer; }
+.execution-actions button:disabled { opacity: .45; cursor: default; }
+.terminal-execution-popover { position: absolute; z-index: 8; top: 34px; right: 8px; width: min(470px, calc(100% - 16px)); max-height: min(560px, calc(100% - 44px)); overflow: auto; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); box-shadow: 0 10px 30px #0004; }
+.terminal-execution-popover > header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+.terminal-execution-popover > header strong { font-size: var(--font-sm); }
+.ai-execution-history { border-bottom: 1px solid var(--line); padding: 10px 14px; }
+.ai-execution-history > summary { color: var(--muted); font-size: var(--font-sm); cursor: pointer; }
+.ai-execution-history > .execution-list { max-height: 300px; overflow: auto; margin-top: 10px; }

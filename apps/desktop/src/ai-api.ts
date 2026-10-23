@@ -20,7 +20,7 @@ export interface AiSettingsUpdate {
 }
 
 export interface AiCompletionRequest {
-  mode: AiMode;
+  mode: AiMode | "complete";
   prompt: string;
   context: string;
   history?: AiHistoryMessage[];

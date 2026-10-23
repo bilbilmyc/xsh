@@ -1,0 +1,23 @@
+.transfer-plan-backdrop { z-index: 110; }
+.transfer-conflict-backdrop { z-index: 115; }
+.transfer-plan-modal { width: min(640px, calc(100vw - 40px)); max-height: calc(100vh - 60px); overflow: auto; background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 20px 70px #0005; }
+.transfer-plan-modal .modal-title-wrap { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.transfer-plan-modal .modal-title-wrap p { overflow-wrap: anywhere; }
+.transfer-plan-body { padding: 18px 22px; display: flex; flex-direction: column; gap: 14px; }
+.transfer-plan-body .field { margin: 0; }
+.transfer-plan-route { border: 1px solid var(--line); border-radius: 6px; padding: 12px; }
+.transfer-plan-route > span { color: var(--muted); font-size: var(--font-xs); }
+.transfer-plan-route ul { max-height: 145px; overflow: auto; padding: 0; margin: 8px 0 0; list-style: none; }
+.transfer-plan-route li { padding: 3px 0; font-size: var(--font-sm); overflow-wrap: anywhere; }
+.transfer-plan-arrow { align-self: center; color: var(--muted); line-height: 1; }
+.transfer-plan-note { font-size: var(--font-xs); color: var(--muted); line-height: 1.6; margin: 0; }
+.transfer-plan-modal .modal-footer { flex-wrap: wrap; gap: 8px; }
+.transfer-plan-modal .modal-footer > span { flex: 1; min-width: 150px; }
+.transfer-conflict-comparison { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.transfer-conflict-metadata { display: flex; flex-direction: column; gap: 7px; border: 1px solid var(--line); border-radius: 6px; padding: 12px; min-width: 0; }
+.transfer-conflict-metadata strong { font-size: var(--font-sm); }
+.transfer-conflict-metadata code { overflow-wrap: anywhere; font-size: var(--font-xs); }
+.transfer-conflict-metadata span, .transfer-conflict-metadata time { font-size: var(--font-xs); color: var(--muted); }
+.transfer-plan-check { display: flex; align-items: center; gap: 7px; font-size: var(--font-sm); }
+.transfer-plan-check input[type="checkbox"] { width: 14px; height: 14px; min-height: 0; flex: 0 0 14px; margin: 0; padding: 0; }
+@media (max-width: 560px) { .transfer-conflict-comparison { grid-template-columns: 1fr; } }

@@ -243,6 +243,8 @@ export type TransferWaitingReason =
 export interface TransferEvent {
   transferId: Uuid;
   connectionId: Uuid;
+  sessionId?: Uuid | null;
+  batchId?: Uuid | null;
   endpoint: string;
   direction: "upload" | "download";
   localPath: string;
@@ -255,6 +257,8 @@ export interface TransferEvent {
   submissionSequence: number;
   queuePosition: number | null;
   waitingReason: TransferWaitingReason | null;
+  retryOf?: Uuid | null;
+  retryCount?: number;
 }
 
 export interface TransferRuntimeSummary {

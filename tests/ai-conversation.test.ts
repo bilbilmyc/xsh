@@ -1,11 +1,43 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { AI_HISTORY_BYTES, AI_HISTORY_MESSAGES, AI_HISTORY_MESSAGE_BYTES, AI_TRANSCRIPT_BYTES, AI_TRANSCRIPT_TURNS, buildAiHistory, formatAiUserMessage, limitAiConversation, type AiHistoryTurn } from "../apps/desktop/src/ai-conversation.ts";
+import { AI_ARCHIVE_BYTES, AI_ARCHIVE_LIMIT, archiveAiConversation, formatAiArchive, AI_HISTORY_BYTES, AI_HISTORY_MESSAGES, AI_HISTORY_MESSAGE_BYTES, AI_TRANSCRIPT_BYTES, AI_TRANSCRIPT_TURNS, buildAiHistory, formatAiUserMessage, limitAiConversation, type AiConversationArchive, type AiHistoryTurn } from "../apps/desktop/src/ai-conversation.ts";
 import { byteLength } from "../apps/desktop/src/ai-context.ts";
 
 function turn(prompt: string, status: AiHistoryTurn["status"] = "complete"): AiHistoryTurn {
   return { mode: "diagnose", prompt, context: "curl: (7) Connection refused", text: `reply ${prompt}`, status };
 }
+
+test("new-conversation archives keep readable stopped output without reusing it as new history", () => {
+  const turns = [turn("old"), turn("partial", "streaming")];
+  const before = structuredClone(turns);
+  const archives = archiveAiConversation([], turns, "unsent question", "new-conversation");
+  assert.equal(archives.length, 1);
+  assert.equal(archives[0].turns[1].status, "stopped");
+  assert.match(formatAiArchive(archives[0]), /reply partial/);
+  assert.match(formatAiArchive(archives[0]), /未发送的问题：\nunsent question/);
+  assert.deepEqual(buildAiHistory([]).history, []);
+  assert.deepEqual(turns, before);
+});
+
+test("archive retention evicts oldest conversations and does not create empty entries on repeated saves", () => {
+  let archives: AiConversationArchive[] = [];
+  for (let index = 0; index < 6; index++) archives = archiveAiConversation(archives, [turn(`task-${index}`)], "", "service-change");
+  assert.equal(archives.length, AI_ARCHIVE_LIMIT);
+  assert.equal(archives[0].turns[0].prompt, "task-5");
+  assert.equal(archives[2].turns[0].prompt, "task-3");
+  assert.deepEqual(archiveAiConversation(archives, [], " ", "service-change"), archives);
+});
+
+test("large archives preserve the latest task within the aggregate UTF-8 byte budget", () => {
+  const large = { ...turn("latest"), text: "中文".repeat(AI_ARCHIVE_BYTES) };
+  const archives = archiveAiConversation([], [large], "draft", "service-change");
+  assert.equal(archives.length, 1);
+  assert.equal(archives[0].turns[0].prompt, "latest");
+  const bytes = archives.reduce((total, archive) => total + byteLength(archive.draftPrompt) + archive.turns.reduce((sum, item) => sum + byteLength(item.prompt) + byteLength(item.context) + byteLength(item.text), 0), 0);
+  assert.ok(bytes <= AI_ARCHIVE_BYTES);
+  assert.ok(!archives[0].turns[0].text.includes("\ufffd"));
+  assert.match(archives[0].turns[0].text, /已截短/);
+});
 
 test("follow-up history retains ordered user/assistant pairs and the previous terminal data", () => {
   const first = turn("first");

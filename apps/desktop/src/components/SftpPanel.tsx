@@ -4,25 +4,34 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import {
   ArrowDownToLine,
+  ArrowUp,
   ArrowUpFromLine,
+  ChevronDown,
+  ChevronRight,
   ExternalLink,
   File,
   Folder,
   FolderPlus,
+  Home,
   Pencil,
-  Play,
-  Pause,
   RefreshCw,
   Repeat2,
+  Search,
   Trash2,
   TextCursorInput,
   X,
+  Star,
+  Columns2,
+  TerminalSquare,
 } from "lucide-react";
 import { api } from "../api";
 import { writeClipboardText } from "../clipboard";
 import { ContextMenu } from "./ContextMenu";
 import { SftpSyncModal } from "./SftpSyncModal";
-import { UploadConflictModal, type UploadConflictChoice } from "./UploadConflictModal";
+import { TransferPlanModal } from "./TransferPlanModal";
+import { TransferConflictModal } from "./TransferConflictModal";
+import { planTransferBatch, transferParent, type ConflictChoice, type ConflictPolicy, type PlannedTransfer, type TransferConflict, type TransferDraft } from "../transfer-plan";
+import { TransferCard, TransferFilters } from "./TransferCard";
 import { hostKeyEndpointLabel } from "../host-key";
 import { confirmDialog, hostKeyDialog, promptDialog } from "./DialogHost";
 import { connectSftpWithHostKeyApprovals } from "../sftp-connection";
@@ -31,14 +40,24 @@ import {
   isActiveTransferStatus,
   isTransferOwnedByConnection,
 } from "../sftp-transfer-scope";
-import { SftpTransferStore, formatTransferWaitingState, sortTransfersForDisplay } from "../transfer-queue";
+import { SftpTransferStore, matchesTransferFilter, sortTransfersForDisplay, transferFilterCounts, type TransferFilter } from "../transfer-queue";
+import { browseRemoteEntries, remoteBreadcrumbs, selectBrowserPaths, type SftpSort, type SftpSortField } from "../sftp-browser";
 import type { RemoteEntry, SavedSession, TransferEvent } from "../types";
+import "./SftpPanel.css";
+import { directoryWorkspaceKey, loadDirectoryWorkspace, rememberDirectory, saveDirectoryWorkspace, toggleDirectoryBookmark, type DirectoryWorkspace } from "../directory-workspace";
+import { localParentDirectory } from "../transfer-queue";
+import { LocalDirectoryPane } from "./LocalDirectoryPane";
 
 interface SftpPanelProps {
   session: SavedSession;
   globalTransferConcurrency: number;
   onClose: () => void;
   onToast?: (message: string) => void;
+  terminalDirectory?: string | null;
+  onOpenTerminalDirectory?: (path: string) => void;
+  onExpandedChange?: (expanded: boolean) => void;
+  expanded?: boolean;
+  locationRequest?: { id: string; path: string } | null;
 }
 
 interface PendingUpload {
@@ -61,12 +80,7 @@ interface UploadSlotWaiter {
   resolve: (acquired: boolean) => void;
 }
 
-interface UploadConflictPromptState {
-  fileName: string;
-  remainingConflicts: number;
-}
-
-export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast }: SftpPanelProps) {
+export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast, terminalDirectory, onOpenTerminalDirectory, onExpandedChange, expanded = false, locationRequest }: SftpPanelProps) {
   const submissionConcurrency = Math.min(32, Math.max(1, Math.floor(globalTransferConcurrency)));
   const [connectionId, setConnectionId] = useState<string | null>(null);
   const [path, setPath] = useState(session.initialDirectory ?? ".");
@@ -74,56 +88,124 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
   const [entries, setEntries] = useState<RemoteEntry[]>([]);
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
   const [anchorPath, setAnchorPath] = useState<string | null>(null);
+  const [filterQuery, setFilterQuery] = useState("");
+  const [showHidden, setShowHidden] = useState(true);
+  const [sort, setSort] = useState<SftpSort>({ field: "name", descending: false });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [connectionAttempt, setConnectionAttempt] = useState(0);
   const [pendingUploads, setPendingUploads] = useState<PendingUpload[]>([]);
   const [draggingFiles, setDraggingFiles] = useState(false);
   const [listContextMenu, setListContextMenu] = useState<{ x: number; y: number; entry: RemoteEntry } | null>(null);
   const [remoteEdit, setRemoteEdit] = useState<RemoteEditState | null>(null);
   const [syncVisible, setSyncVisible] = useState(false);
-  const [uploadConflict, setUploadConflict] = useState<UploadConflictPromptState | null>(null);
+  const workspaceKey = directoryWorkspaceKey(session);
+  const [workspace, setWorkspace] = useState(() => loadDirectoryWorkspace(workspaceKey));
+  const workspaceRef = useRef(workspace);
+  workspaceRef.current = workspace;
+  const dualPane = expanded;
+  const [followTerminal, setFollowTerminal] = useState(false);
+  const appliedLocationRef = useRef<string | null>(null);
+  const commitWorkspace = (change: (current: DirectoryWorkspace) => DirectoryWorkspace) => {
+    const next = change(workspaceRef.current);
+    workspaceRef.current = next;
+    setWorkspace(next);
+    if (!saveDirectoryWorkspace(workspaceKey, next)) onToast?.("目录偏好未能保存，本次窗口仍可使用。");
+  };
+  useEffect(() => {
+    if (workspaceRef.current.localDirectory) return;
+    let disposed = false;
+    void api.localDownloadDirectory().then((directory) => {
+      if (!disposed && !workspaceRef.current.localDirectory && directory) commitWorkspace((current) => ({ ...current, localDirectory: directory }));
+    }).catch(() => undefined);
+    return () => { disposed = true; };
+  }, [workspaceKey]);
+  useEffect(() => () => onExpandedChange?.(false), []);
+  const [transferDraft, setTransferDraft] = useState<TransferDraft | null>(null);
+  const transferDraftRef = useRef<TransferDraft | null>(null);
+  const [planning, setPlanning] = useState(false);
+  const planningRef = useRef(false);
+  const planningEpochRef = useRef(0);
+  const [planningError, setPlanningError] = useState<string | null>(null);
+  const [transferConflict, setTransferConflict] = useState<TransferConflict | null>(null);
+  const activeConnectionRef = useRef<string | null>(null);
+  const pathRef = useRef(path);
+  pathRef.current = path;
+  const loadEpochRef = useRef(0);
+  const requestedPathRef = useRef(path);
   const remoteListRef = useRef<HTMLDivElement>(null);
   const uploadQueueCancelEpochRef = useRef(0);
   const activeUploadCountRef = useRef(0);
   const uploadSlotWaitersRef = useRef<UploadSlotWaiter[]>([]);
-  const uploadConflictResolverRef = useRef<((choice: UploadConflictChoice | null) => void) | null>(null);
+  const conflictResolverRef = useRef<((choice: ConflictChoice | null) => void) | null>(null);
   const enqueueUploadsRef = useRef<(paths: string[]) => Promise<void>>(async () => undefined);
 
   const transferStoreRef = useRef<SftpTransferStore | null>(null);
   if (transferStoreRef.current === null) transferStoreRef.current = new SftpTransferStore();
   const transferStore = transferStoreRef.current;
+  const visibleEntries = useMemo(
+    () => browseRemoteEntries(entries, filterQuery, showHidden, sort),
+    [entries, filterQuery, showHidden, sort],
+  );
+  const breadcrumbs = useMemo(() => remoteBreadcrumbs(path), [path]);
   const selectedEntries = useMemo(
     () => entries.filter((entry) => selectedPaths.has(entry.path)),
     [entries, selectedPaths],
   );
   const selected = selectedEntries[0] ?? null;
-  const remoteEntryNames = useMemo(() => new Set(entries.map((entry) => entry.name)), [entries]);
-
+  const selectedDirectoryCount = selectedEntries.filter((entry) => entry.fileType === "directory").length;
+  const selectedSizeLabel = [
+    selectedEntries.length > selectedDirectoryCount ? formatBytes(selectedEntries.filter((entry) => entry.fileType !== "directory").reduce((sum, entry) => sum + entry.size, 0)) : "",
+    selectedDirectoryCount > 0 ? `${selectedDirectoryCount} 个目录` : "",
+  ].filter(Boolean).join(" + ");
   const load = async (id: string, target: string) => {
+    const epoch = ++loadEpochRef.current;
+    requestedPathRef.current = target;
     setLoading(true);
     setError(null);
     try {
       const canonical = await api.sftpCanonicalize(id, target);
       const nextEntries = await api.sftpListDirectory(id, canonical);
+      if (epoch !== loadEpochRef.current || activeConnectionRef.current !== id) return;
       setPath(canonical);
       setPathInput(canonical);
       setEntries(nextEntries);
+      commitWorkspace((current) => rememberDirectory(current, canonical));
+      setFilterQuery("");
       setSelectedPaths(new Set());
       setAnchorPath(null);
     } catch (caught) {
-      setError(String(caught));
+      if (epoch === loadEpochRef.current && activeConnectionRef.current === id) setError(String(caught));
     } finally {
-      setLoading(false);
+      if (epoch === loadEpochRef.current && activeConnectionRef.current === id) setLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (connectionId && followTerminal && terminalDirectory && terminalDirectory !== pathRef.current) void load(connectionId, terminalDirectory);
+  }, [connectionId, followTerminal, terminalDirectory]);
+  useEffect(() => {
+    if (connectionId && locationRequest && appliedLocationRef.current !== locationRequest.id) {
+      appliedLocationRef.current = locationRequest.id;
+      setFollowTerminal(false);
+      void load(connectionId, locationRequest.path);
+    }
+  }, [connectionId, locationRequest?.id]);
 
   useEffect(() => {
     let disposed = false;
     let activeId: string | null = null;
 
     const connect = async () => {
+      activeConnectionRef.current = null;
+      setConnectionId(null);
       setLoading(true);
       setError(null);
+      setConnectionError(null);
+      setEntries([]);
+      setSelectedPaths(new Set());
+      setAnchorPath(null);
       try {
         const id = await connectSftpWithHostKeyApprovals(
           () => api.connectSftp(session.id),
@@ -131,7 +213,7 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
             if (disposed) return false;
             const endpointLabel = hostKeyEndpointLabel(key);
             if (!(await hostKeyDialog(key, "SFTP"))) {
-              setError(`SFTP ${endpointLabel} Host Key 未确认`);
+              setConnectionError(`SFTP ${endpointLabel} 服务器指纹尚未确认，请核对后重新连接。`);
               return false;
             }
             await api.trustSessionHostKey(session.id, key);
@@ -147,12 +229,13 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
           return;
         }
         activeId = id;
+        activeConnectionRef.current = id;
         setConnectionId(id);
-        await load(id, session.initialDirectory ?? ".");
+        await load(id, pathRef.current);
       } catch (caught) {
         if (disposed) return;
         const message = String(caught);
-        setError(`SFTP 连接失败：${message}`);
+        setConnectionError(`SFTP 连接失败：${message}`);
         setLoading(false);
       }
     };
@@ -160,16 +243,20 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
     void connect();
     return () => {
       disposed = true;
+      loadEpochRef.current += 1;
+      planningEpochRef.current += 1;
+      planningRef.current = false;
+      if (activeConnectionRef.current === activeId) activeConnectionRef.current = null;
       if (activeId) void api.releaseSftpConnection(activeId).catch(() => undefined);
     };
-  }, [session.id]);
+  }, [session.id, connectionAttempt]);
 
   useEffect(() => () => {
     uploadQueueCancelEpochRef.current += 1;
     const waiters = uploadSlotWaitersRef.current.splice(0);
     waiters.forEach((waiter) => waiter.resolve(false));
-    const settleConflict = uploadConflictResolverRef.current;
-    uploadConflictResolverRef.current = null;
+    const settleConflict = conflictResolverRef.current;
+    conflictResolverRef.current = null;
     settleConflict?.(null);
   }, []);
 
@@ -277,73 +364,49 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
         if (event.status === "failed") reject(new Error(event.error ?? "传输失败"));
       };
     });
-    await start(channel);
-    const result = await terminal;
+    // Attach both handlers immediately: a fast worker can report failure
+    // before the invoke returning its transfer ID has settled.
+    const [, result] = await Promise.all([start(channel), terminal]);
     if (result.status === "cancelled") throw new Error("传输已取消");
     return result;
   };
 
-  const requestUploadConflictDecision = (fileName: string, remainingConflicts: number) =>
-    new Promise<UploadConflictChoice | null>((resolve) => {
-      uploadConflictResolverRef.current = resolve;
-      setUploadConflict({ fileName, remainingConflicts });
-    });
+  const setDraft = (draft: TransferDraft | null) => {
+    transferDraftRef.current = draft;
+    setTransferDraft(draft);
+    setPlanningError(null);
+  };
 
-  const settleUploadConflict = (choice: UploadConflictChoice | null) => {
-    const resolve = uploadConflictResolverRef.current;
-    uploadConflictResolverRef.current = null;
-    setUploadConflict(null);
+  const settleConflict = (choice: ConflictChoice | null) => {
+    const resolve = conflictResolverRef.current;
+    conflictResolverRef.current = null;
+    setTransferConflict(null);
     resolve?.(choice);
   };
 
-  const uploadFiles = async (selectedPaths: string[]) => {
-    if (!connectionId || selectedPaths.length === 0) return;
-    const tasks: Array<{ localPath: string; remotePath: string }> = [];
-    let batchConflictStrategy: "overwrite" | "skip" | null = null;
-    const conflictsAhead = selectedPaths.map((localPath) => {
-      const fileName = localPath.split(/[\\/]/).pop();
-      const existing = fileName ? entries.find((entry) => entry.name === fileName) : undefined;
-      return existing !== undefined && existing.fileType !== "directory";
-    });
-    for (let index = 0; index < selectedPaths.length; index += 1) {
-      const localPath = selectedPaths[index];
-      const fileName = localPath.split(/[\\/]/).pop();
-      if (!fileName) continue;
-      let remoteName = fileName;
-      const existing = entries.find((entry) => entry.name === remoteName);
-      if (existing) {
-        if (existing.fileType === "directory") {
-          setError(`远程目录已存在，无法覆盖：${remoteName}`);
-          continue;
-        }
-        let choice = batchConflictStrategy;
-        if (!choice) {
-          const decision = await requestUploadConflictDecision(
-            remoteName,
-            conflictsAhead.slice(index + 1).filter(Boolean).length,
-          );
-          if (!decision) {
-            onToast?.("已取消本次上传。");
-            return;
-          }
-          if (decision.type === "overwrite-all") {
-            batchConflictStrategy = "overwrite";
-            choice = "overwrite";
-          } else if (decision.type === "skip-all") {
-            batchConflictStrategy = "skip";
-            choice = "skip";
-          } else if (decision.type === "rename") {
-            remoteName = decision.name;
-          } else {
-            choice = decision.type;
-          }
-        }
-        if (choice === "skip") continue;
+  const cancelTransferPlan = () => {
+    planningEpochRef.current += 1;
+    planningRef.current = false;
+    setPlanning(false);
+    settleConflict(null);
+    setDraft(null);
+  };
+
+  const uploadFiles = async (paths: string[], targetConnection = activeConnectionRef.current, destination = pathRef.current) => {
+    if (!targetConnection || !paths.length) return;
+    if (transferDraftRef.current || planningRef.current) { setError("请先处理当前传输确认窗口。"); return; }
+    planningRef.current = true;
+    try {
+      const sources: RemoteEntry[] = [];
+      for (const localPath of paths) {
+        const info = await api.localFileInfo(localPath);
+        if (activeConnectionRef.current !== targetConnection) return;
+        if (!info || (info.fileType !== "file" && info.fileType !== "directory")) throw new Error("请选择普通文件或目录，符号链接及特殊文件不能上传。");
+        sources.push(info);
       }
-      const remotePath = path === "/" ? `/${remoteName}` : `${path}/${remoteName}`;
-      tasks.push({ localPath, remotePath });
-    }
-    await runUploadQueue(tasks);
+      setDraft({ id: crypto.randomUUID(), connectionId: targetConnection, host: session.username + "@" + session.host + ":" + session.port, direction: "upload", sources, destination, destinationKind: "directory" });
+    } catch (caught) { setError("准备上传失败：" + String(caught)); }
+    finally { planningRef.current = false; }
   };
 
   const enqueueUploads = async (paths: string[]) => {
@@ -387,8 +450,9 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
     waiters.forEach((waiter) => waiter.resolve(false));
   };
 
-  const runUploadQueue = async (tasks: Array<{ localPath: string; remotePath: string }>) => {
-    if (!connectionId || tasks.length === 0) return;
+  const runUploadQueue = async (tasks: PlannedTransfer[], targetConnection: string, targetDirectory: string, batchId: string) => {
+    if (tasks.length === 0) return;
+    const navigationEpoch = loadEpochRef.current;
     const queuedTasks = tasks.map((task) => ({ ...task, id: crypto.randomUUID() }));
     let cursor = 0;
     const cancelEpoch = uploadQueueCancelEpochRef.current;
@@ -407,7 +471,7 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
         setPendingUploads((current) => current.filter((item) => item.id !== task.id));
         try {
           await waitForTransfer((channel) =>
-            api.sftpUpload(connectionId, task.localPath, task.remotePath, true, channel),
+            api.sftpUpload(targetConnection, task.localPath, task.remotePath, task.overwrite, channel, batchId),
           );
           completed += 1;
         } catch (caught) {
@@ -420,16 +484,22 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
       }
     };
     await Promise.all(Array.from({ length: Math.min(submissionConcurrency, queuedTasks.length) }, () => worker()));
-    if (completed > 0) await load(connectionId, path);
+    if (completed > 0 && activeConnectionRef.current === targetConnection && pathRef.current === targetDirectory && loadEpochRef.current === navigationEpoch) await load(targetConnection, targetDirectory);
     if (uploadQueueCancelEpochRef.current !== cancelEpoch) return;
     onToast?.(failed > 0 ? `上传完成 ${completed} 项，失败 ${failed} 项。` : `${completed} 个文件已上传。`);
   };
 
-  const upload = async () => {
-    if (!connectionId) return;
-    const selectedPath = await open({ multiple: true, directory: false, title: "选择要上传的文件" });
-    if (Array.isArray(selectedPath)) await uploadFiles(selectedPath);
-    else if (typeof selectedPath === "string") await uploadFiles([selectedPath]);
+  const upload = async (directory = false) => {
+    const targetConnection = activeConnectionRef.current;
+    const destination = pathRef.current;
+    if (!targetConnection) return;
+    try {
+      const selectedPath = await open({ multiple: true, directory, title: `上传${directory ? "目录" : "文件"}到 ${destination}` });
+      if (Array.isArray(selectedPath)) await uploadFiles(selectedPath, targetConnection, destination);
+      else if (typeof selectedPath === "string") await uploadFiles([selectedPath], targetConnection, destination);
+    } catch (caught) {
+      setError(`上传失败：${String(caught)}`);
+    }
   };
 
   const downloadTo = async (remotePath: string, localPath: string) => {
@@ -439,79 +509,132 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
     );
   };
 
-  const collectDirectoryDownloadTasks = async (
-    entry: RemoteEntry,
-    localParent: string,
-  ): Promise<Array<{ remotePath: string; localPath: string }>> => {
-    if (!connectionId) return [];
-    const localDirectory = joinLocalPath(localParent, entry.name);
-    await api.createLocalDirectory(localDirectory);
-    const children = await api.sftpListDirectory(connectionId, entry.path);
-    const tasks: Array<{ remotePath: string; localPath: string }> = [];
-    for (const child of children) {
-      if (child.fileType === "directory") {
-        tasks.push(...await collectDirectoryDownloadTasks(child, localDirectory));
-      } else {
-        tasks.push({ remotePath: child.path, localPath: joinLocalPath(localDirectory, child.name) });
-      }
-    }
-    return tasks;
-  };
-
-  const runDownloadQueue = async (tasks: Array<{ remotePath: string; localPath: string }>) => {
+  const runDownloadQueue = async (tasks: PlannedTransfer[], targetConnection: string, batchId: string) => {
     let cursor = 0;
     let completed = 0;
-    let failure: unknown;
+    let failed = 0;
+    const epoch = uploadQueueCancelEpochRef.current;
     const worker = async () => {
-      while (!failure && cursor < tasks.length) {
+      while (cursor < tasks.length && epoch === uploadQueueCancelEpochRef.current && activeConnectionRef.current === targetConnection) {
         const task = tasks[cursor++];
         try {
-          await downloadTo(task.remotePath, task.localPath);
+          await waitForTransfer((channel) => api.sftpDownload(targetConnection, task.remotePath, task.localPath, task.overwrite, channel, batchId));
           completed += 1;
-        } catch (caught) {
-          failure ??= caught;
-        }
+        } catch (caught) { failed += 1; setError("下载失败：" + String(caught)); }
       }
     };
     await Promise.all(Array.from({ length: Math.min(submissionConcurrency, tasks.length) }, () => worker()));
-    if (failure) throw failure;
-    return completed;
+    return { completed, failed };
   };
 
   const download = async (openAfterDownload: boolean) => {
-    if (!connectionId || selectedEntries.length === 0) return;
-    const files = selectedEntries.filter((entry) => entry.fileType !== "directory");
-    const directories = selectedEntries.filter((entry) => entry.fileType === "directory");
-    let localDirectory: string | null = null;
-    let singleLocalPath: string | null = null;
-    if (files.length === 1 && directories.length === 0) {
-      singleLocalPath = await save({
-        title: openAfterDownload ? "下载并打开远程文件" : "保存远程文件",
-        defaultPath: files[0].name,
-      });
-      if (!singleLocalPath) return;
-    } else {
-      localDirectory = await open({
-        title: `选择保存 ${selectedEntries.length} 项的目录`,
-        directory: true,
-        multiple: false,
-      });
-      if (typeof localDirectory !== "string") return;
-    }
+    const targetConnection = activeConnectionRef.current;
+    const sources = [...selectedEntries];
+    if (!targetConnection || !sources.length) return;
+    if (transferDraftRef.current || planningRef.current) { setError("请先处理当前传输确认窗口。"); return; }
+    planningRef.current = true;
     try {
-      const tasks = files.map((entry) => ({
-        remotePath: entry.path,
-        localPath: singleLocalPath ?? joinLocalPath(localDirectory!, entry.name),
-      }));
-      for (const directory of directories) {
-        tasks.push(...await collectDirectoryDownloadTasks(directory, localDirectory!));
+      const single = sources.length === 1 && sources[0].fileType !== "directory";
+      const localDirectory = workspaceRef.current.localDirectory;
+      const destination = localDirectory
+        ? single ? `${localDirectory.replace(/[\\/]$/, "")}${localDirectory.includes("\\") ? "\\" : "/"}${sources[0].name}` : localDirectory
+        : single
+        ? await save({ title: openAfterDownload ? "下载并打开远程文件" : "保存远程文件", defaultPath: sources[0].name })
+        : await open({ title: "选择下载保存目录", directory: true, multiple: false });
+      if (typeof destination !== "string" || activeConnectionRef.current !== targetConnection) return;
+      setDraft({ id: crypto.randomUUID(), connectionId: targetConnection, host: session.username + "@" + session.host + ":" + session.port, direction: "download", sources, destination, destinationKind: single ? "file" : "directory", openAfterDownload });
+    } catch (caught) { setError("准备下载失败：" + String(caught)); }
+    finally { planningRef.current = false; }
+  };
+
+  const confirmTransferPlan = async (destination: string, policy: ConflictPolicy) => {
+    const draft = transferDraftRef.current;
+    if (!draft || planningRef.current) return;
+    setDraft({ ...draft, destination });
+    const epoch = ++planningEpochRef.current;
+    planningRef.current = true;
+    setPlanning(true);
+    setPlanningError(null);
+    const assertConnected = () => {
+      if (planningEpochRef.current !== epoch) throw new Error("本批传输已取消。");
+      if (activeConnectionRef.current !== draft.connectionId) throw new Error("原 SFTP 连接已变化，请取消本批并重新选择文件。");
+    };
+    let submitted = false;
+    try {
+      assertConnected();
+      let fixedDraft = { ...draft, destination };
+      const sources: RemoteEntry[] = [];
+      for (const source of draft.sources) {
+        const current = draft.direction === "upload"
+          ? await api.localFileInfo(source.path)
+          : await api.sftpStat(draft.connectionId, source.path);
+        assertConnected();
+        if (!current || (current.fileType !== source.fileType && !(source.fileType === "symlink" && current.fileType === "file"))) throw new Error(`来源已变化，请重新选择：${source.path}`);
+        sources.push({ ...current, fileType: source.fileType, name: source.name, path: source.path });
       }
-      const downloaded = await runDownloadQueue(tasks);
-      if (openAfterDownload && singleLocalPath) await api.openLocalPath(singleLocalPath);
-      setSelectedPaths(new Set());
-      onToast?.(`${downloaded} 个文件已下载。`);
+      fixedDraft = { ...fixedDraft, sources };
+      const remoteEntries = new Map<string, RemoteEntry>();
+      const loadedRemoteDirectories = new Set<string>();
+      const missingRemotePaths = new Set<string>();
+      if (draft.direction === "upload") {
+        const canonical = await api.sftpCanonicalize(draft.connectionId, destination);
+        const listing = await api.sftpListDirectory(draft.connectionId, canonical);
+        listing.forEach((entry) => remoteEntries.set(entry.path, entry));
+        loadedRemoteDirectories.add(canonical);
+        fixedDraft = { ...fixedDraft, destination: canonical };
+      } else {
+        const parent = draft.destinationKind === "directory" ? destination : transferParent(destination);
+        const info = await api.localFileInfo(parent);
+        if (!info || info.fileType !== "directory") throw new Error("保存目录不存在或不是普通文件夹，请重新选择。");
+      }
+      const plan = await planTransferBatch(fixedDraft, policy, {
+        assertConnected,
+        destinationInfo: async (target) => {
+          if (draft.direction === "download") return api.localFileInfo(target);
+          const parent = transferParent(target).replace(/\/+$/, "") || "/";
+          if (!missingRemotePaths.has(parent) && !loadedRemoteDirectories.has(parent)) {
+            const listing = await api.sftpListDirectory(draft.connectionId, parent);
+            assertConnected();
+            listing.forEach((entry) => remoteEntries.set(entry.path, entry));
+            loadedRemoteDirectories.add(parent);
+          }
+          const existing = remoteEntries.get(target) ?? null;
+          if (!existing) missingRemotePaths.add(target);
+          return existing;
+        },
+        sourceChildren: (entry) => draft.direction === "upload" ? api.listLocalDirectory(entry.path) : api.sftpListDirectory(draft.connectionId, entry.path),
+        choose: (conflict) => new Promise<ConflictChoice | null>((resolve) => { conflictResolverRef.current = resolve; setTransferConflict(conflict); }),
+      });
+      if (!plan) { setDraft(null); onToast?.("已取消本批传输。"); return; }
+      assertConnected();
+      // No file or directory is created before every decision in this batch is settled.
+      for (const directory of plan.directories) {
+        assertConnected();
+        if (draft.direction === "upload") await api.sftpCreateDirectory(draft.connectionId, directory);
+        else await api.createLocalDirectory(directory);
+      }
+      assertConnected();
+      setDraft(null);
+      if (draft.direction === "download") commitWorkspace((current) => ({ ...current, localDirectory: fixedDraft.destinationKind === "directory" ? fixedDraft.destination : localParentDirectory(fixedDraft.destination) }));
+      planningRef.current = false;
+      setPlanning(false);
+      submitted = true;
+      if (draft.direction === "upload") {
+        await runUploadQueue(plan.tasks, draft.connectionId, fixedDraft.destination, draft.id);
+        if (!plan.tasks.length && plan.directories.length) onToast?.(`已创建 ${plan.directories.length} 个远程目录。`);
+      }
+      else {
+        const result = await runDownloadQueue(plan.tasks, draft.connectionId, draft.id);
+        if (plan.openPath && result.completed === plan.tasks.length && !result.failed) await api.openLocalPath(plan.openPath);
+        onToast?.(result.completed + " 个文件已下载" + (result.failed ? "，失败 " + result.failed + " 项" : "") + "。");
+      }
+      if (plan.skipped) onToast?.("本批跳过 " + plan.skipped + " 项。");
     } catch (caught) {
-      setError(`下载失败：${String(caught)}`);
+      if (planningEpochRef.current !== epoch) return;
+      if (!submitted && transferDraftRef.current) setPlanningError(String(caught));
+      else setError("传输失败：" + String(caught));
+    } finally {
+      if (!submitted && planningEpochRef.current === epoch) { planningRef.current = false; setPlanning(false); }
     }
   };
 
@@ -587,18 +710,12 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
       setError("该传输任务不属于当前 SFTP 连接，无法在此重试");
       return;
     }
-    transferStore.remove(transfer.transferId);
+    const targetConnection = connectionId;
+    const targetDirectory = path;
+    const navigationEpoch = loadEpochRef.current;
     try {
-      if (transfer.direction === "upload") {
-        await waitForTransfer((channel) =>
-          api.sftpUpload(connectionId, transfer.localPath, transfer.remotePath, true, channel),
-        );
-        await load(connectionId, path);
-      } else {
-        await waitForTransfer((channel) =>
-          api.sftpDownload(connectionId, transfer.remotePath, transfer.localPath, true, channel),
-        );
-      }
+      await waitForTransfer((channel) => api.retryTransfer(transfer.transferId, channel));
+      if (transfer.direction === "upload" && activeConnectionRef.current === targetConnection && pathRef.current === targetDirectory && loadEpochRef.current === navigationEpoch) await load(targetConnection, targetDirectory);
       onToast?.("传输重试已完成。");
     } catch (caught) {
       setError(`重试失败：${String(caught)}`);
@@ -635,23 +752,9 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
   };
 
   const selectEntry = (entry: RemoteEntry, event: MouseEvent<HTMLButtonElement>) => {
-    const rangeStart = anchorPath ? entries.findIndex((candidate) => candidate.path === anchorPath) : -1;
-    const rangeEnd = entries.findIndex((candidate) => candidate.path === entry.path);
-    if (event.shiftKey && rangeStart >= 0 && rangeEnd >= 0) {
-      const [start, end] = rangeStart < rangeEnd ? [rangeStart, rangeEnd] : [rangeEnd, rangeStart];
-      setSelectedPaths(new Set(entries.slice(start, end + 1).map((candidate) => candidate.path)));
-    } else if (event.metaKey || event.ctrlKey) {
-      setSelectedPaths((current) => {
-        const next = new Set(current);
-        if (next.has(entry.path)) next.delete(entry.path);
-        else next.add(entry.path);
-        return next;
-      });
-      setAnchorPath(entry.path);
-    } else {
-      setSelectedPaths(new Set([entry.path]));
-      setAnchorPath(entry.path);
-    }
+    const next = selectBrowserPaths(visibleEntries.map((candidate) => candidate.path), selectedPaths, anchorPath, entry.path, event);
+    setSelectedPaths(next.paths);
+    setAnchorPath(next.anchor);
   };
 
   const rename = async () => {
@@ -736,63 +839,80 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
   };
 
   return (
-    <aside className="sftp-panel">
+    <aside className="sftp-panel sftp-workspace" aria-label="远程文件">
       <header className="sftp-header">
-        <div><strong>SFTP</strong><span>{session.name}</span></div>
+        <div><strong>远程文件</strong><span>{session.name}</span><span className="sftp-connection-state" data-state={connectionId ? "connected" : connectionError ? "failed" : "connecting"}>{connectionId ? "文件已连接" : connectionError ? "文件未连接" : "正在连接文件服务…"}</span></div>
         <button className="icon-button" onClick={onClose} aria-label="关闭文件面板"><X size={16} /></button>
       </header>
-      <div className="sftp-toolbar">
-        <button onClick={() => connectionId && load(connectionId, parentPath())} title="上级目录">..</button>
-        <button onClick={() => void upload()} disabled={!connectionId} title="选择文件并上传到当前远程目录">
-          <ArrowUpFromLine size={15} />
+      <div className="sftp-toolbar sftp-primary-actions">
+        <button className="sftp-upload-button" onClick={() => void upload()} disabled={!connectionId || loading} title={`上传到 ${path}`}>
+          <ArrowUpFromLine size={14} />上传文件
         </button>
-        <button onClick={() => setSyncVisible(true)} disabled={!connectionId} title="比较本地文件夹与当前远程目录并提交单向同步">
-          <Repeat2 size={15} />
+        <button className="sftp-download-button" onClick={() => void download(false)} disabled={!connectionId || selectedEntries.length === 0} title="下载选中文件或目录到本地">
+          <ArrowDownToLine size={14} />下载{selectedEntries.length > 0 ? ` (${selectedEntries.length})` : ""}
         </button>
-        <button onClick={() => void download(false)} disabled={selectedEntries.length === 0} title="下载选中文件或目录">
-          <ArrowDownToLine size={15} />
-        </button>
-        <button onClick={() => void download(true)} disabled={selectedEntries.length !== 1 || !selected || selected.fileType === "directory"} title="下载并打开">
-          <ExternalLink size={15} />
-        </button>
-        <button onClick={() => void editRemote()} disabled={selectedEntries.length !== 1 || !selected || selected.fileType === "directory"} title="编辑远程文件">
-          <Pencil size={14} />
-        </button>
-        <button onClick={createDirectory} title="新建目录"><FolderPlus size={15} /></button>
-        <button onClick={rename} disabled={selectedEntries.length !== 1} title="重命名"><TextCursorInput size={14} /></button>
-        <button onClick={remove} disabled={selectedEntries.length === 0} title="删除选中项"><Trash2 size={15} /></button>
-        <button onClick={() => connectionId && load(connectionId, path)} title="刷新远程目录"><RefreshCw size={15} /></button>
-      </div>
-      <div className="sftp-browser-head sftp-browser-head-single">
-        <section>
-          <Folder size={13} />
-          <strong>远程目录</strong>
-          <form className="remote-path" onSubmit={(event) => { event.preventDefault(); if (connectionId) void load(connectionId, pathInput); }}>
-            <input value={pathInput} onChange={(event) => setPathInput(event.target.value)} aria-label="远程路径" />
-          </form>
-        </section>
-      </div>
-      <div className="sftp-browser sftp-browser-single">
-        <section className="sftp-browser-pane">
-          <div className="sftp-pane-label">
-            <span>{path}</span>
-            <span>{selectedEntries.length > 0 ? `已选 ${selectedEntries.length}` : ""}</span>
+        <details className="sftp-more-actions" onClick={(event) => { if ((event.target as HTMLElement).closest("button:not(:disabled)")) event.currentTarget.removeAttribute("open"); }}>
+          <summary>更多<ChevronDown size={12} /></summary>
+          <div className="sftp-more-menu">
+            <button onClick={() => void upload(true)} disabled={!connectionId || loading}><FolderPlus size={13} />上传目录…</button>
+            <button onClick={() => void download(true)} disabled={selectedEntries.length !== 1 || selected?.fileType === "directory"}><ExternalLink size={13} />下载并打开</button>
+            <button onClick={() => void editRemote()} disabled={selectedEntries.length !== 1 || selected?.fileType === "directory"}><Pencil size={13} />编辑远程文件</button>
+            <button onClick={() => setSyncVisible(true)} disabled={!connectionId}><Repeat2 size={13} />目录同步…</button>
+            <button onClick={createDirectory} disabled={!connectionId}><FolderPlus size={13} />新建目录</button>
+            <button onClick={rename} disabled={selectedEntries.length !== 1}><TextCursorInput size={13} />重命名</button>
+            <button className="danger" onClick={remove} disabled={selectedEntries.length === 0}><Trash2 size={13} />删除选中项</button>
           </div>
-          <div className={`remote-list ${draggingFiles ? "dragging-files" : ""}`} ref={remoteListRef}>
-            <div className="sftp-upload-hint" aria-live="polite">
-              <ArrowUpFromLine size={16} />
-              <div>
-                <strong>{draggingFiles ? "松开鼠标即可上传" : "上传文件到当前目录"}</strong>
-                <span>点击上方上传按钮选择文件，或直接拖入此区域</span>
-              </div>
+        </details>
+        <button className="sftp-refresh-button" disabled={loading} onClick={() => connectionId ? void load(connectionId, path) : setConnectionAttempt((value) => value + 1)} title={connectionId ? "刷新远程目录" : "重新连接文件服务"} aria-label={connectionId ? "刷新远程目录" : "重连文件服务"}><RefreshCw size={14} /></button>
+      </div>
+      <div className="sftp-location">
+        <div className="sftp-path-row">
+          <button type="button" disabled={!connectionId || loading || path === "/"} onClick={() => connectionId && void load(connectionId, parentPath())} title="上级目录" aria-label="上级目录"><ArrowUp size={14} /></button>
+          <button type="button" disabled={!connectionId || loading} onClick={() => connectionId && void load(connectionId, session.initialDirectory ?? ".")} title="初始目录" aria-label="初始目录"><Home size={14} /></button>
+          <form className="remote-path" onSubmit={(event) => { event.preventDefault(); if (connectionId && !loading && pathInput.trim()) void load(connectionId, pathInput.trim()); }}>
+            <input value={pathInput} onChange={(event) => setPathInput(event.target.value)} aria-label="远程路径" placeholder="输入路径并按 Enter" spellCheck={false} />
+          </form>
+        </div>
+        <nav className="sftp-breadcrumbs" aria-label="远程目录导航">{breadcrumbs.map((crumb, index) => <span key={crumb.path}>
+          {index > 0 && <ChevronRight size={11} />}<button type="button" disabled={!connectionId || loading} aria-current={index === breadcrumbs.length - 1 ? "location" : undefined} title={crumb.path} onClick={() => connectionId && void load(connectionId, crumb.path)}>{crumb.label}</button>
+        </span>)}</nav>
+        <div className="sftp-directory-tools">
+          <button type="button" aria-label="收藏当前目录" aria-pressed={workspace.bookmarks.includes(path)} disabled={!connectionId || loading} onClick={() => commitWorkspace((current) => toggleDirectoryBookmark(current, path))}><Star size={12} fill={workspace.bookmarks.includes(path) ? "currentColor" : "none"} /></button>
+          <select aria-label="目录书签与最近访问" value="" disabled={!connectionId || loading} onChange={(event) => { if (connectionId && event.target.value) { setFollowTerminal(false); void load(connectionId, event.target.value); } }}>
+            <option value="">书签与最近目录</option><optgroup label="书签">{workspace.bookmarks.map((item) => <option key={item} value={item}>{item}</option>)}</optgroup><optgroup label="最近访问">{workspace.recent.map((item) => <option key={item} value={item}>{item}</option>)}</optgroup>
+          </select>
+          <button type="button" title={terminalDirectory ? `跟随 Shell 已报告的目录：${terminalDirectory}` : "需要 Shell 报告真实目录，可先启用 Shell 集成"} aria-pressed={followTerminal} disabled={!connectionId || !terminalDirectory} onClick={() => setFollowTerminal((value) => !value)}>跟随终端</button>
+          <button type="button" title="在当前终端切换目录（Bash / Zsh），执行前需确认" aria-label="在此目录打开终端" disabled={!connectionId || !onOpenTerminalDirectory || loading} onClick={() => onOpenTerminalDirectory?.(path)}><TerminalSquare size={13} /></button>
+        </div>
+      </div>
+      <div className="sftp-local-destination">
+        <div><span>本地保存目录</span><strong title={workspace.localDirectory}>{workspace.localDirectory || "下载时选择"}</strong></div>
+        <button type="button" onClick={() => { void open({ title: "选择本地下载目录", directory: true, multiple: false, defaultPath: workspace.localDirectory || undefined }).then((directory) => { if (typeof directory === "string") commitWorkspace((current) => ({ ...current, localDirectory: directory })); }).catch((caught) => setError(String(caught))); }}>选择…</button>
+        <button type="button" aria-label="切换本地远程双栏" aria-pressed={dualPane} title={dualPane ? "收起文件工作区" : "展开文件工作区"} onClick={() => onExpandedChange?.(!dualPane)}><Columns2 size={14} /></button>
+      </div>
+      <div className={`sftp-browser ${dualPane ? "sftp-browser-dual" : "sftp-browser-single"}`}>
+        {dualPane && <LocalDirectoryPane path={workspace.localDirectory} disabled={!connectionId || planning || loading} onNavigate={(directory) => commitWorkspace((current) => ({ ...current, localDirectory: directory }))} onUpload={(paths) => void uploadFiles(paths)} />}
+        <section className="sftp-browser-pane">
+          <div className="sftp-filter-row">
+            <div className="sftp-search"><Search size={13} /><input aria-label="搜索当前目录" placeholder="搜索当前目录…" value={filterQuery} onChange={(event) => { setFilterQuery(event.target.value); setSelectedPaths(new Set()); setAnchorPath(null); }} />
+              {filterQuery && <button type="button" aria-label="清空文件搜索" onClick={() => { setFilterQuery(""); setSelectedPaths(new Set()); setAnchorPath(null); }}><X size={12} /></button>}
             </div>
+            <label className="sftp-hidden-toggle"><input type="checkbox" checked={showHidden} onChange={(event) => { setShowHidden(event.target.checked); setSelectedPaths(new Set()); setAnchorPath(null); }} />显示隐藏项</label>
+          </div>
+          <div className="sftp-column-head"><span />{([{ field: "name", label: "名称" }, { field: "modified", label: "修改时间" }, { field: "size", label: "大小" }] as { field: SftpSortField; label: string }[]).map((column) => <button type="button" key={column.field} data-sort={column.field} onClick={() => setSort((previous) => ({ field: column.field, descending: previous.field === column.field ? !previous.descending : column.field !== "name" }))}>{column.label}{sort.field === column.field && <span>{sort.descending ? "↓" : "↑"}</span>}</button>)}</div>
+          <div className={`remote-list ${draggingFiles ? "dragging-files" : ""}`} ref={remoteListRef} aria-busy={loading}>
+            {draggingFiles && <div className="sftp-drop-overlay"><ArrowUpFromLine size={24} /><strong>松开即可上传到此目录</strong><span>{path}</span></div>}
             {loading && <div className="panel-message">读取远程目录…</div>}
-            {error && <div className="panel-error">{error}</div>}
-            {!loading && !error && entries.length === 0 && <div className="panel-message">当前目录为空。</div>}
-            {!loading && !error && entries.map((entry) => (
+            {connectionError && <div className="panel-error sftp-recovery" role="alert"><p>{connectionError}</p><p>文件连接独立于终端，可在此重试。</p><button type="button" className="secondary-button" disabled={loading} onClick={() => setConnectionAttempt((value) => value + 1)}>重新连接文件服务</button></div>}
+            {error && <div className="panel-error sftp-recovery" role="alert"><p>{error}</p>{connectionId && <div><button type="button" className="secondary-button" disabled={loading} onClick={() => void load(connectionId, requestedPathRef.current)}>重新读取目录</button><button type="button" className="ai-text-button" disabled={loading} onClick={() => setConnectionAttempt((value) => value + 1)}>重新连接</button></div>}</div>}
+            {!loading && !error && !connectionError && entries.length === 0 && <div className="panel-message">当前目录为空。</div>}
+            {!loading && entries.length > 0 && visibleEntries.length === 0 && <div className="panel-message">没有匹配的文件。<button type="button" className="sftp-inline-link" onClick={() => { setFilterQuery(""); setShowHidden(true); }}>显示全部文件</button></div>}
+            {!loading && visibleEntries.map((entry) => (
               <button
                 key={entry.path}
                 className={`remote-entry ${selectedPaths.has(entry.path) ? "selected" : ""}`}
+                aria-pressed={selectedPaths.has(entry.path)}
+                title={entry.name}
                 onClick={(event) => selectEntry(entry, event)}
                 onDoubleClick={() => entry.fileType === "directory" && connectionId ? void load(connectionId, entry.path) : void editRemote(entry)}
                 onContextMenu={(event) => {
@@ -808,6 +928,8 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
               </button>
             ))}
           </div>
+          <button type="button" className="sftp-drop-hint" disabled={!connectionId || loading} onClick={() => void upload()}><ArrowUpFromLine size={13} /><span>拖入文件上传，或点击选择文件</span></button>
+          <div className="sftp-directory-summary"><span>{selectedEntries.length > 0 ? `已选 ${selectedEntries.length} 项 · ${selectedSizeLabel}` : `${visibleEntries.length} 项${visibleEntries.length !== entries.length ? ` / 共 ${entries.length} 项` : ""}`}</span><span>Ctrl / ⌘ 多选 · Shift 连选</span></div>
         </section>
       </div>
       {listContextMenu && (
@@ -846,16 +968,10 @@ export function SftpPanel({ session, globalTransferConcurrency, onClose, onToast
         onClearFinished={() => void clearFinishedTransfers()}
         onReopenRemoteEdit={() => void reopenRemoteEdit()}
         onUploadEditedFile={() => void uploadEditedFile()}
+        onError={setError}
       />
-      {uploadConflict && (
-        <UploadConflictModal
-          fileName={uploadConflict.fileName}
-          remainingConflicts={uploadConflict.remainingConflicts}
-          existingNames={remoteEntryNames}
-          onConfirm={(choice) => settleUploadConflict(choice)}
-          onCancel={() => settleUploadConflict(null)}
-        />
-      )}
+      {transferDraft && !transferConflict && <TransferPlanModal key={transferDraft.id} draft={transferDraft} busy={planning} error={planningError} onConfirm={(destination, policy) => void confirmTransferPlan(destination, policy)} onCancel={cancelTransferPlan} />}
+      {transferConflict && transferDraft && <TransferConflictModal key={transferConflict.destinationPath} conflict={transferConflict} direction={transferDraft.direction} onConfirm={settleConflict} onCancel={() => settleConflict(null)} />}
       {syncVisible && connectionId && <SftpSyncModal
         connectionId={connectionId}
         initialRemotePath={path}
@@ -882,6 +998,7 @@ interface SftpTransferSectionProps {
   onClearFinished: () => void;
   onReopenRemoteEdit: () => void;
   onUploadEditedFile: () => void;
+  onError: (message: string) => void;
 }
 
 /**
@@ -900,15 +1017,20 @@ function SftpTransferSection({
   onClearFinished,
   onReopenRemoteEdit,
   onUploadEditedFile,
+  onError,
 }: SftpTransferSectionProps) {
+  const [filter, setFilter] = useState<TransferFilter>("all");
+  const [collapsed, setCollapsed] = useState(true);
   const transfers = useSyncExternalStore(store.subscribe, store.getSnapshot);
   const transferItems = useMemo(
     () => sortTransfersForDisplay(Object.values(transfers)),
     [transfers],
   );
+  const counts = useMemo(() => transferFilterCounts(transferItems), [transferItems]);
+  const visibleTransfers = useMemo(() => transferItems.filter((transfer) => matchesTransferFilter(transfer, filter)), [transferItems, filter]);
   if (transferItems.length === 0 && pendingUploads.length === 0 && !remoteEdit) return null;
   return (
-    <div className="transfer-list">
+    <section className="transfer-list sftp-transfer-section" data-collapsed={collapsed} aria-label="当前连接的传输任务">
       {remoteEdit && (
         <div className="remote-edit-card">
           <div className="transfer-title">远程编辑</div>
@@ -925,73 +1047,24 @@ function SftpTransferSection({
       {(transferItems.length > 0 || pendingUploads.length > 0) && (
         <>
           <div className="transfer-title transfer-title-row">
-            <span>传输任务{pendingUploads.length ? ` · 待提交 ${pendingUploads.length}` : ""}</span>
+            <button type="button" className="transfer-section-toggle" aria-expanded={!collapsed} onClick={() => setCollapsed((previous) => !previous)}><ChevronDown size={13} />传输任务<span>{counts.active + pendingUploads.length > 0 ? `${counts.active + pendingUploads.length} 项进行中` : `${counts.all} 项`}</span>{counts.failed > 0 && <span className="transfer-failure-count">{counts.failed} 项失败</span>}</button>
             <span className="transfer-list-actions">
               {(pendingUploads.length > 0 || transferItems.some((transfer) => isActiveTransferStatus(transfer.status))) && <button onClick={onCancelActive}>取消全部</button>}
               {transferItems.some((transfer) => !isActiveTransferStatus(transfer.status)) && <button onClick={onClearFinished}>清理已结束</button>}
             </span>
           </div>
-          {pendingUploads.map((task) => (
-            <div className="pending-upload" key={task.id} title={task.localPath}>待提交 · {task.localPath.split(/[\/]/).pop()}</div>
-          ))}
-          {transferItems.map((transfer) => {
-            const percent = transfer.totalBytes ? Math.min(100, Math.round((transfer.transferredBytes / transfer.totalBytes) * 100)) : 0;
-            const waiting = formatTransferWaitingState(transfer);
-            return (
-              <div className="transfer-item" key={transfer.transferId}>
-                <div className="transfer-copy">
-                  <span>{transfer.direction === "upload" ? "上传" : "下载"} · {transfer.remotePath.split("/").pop()}</span>
-                  <small className={`transfer-status ${transfer.status}`} title={transfer.error ?? undefined}>
-                    {formatTransferStatus(transfer.status)}{waiting ? ` · ${waiting}` : ""} · {percent}% · {formatBytes(transfer.transferredBytes)}{transfer.totalBytes ? ` / ${formatBytes(transfer.totalBytes)}` : ""}{transfer.speedBytesPerSecond !== null && transfer.status === "running" ? ` · ${formatSpeed(transfer.speedBytesPerSecond)}` : ""}
-                  </small>
-                  {transfer.error && <small className="transfer-error" title={transfer.error}>{transfer.error}</small>}
-                </div>
-                <div className="progress-track"><div className={transfer.status} style={{ width: `${percent}%` }} /></div>
-                <div className="transfer-actions">
-                  {(transfer.status === "queued" || transfer.status === "running") && (
-                    <>
-                      <button onClick={() => onControlTransfer(transfer, "pause")} title="暂停传输"><Pause size={12} /></button>
-                      <button onClick={() => onControlTransfer(transfer, "cancel")} title="取消传输"><X size={12} /></button>
-                    </>
-                  )}
-                  {transfer.status === "paused" && (
-                    <>
-                      <button onClick={() => onControlTransfer(transfer, "resume")} title="继续传输"><Play size={12} /></button>
-                      <button onClick={() => onControlTransfer(transfer, "cancel")} title="取消传输"><X size={12} /></button>
-                    </>
-                  )}
-                  {(transfer.status === "failed" || transfer.status === "cancelled") && (
-                    <button onClick={() => onRetry(transfer)} title="重试传输"><RefreshCw size={12} /></button>
-                  )}
-                  {(transfer.status === "completed" || transfer.status === "failed" || transfer.status === "cancelled") && (
-                    <button onClick={() => onRemove(transfer.transferId)} title="移除任务"><Trash2 size={12} /></button>
-                  )}
-                </div>
-              </div>
-            );
-          })}
+          {!collapsed && <>
+            <TransferFilters value={filter} counts={{ ...counts, all: counts.all + pendingUploads.length, active: counts.active + pendingUploads.length }} onChange={setFilter} />
+            {(filter === "all" || filter === "active") && pendingUploads.map((task) => (
+              <div className="pending-upload" key={task.id} title={`${task.localPath} → ${task.remotePath}`}>待提交 · {task.localPath.split(/[\\/]/).pop()}</div>
+            ))}
+            {visibleTransfers.map((transfer) => <TransferCard key={transfer.transferId} transfer={transfer} onControl={onControlTransfer} onRetry={onRetry} onRemove={(item) => onRemove(item.transferId)} onError={onError} />)}
+            {visibleTransfers.length === 0 && !((filter === "all" || filter === "active") && pendingUploads.length) && <p className="transfer-empty-filter">此分类暂无任务</p>}
+          </>}
         </>
       )}
-    </div>
+    </section>
   );
-}
-
-function joinLocalPath(parent: string, child: string) {
-  const separator = parent.includes("\\") ? "\\" : "/";
-  const normalizedChild = child.replace(/[\\/]+/g, separator);
-  return `${parent.replace(/[\\/]$/, "")}${separator}${normalizedChild}`;
-}
-
-function formatTransferStatus(status: TransferEvent["status"]) {
-  return {
-    queued: "等待中",
-    running: "传输中",
-    paused: "已暂停",
-    cancelling: "正在取消",
-    completed: "已完成",
-    cancelled: "已取消",
-    failed: "失败",
-  }[status];
 }
 
 function formatRemoteTimestamp(modifiedAtUnix: number | null): string {
@@ -1012,8 +1085,4 @@ function formatBytes(value: number) {
   if (value < 1024 ** 2) return `${(value / 1024).toFixed(1)} KB`;
   if (value < 1024 ** 3) return `${(value / 1024 ** 2).toFixed(1)} MB`;
   return `${(value / 1024 ** 3).toFixed(1)} GB`;
-}
-
-function formatSpeed(value: number) {
-  return `${formatBytes(value)}/s`;
 }

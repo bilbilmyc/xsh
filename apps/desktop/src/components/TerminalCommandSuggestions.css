@@ -1,0 +1,80 @@
+/* Terminal-local completion: the command and its suffix are the visual focus. */
+.terminal-command-suggestions {
+  position: absolute;
+  z-index: 12;
+  width: min(570px, calc(100% - 20px));
+  max-height: calc(100% - 48px);
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-raised, var(--panel));
+  color: var(--text);
+  box-shadow: 0 8px 28px #0003;
+  font-family: inherit;
+  font-size: 12px;
+  text-align: left;
+}
+.terminal-command-suggestions header,
+.terminal-command-suggestions header > span { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.terminal-command-suggestions header { justify-content: space-between; padding: 7px 10px; border-bottom: 1px solid var(--line-soft); }
+.terminal-command-suggestions header svg { color: var(--accent-strong, var(--accent)); flex-shrink: 0; }
+.terminal-command-suggestions header strong { font-size: 11px; font-weight: 600; white-space: nowrap; }
+.terminal-command-suggestions header small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; color: var(--muted); }
+.terminal-command-suggestions button { display: inline-flex; align-items: center; justify-content: center; gap: 4px; min-height: 25px; border: 0; border-radius: 4px; background: transparent; color: var(--text); font: inherit; cursor: pointer; }
+.terminal-command-suggestions button:hover { background: var(--panel-hover); }
+.terminal-command-suggestions button:disabled { opacity: .45; cursor: default; }
+.terminal-command-suggestions :is(button, input, summary):focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.terminal-command-suggestions .terminal-suggestion-icon { flex-shrink: 0; width: 26px; padding: 0; color: var(--muted); }
+.terminal-suggestion-goal { display: flex; align-items: center; gap: 7px; margin: 9px 10px 6px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 5px; background: var(--bg); }
+.terminal-suggestion-goal:focus-within { border-color: var(--accent); }
+.terminal-suggestion-goal > span { color: var(--accent-strong, var(--accent)); font: 18px var(--mono-font); }
+.terminal-suggestion-goal input { flex: 1; min-width: 0; height: 29px; padding: 0; border: 0; outline: 0; background: transparent; color: var(--text); font: inherit; }
+.terminal-suggestion-goal input::placeholder { color: var(--muted); }
+.terminal-suggestion-goal button { flex-shrink: 0; width: 28px; color: var(--accent-strong, var(--accent)); }
+.terminal-suggestion-prefix { display: flex; align-items: baseline; gap: 7px; padding: 0 11px 5px; min-width: 0; color: var(--muted); font-size: 10px; }
+.terminal-suggestion-prefix > span { white-space: nowrap; }
+.terminal-suggestion-prefix code { overflow: hidden; text-overflow: ellipsis; white-space: pre; font: 11px var(--mono-font); color: var(--text); }
+.terminal-suggestion-context { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; padding: 0 10px 7px; font-size: 10px; color: var(--muted); }
+.terminal-suggestion-context label { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 5px; white-space: nowrap; cursor: pointer; }
+.terminal-suggestion-context input { flex: 0 0 13px; width: 13px; min-width: 13px; max-width: 13px; height: 13px; margin: 0; accent-color: var(--accent); }
+.terminal-command-suggestions .terminal-suggestion-refresh-context { min-height: 18px; padding: 0 3px; color: var(--accent-strong, var(--accent)); font-size: 10px; }
+.terminal-command-suggestions .terminal-suggestion-ask { display: flex; gap: 6px; width: 100%; padding: 7px 10px; color: var(--muted); font-size: 11px; justify-content: flex-start; }
+.terminal-suggestion-ask kbd { margin-left: auto; }
+.terminal-suggestion-list { border-top: 1px solid var(--line-soft); padding: 3px; }
+.terminal-suggestion-item { display: flex; align-items: center; gap: 7px; padding: 7px 5px; border-radius: 4px; }
+.terminal-suggestion-item.selected { background: var(--panel-hover); }
+.terminal-suggestion-source { color: var(--muted); align-self: flex-start; padding-top: 2px; }
+.terminal-suggestion-command { flex: 1; min-width: 0; }
+.terminal-suggestion-command code { display: block; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.5 var(--mono-font); }
+.terminal-suggestion-command code > span { color: var(--muted); }
+.terminal-suggestion-command code b { color: var(--accent-strong, var(--accent)); font-weight: 500; }
+.terminal-suggestion-command small { display: block; color: var(--muted); font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
+.terminal-command-suggestions .terminal-suggestion-fill { flex-shrink: 0; color: var(--accent-strong, var(--accent)); font-size: 11px; padding: 0 5px; }
+.terminal-suggestion-status { display: flex; align-items: center; gap: 7px; padding: 10px 12px; color: var(--muted); font-size: 11px; }
+.terminal-suggestion-spinner { animation: terminal-suggestion-spin 1.1s linear infinite; }
+.terminal-suggestion-error { margin: 5px 10px 8px; padding: 7px; background: var(--bg); border-left: 2px solid var(--red); font-size: 11px; line-height: 1.5; color: var(--red); overflow-wrap: anywhere; }
+.terminal-suggestion-preview, .terminal-suggestion-setup { margin: 0 10px 8px; font-size: 11px; color: var(--muted); }
+.terminal-suggestion-preview summary, .terminal-suggestion-setup summary { cursor: pointer; padding: 4px 0; }
+.terminal-suggestion-preview pre, .terminal-suggestion-setup > code { display: block; max-height: 110px; overflow: auto; margin: 5px 0; padding: 7px; background: var(--bg); border-radius: 4px; white-space: pre-wrap; overflow-wrap: anywhere; font: 10px/1.5 var(--mono-font); }
+.terminal-suggestion-setup p { margin: 4px 0; line-height: 1.6; }
+.terminal-suggestion-setup > div { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.terminal-suggestion-setup button { padding: 0 7px; border: 1px solid var(--line); font-size: 11px; }
+.terminal-suggestion-integration { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 8px; margin: 5px 10px 8px; padding: 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
+.terminal-suggestion-integration-icon { display: flex; padding-top: 2px; color: var(--accent-strong, var(--accent)); }
+.terminal-suggestion-integration-copy { flex: 1 1 180px; min-width: 0; }
+.terminal-suggestion-integration-copy strong { font-size: 11px; font-weight: 600; }
+.terminal-suggestion-integration-copy p { margin: 4px 0 0; font-size: 10px; line-height: 1.6; color: var(--muted); overflow-wrap: anywhere; }
+.terminal-command-suggestions .terminal-suggestion-enable-shell { display: inline-flex; flex-shrink: 0; align-items: center; justify-content: center; gap: 5px; min-height: 30px; margin-left: auto; padding: 4px 9px; border: 1px solid var(--accent); border-radius: 4px; color: var(--accent-strong, var(--accent)); font-size: 11px; white-space: nowrap; }
+.terminal-command-suggestions .terminal-suggestion-enable-shell:hover:not(:disabled) { background: var(--panel-hover); }
+.terminal-command-suggestions .terminal-suggestion-enable-shell:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.shell-setup-confirm p { margin: 0 0 10px; }
+.shell-setup-confirm summary { cursor: pointer; color: var(--muted); }
+.shell-setup-confirm code { display: block; max-height: 150px; overflow: auto; margin-top: 8px; padding: 8px; background: var(--bg); border: 1px solid var(--line); border-radius: 4px; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.5 var(--mono-font); }
+.terminal-command-suggestions footer { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 9px; padding: 6px 10px; border-top: 1px solid var(--line-soft); color: var(--muted); font-size: 10px; line-height: 1.5; }
+.terminal-command-suggestions kbd { color: var(--muted); font-family: inherit; font-size: 10px; white-space: nowrap; }
+.terminal-suggestion-escape { margin-left: auto; white-space: nowrap; }
+.terminal-stage .terminal-toolbar .terminal-command-suggestion-toggle { display: inline-flex; align-items: center; gap: 4px; width: auto; padding: 0 6px; color: var(--accent-strong, var(--accent)); font-size: var(--font-2xs); white-space: nowrap; }
+@keyframes terminal-suggestion-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .terminal-suggestion-spinner { animation: none; } }
+/* Self-critique: no replacement terminal editor; one compact popup anchored to
+   the live cursor, with source, suffix and fill action visible together. */

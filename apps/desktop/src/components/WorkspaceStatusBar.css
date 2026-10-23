@@ -98,7 +98,14 @@
   letter-spacing: .02em;
 }
 
+.workspace-transfers { display: flex; align-items: center; gap: 8px; }
+.workspace-transfers button { display: inline-flex; align-items: center; gap: 5px; min-height: 24px; padding: 2px 5px; border: 0; border-radius: 3px; color: var(--text); background: transparent; cursor: pointer; font: inherit; }
+.workspace-transfers button:hover { background: var(--panel-hover); }
+.workspace-transfers .workspace-transfer-failed { color: var(--red); }
+.workspace-transfer-speed { color: var(--muted); }
+
 @media (max-width: 1100px) {
   .workspace-status-protocol { display: none; }
+  .workspace-transfer-speed { display: none; }
   .workspace-statusbar { gap: 12px; }
 }

@@ -18,6 +18,48 @@ const waitingReasonLabels: Record<TransferWaitingReason, string> = {
   userPaused: "由用户暂停",
 };
 
+export type TransferFilter = "all" | "active" | "failed" | "finished";
+export interface TransferScope {
+  direction: "all" | TransferEvent["direction"];
+  endpoint: string;
+  batchId: string;
+}
+export function matchesTransferScope(transfer: TransferEvent, scope: TransferScope): boolean {
+  return (scope.direction === "all" || transfer.direction === scope.direction)
+    && (!scope.endpoint || transfer.endpoint === scope.endpoint)
+    && (!scope.batchId || (scope.batchId === "unbatched" ? !transfer.batchId : transfer.batchId === scope.batchId));
+}
+
+export function matchesTransferFilter(transfer: TransferEvent, filter: TransferFilter): boolean {
+  if (filter === "active") return isActiveTransferStatus(transfer.status);
+  if (filter === "failed") return transfer.status === "failed";
+  if (filter === "finished") return transfer.status === "completed" || transfer.status === "cancelled";
+  return true;
+}
+
+export function transferFilterCounts(transfers: TransferEvent[]): Record<TransferFilter, number> {
+  return {
+    all: transfers.length,
+    active: transfers.filter((transfer) => matchesTransferFilter(transfer, "active")).length,
+    failed: transfers.filter((transfer) => matchesTransferFilter(transfer, "failed")).length,
+    finished: transfers.filter((transfer) => matchesTransferFilter(transfer, "finished")).length,
+  };
+}
+
+export function transferPercent(transfer: TransferEvent): number | null {
+  if (transfer.status === "completed") return 100;
+  if (!transfer.totalBytes || transfer.totalBytes < 0) return null;
+  return Math.max(0, Math.min(100, Math.round(transfer.transferredBytes / transfer.totalBytes * 100)));
+}
+
+export function localParentDirectory(path: string): string {
+  const separatorIndex = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  if (separatorIndex < 0) return ".";
+  if (separatorIndex === 0) return path[0];
+  if (separatorIndex === 2 && /^[a-z]:/i.test(path)) return path.slice(0, 3);
+  return path.slice(0, separatorIndex);
+}
+
 export function sortTransfersForDisplay(transfers: TransferEvent[]): TransferEvent[] {
   return [...transfers].sort((left, right) =>
     statusOrder[left.status] - statusOrder[right.status]

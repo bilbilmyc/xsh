@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { aiApi } from "../ai-api";
-import { limitAiConversation, type AiHistoryMessage, type AiHistoryTurn } from "../ai-conversation";
-import { extractCommandDraft, type AiMode } from "../ai-context";
+import { archiveAiConversation, limitAiConversation, type AiConversationArchive, type AiHistoryMessage, type AiHistoryTurn } from "../ai-conversation";
+import type { AiMode } from "../ai-context";
+import type { AiContextItem, AiContextTarget } from "../ai-context-inventory";
+import type { DiagnosticPlan } from "../ai-diagnostic";
 import type { AiTarget } from "./AiAssistantPanel";
 
-type ConversationTarget = Pick<AiTarget, "tabId" | "name" | "connectionVersion" | "connectionId">;
+type ConversationTarget = AiContextTarget;
 
 export function sameAiTarget(first: ConversationTarget | null, second: ConversationTarget | null): boolean {
   return first?.tabId === second?.tabId && first?.connectionVersion === second?.connectionVersion && first?.connectionId === second?.connectionId;
@@ -43,13 +45,17 @@ export interface AiConversationState {
   mode: AiMode;
   prompt: string;
   context: string;
-  contextSource: "selection" | "recent-output" | "manual";
+  contextSource: "selection" | "recent-output" | "execution" | "manual";
   contextTarget: ConversationTarget | null;
+  contextItems: AiContextItem[];
+  diagnosticPlan: DiagnosticPlan | null;
   turns: AiConversationTurn[];
   prepared: AiPreparedRequest | null;
   draft: AiDraft | null;
+  lastExecution: AiDraft | null;
   notice: string;
   error: string | null;
+  archives: AiConversationArchive<AiConversationTurn>[];
 }
 
 const SCRATCH_KEY = "scratch";
@@ -59,7 +65,7 @@ function conversationKey(tabId?: string): string {
 }
 
 function emptyConversation(): AiConversationState {
-  return { mode: "command", prompt: "", context: "", contextSource: "manual", contextTarget: null, turns: [], prepared: null, draft: null, notice: "", error: null };
+  return { mode: "command", prompt: "", context: "", contextSource: "manual", contextTarget: null, contextItems: [], diagnosticPlan: null, turns: [], prepared: null, draft: null, lastExecution: null, notice: "", error: null, archives: [] };
 }
 
 const EMPTY_CONVERSATION = emptyConversation();
@@ -78,7 +84,9 @@ export function useAiConversation(target: AiTarget | null, openTabIds: string[])
   const update = useCallback((owner: string, change: (conversation: AiConversationState) => AiConversationState) => {
     setConversations((previous) => {
       if (!liveKeysRef.current.has(owner)) return previous;
-      const next = change(previous[owner] ?? emptyConversation());
+      const current = previous[owner] ?? emptyConversation();
+      const next = change(current);
+      if (next === current) return previous;
       return { ...previous, [owner]: { ...next, turns: limitAiConversation(next.turns) } };
     });
   }, []);
@@ -91,9 +99,11 @@ export function useAiConversation(target: AiTarget | null, openTabIds: string[])
     void aiApi.cancel(active.requestId).catch(() => undefined);
   }, [update]);
 
-  const resetAll = useCallback(() => {
+  const archiveAll = useCallback(() => {
     stop();
-    setConversations({});
+    setConversations((previous) => Object.fromEntries(Object.entries(previous).map(([owner, current]) => [
+      owner, { ...emptyConversation(), archives: archiveAiConversation(current.archives, current.turns, current.prompt, "service-change") },
+    ])));
   }, [stop]);
 
   useEffect(() => {
@@ -116,11 +126,15 @@ export function useAiConversation(target: AiTarget | null, openTabIds: string[])
     if (active) void aiApi.cancel(active.requestId).catch(() => undefined);
   }, []);
 
-  const updateCurrent = (change: (conversation: AiConversationState) => AiConversationState) => update(key, change);
+  const updateCurrent = useCallback((change: (conversation: AiConversationState) => AiConversationState) => update(key, change), [key, update]);
+  const updateForTab = useCallback((tabId: string, change: (conversation: AiConversationState) => AiConversationState) => update(conversationKey(tabId), change), [update]);
 
   const startNew = () => {
     stop();
-    update(key, () => emptyConversation());
+    update(key, (current) => ({
+      ...emptyConversation(),
+      archives: archiveAiConversation(current.archives, current.turns, current.prompt, "new-conversation"),
+    }));
   };
 
   const submit = async (snapshot: AiPreparedRequest) => {
@@ -134,7 +148,7 @@ export function useAiConversation(target: AiTarget | null, openTabIds: string[])
     activeRef.current = { requestId, key: owner };
     const isCurrent = () => activeRef.current?.requestId === requestId && currentKeyRef.current === owner;
     const turn: AiConversationTurn = { id: requestId, mode: snapshot.mode, prompt: snapshot.prompt, context: snapshot.context, contextLabel: snapshot.contextLabel, text: "", status: "streaming", model: snapshot.model, target: snapshot.target };
-    update(owner, (previous) => ({ ...previous, prompt: "", context: "", contextSource: "manual", contextTarget: null, prepared: null, draft: null, notice: "", error: null, turns: [...previous.turns, turn] }));
+    update(owner, (previous) => ({ ...previous, prompt: "", context: "", contextSource: "manual", contextTarget: null, contextItems: [], prepared: null, draft: null, notice: "", error: null, turns: [...previous.turns, turn] }));
     try {
       const text = await aiApi.stream({ mode: snapshot.mode, prompt: snapshot.prompt, context: snapshot.context, history: snapshot.history }, requestId, (event) => {
         if (!isCurrent() || event.requestId !== requestId) return;
@@ -142,8 +156,7 @@ export function useAiConversation(target: AiTarget | null, openTabIds: string[])
       });
       if (!isCurrent()) return;
       activeRef.current = null;
-      const command = snapshot.mode === "command" ? extractCommandDraft(text) : null;
-      update(owner, (previous) => ({ ...previous, turns: previous.turns.map((item) => item.id === requestId ? { ...item, text, status: "complete" } : item), draft: command ? { turnId: requestId, text: command, target: snapshot.target } : null }));
+      update(owner, (previous) => ({ ...previous, turns: previous.turns.map((item) => item.id === requestId ? { ...item, text, status: "complete" } : item) }));
     } catch (caught) {
       if (!isCurrent()) return;
       activeRef.current = null;
@@ -155,9 +168,9 @@ export function useAiConversation(target: AiTarget | null, openTabIds: string[])
     conversation: conversations[key] ?? EMPTY_CONVERSATION,
     busy: activeRef.current?.key === key,
     updateCurrent,
-    updateForTab: (tabId: string, change: (conversation: AiConversationState) => AiConversationState) => update(conversationKey(tabId), change),
+    updateForTab,
     stop,
-    resetAll,
+    archiveAll,
     startNew,
     submit,
   };

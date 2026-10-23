@@ -1,4 +1,4 @@
-import { MousePointer2, TerminalSquare } from "lucide-react";
+import { Bug, ChevronDown, FileText, MousePointer2, Paperclip, TerminalSquare, X } from "lucide-react";
 import { AI_CONTEXT_BYTES, byteLength, type AiMode } from "../ai-context";
 import { AI_COMMAND_SUGGESTIONS, AI_TASKS } from "../ai-ui";
 
@@ -11,29 +11,47 @@ interface AiTaskComposerProps {
   canReadSelection: boolean;
   busy: boolean;
   followUp?: boolean;
+  hasAttachedContext?: boolean;
   onModeChange: (mode: AiMode) => void;
   onPromptChange: (prompt: string) => void;
   onContextChange: (context: string) => void;
   onClearContext: () => void;
-  onRequestSelection?: (mode: "explain" | "diagnose") => void;
-  onRequestRecentOutput?: (mode: "explain" | "diagnose") => void;
+  onRequestSelection?: (mode: AiMode) => void;
+  onRequestRecentOutput?: (mode: AiMode) => void;
+  onPreview: () => void;
 }
 
-export function AiTaskComposer({ mode, prompt, context, contextLabel, canClearContext, canReadSelection, busy, followUp = false, onModeChange, onPromptChange, onContextChange, onClearContext, onRequestSelection, onRequestRecentOutput }: AiTaskComposerProps) {
+const taskIcons = { command: TerminalSquare, explain: FileText, diagnose: Bug };
+
+export function AiTaskComposer({ mode, prompt, context, contextLabel, canClearContext, canReadSelection, busy, followUp = false, hasAttachedContext = false, onModeChange, onPromptChange, onContextChange, onClearContext, onRequestSelection, onRequestRecentOutput, onPreview }: AiTaskComposerProps) {
   const task = AI_TASKS[mode];
   return (
-    <>
-      <div className="ai-modes" role="group" aria-label="AI 任务">{(["command", "explain", "diagnose"] as const).map((taskMode) => <button key={taskMode} aria-pressed={mode === taskMode} className={mode === taskMode ? "active" : ""} disabled={busy} onClick={() => onModeChange(taskMode)}>{AI_TASKS[taskMode].label}</button>)}</div>
-      {!followUp && <div className="ai-task-intro"><h3>{task.title}</h3><p>{task.description}</p></div>}
-      {mode === "command" && !prompt && !followUp && <div className="ai-suggestions" aria-label="命令需求示例"><span className="ai-note">试试这些只读操作</span>{AI_COMMAND_SUGGESTIONS.map((suggestion) => <button key={suggestion} type="button" disabled={busy} onClick={() => onPromptChange(suggestion)}><TerminalSquare size={13} /><span>{suggestion}</span></button>)}</div>}
-      {mode !== "command" && <div className="ai-selection-guide"><div><MousePointer2 size={15} /><strong>{followUp ? "需要时附加新的终端输出" : "先在终端拖选一段文字"}</strong></div>{!followUp && <p>拖选命令或输出后，点击终端上方的“解释 / 分析报错”或下面的按钮。按住 Shift 再右键可打开 AI 菜单；普通右键可能会粘贴。</p>}<button type="button" className="secondary-button" disabled={busy || !canReadSelection || !onRequestSelection} onClick={() => onRequestSelection?.(mode)}>使用终端当前选区</button>{onRequestRecentOutput && <><p className="ai-note">手动附加后仍需预览确认，不会后台读取终端。</p><button type="button" className="secondary-button" disabled={busy || !canReadSelection} onClick={() => onRequestRecentOutput(mode)}>附加最近50行输出（先预览）</button></>}{!canReadSelection && <p className="ai-note">请先打开一个终端会话，也可以直接粘贴文本到下方。</p>}</div>}
-      <label className="ai-label" htmlFor="ai-prompt">{followUp ? "继续追问或说明下一步" : mode === "command" ? "你想完成的操作" : "补充问题（可选）"}</label>
-      <textarea id="ai-prompt" rows={3} value={prompt} disabled={busy} placeholder={followUp ? "例如：为什么会这样？根据刚才的结果，下一步应该检查什么？" : task.placeholder} onChange={(event) => onPromptChange(event.target.value)} />
-      <p className="ai-note">{task.example}</p>
-      <div className="ai-label"><label htmlFor="ai-context">{mode === "command" ? "补充上下文（可选）" : "要分析的选区或报错"}</label><button className="ai-text-button" disabled={busy || !canClearContext} onClick={onClearContext}>清空</button></div>
-      <textarea id="ai-context" rows={mode === "command" ? 3 : 5} value={context} disabled={busy} spellCheck={false} placeholder={mode === "command" ? "可填写系统版本、目录或相关输出；没有上下文也能生成草稿。" : "获取终端选区后会显示在这里；也可手动粘贴并编辑。"} onChange={(event) => onContextChange(event.target.value)} />
-      <div className="ai-context-meta"><span>{contextLabel}</span><span>{byteLength(context)} / {AI_CONTEXT_BYTES} 字节</span></div>
-      <p className="ai-note">仅发送本次可见内容及预览列出的已完成历史，不会读取完整终端缓冲区。</p>
-    </>
+    <div className="ai-task-composer">
+      <div className="ai-modes" role="group" aria-label="AI 任务">{(["command", "explain", "diagnose"] as const).map((taskMode) => {
+        const Icon = taskIcons[taskMode];
+        return <button type="button" key={taskMode} aria-pressed={mode === taskMode} className={mode === taskMode ? "active" : ""} disabled={busy} onClick={() => onModeChange(taskMode)}><Icon size={13} />{AI_TASKS[taskMode].label}</button>;
+      })}</div>
+      {!followUp && <p className="ai-task-description">{task.description}</p>}
+      <label className="ai-label" htmlFor="ai-prompt">{followUp ? "继续提问" : mode === "command" ? "你想完成什么？" : "问题或补充说明"}</label>
+      <textarea id="ai-prompt" rows={3} value={prompt} disabled={busy} placeholder={followUp ? "结合上面的结果继续提问，或附加新的终端输出…" : task.placeholder} onChange={(event) => onPromptChange(event.target.value)} onKeyDown={(event) => {
+        if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && (prompt.trim() || context.trim() || hasAttachedContext)) { event.preventDefault(); onPreview(); }
+      }} />
+      {mode === "command" && !prompt && !followUp && <details className="ai-suggestion-examples"><summary>查看命令需求示例</summary><div className="ai-suggestions" aria-label="命令需求示例">{AI_COMMAND_SUGGESTIONS.map((suggestion) => (
+        <button key={suggestion} type="button" disabled={busy} onClick={() => onPromptChange(suggestion)}><TerminalSquare size={13} /><span>{suggestion}</span></button>
+      ))}</div></details>}
+      <div className="ai-attach-toolbar">
+        <span><Paperclip size={12} />附加上下文</span>
+        <button type="button" disabled={busy || !canReadSelection || !onRequestSelection} onClick={() => onRequestSelection?.(mode)}><MousePointer2 size={12} />终端选区</button>
+        <button type="button" disabled={busy || !canReadSelection || !onRequestRecentOutput} onClick={() => onRequestRecentOutput?.(mode)}><TerminalSquare size={12} />最近输出</button>
+      </div>
+      <details className={`ai-context-editor ${context ? "has-context" : ""}`}>
+        <summary><span><FileText size={13} />{context ? contextLabel : "粘贴或编辑上下文"}</span><span>{context ? `${byteLength(context)} 字节` : "可选"}<ChevronDown size={12} /></span></summary>
+        <div className="ai-context-editor-body">
+          <textarea id="ai-context" aria-label="补充上下文" rows={4} value={context} disabled={busy} spellCheck={false} placeholder="粘贴命令输出、日志或环境信息。也可用上方按钮附加当前终端内容。" onChange={(event) => onContextChange(event.target.value)} />
+          <div className="ai-context-meta"><span>{byteLength(context)} / {AI_CONTEXT_BYTES} 字节</span>{canClearContext && <button type="button" className="ai-text-button" disabled={busy} onClick={onClearContext}><X size={11} />移除</button>}</div>
+        </div>
+      </details>
+      {mode !== "command" && !context && !hasAttachedContext && !followUp && <p className="ai-note ai-context-tip">附加报错或命令输出，AI 才能根据实际信息分析。可先在终端拖选文字。</p>}
+    </div>
   );
 }

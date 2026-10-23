@@ -1,5 +1,7 @@
 import { Radio } from "lucide-react";
 import { version } from "../../package.json";
+import { GlobalTransferStatus } from "./GlobalTransferStatus";
+import type { TransferFilter } from "../transfer-queue";
 import "./WorkspaceStatusBar.css";
 
 interface WorkspaceStatusBarProps {
@@ -9,9 +11,10 @@ interface WorkspaceStatusBarProps {
   connectedCount: number;
   broadcastCount: number | null;
   workspace: { name: string; finished: number; total: number; omitted: number } | null;
+  onOpenTransfers: (filter: TransferFilter) => void;
 }
 
-export function WorkspaceStatusBar({ loading, connection, openCount, connectedCount, broadcastCount, workspace }: WorkspaceStatusBarProps) {
+export function WorkspaceStatusBar({ loading, connection, openCount, connectedCount, broadcastCount, workspace, onOpenTransfers }: WorkspaceStatusBarProps) {
   const state = loading ? "connecting" : connection?.state ?? "idle";
   const label = loading ? "加载会话" : connection?.label ?? "就绪";
   const progress = workspace
@@ -28,6 +31,7 @@ export function WorkspaceStatusBar({ loading, connection, openCount, connectedCo
         {progress && <span className="workspace-status-progress" role="status" title={progress}>{progress}</span>}
       </div>
       <div className="workspace-status-meta">
+        <GlobalTransferStatus onOpen={onOpenTransfers} />
         {broadcastCount !== null && <span className="workspace-status-broadcast" title="输入将发送到所有已连接的广播会话"><Radio size={12} />广播 {broadcastCount}</span>}
         {openCount > 0 && <span className="workspace-status-count" title={`已打开 ${openCount} 个标签，其中 ${connectedCount} 个已连接`}>{connectedCount} 已连接<span aria-hidden="true"> / </span>{openCount} 已打开</span>}
         {connection && <span className="workspace-status-protocol">{connection.protocol}</span>}

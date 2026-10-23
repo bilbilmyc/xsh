@@ -1,0 +1,24 @@
+.transfer-manager-body { gap: 8px; padding-top: 0; }
+.transfer-manager-body > .transfer-card + .transfer-card { margin-top: 0; }
+.transfer-manager-filter-bar { position: sticky; z-index: 3; top: 0; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; margin: 0 -2px; padding: 12px 2px 9px; border-bottom: 1px solid var(--line-soft); background: var(--panel); }
+.transfer-manager-search { display: flex; align-items: center; gap: 6px; width: 200px; max-width: 100%; padding: 0 8px; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); background: var(--bg); }
+.transfer-manager-search input { min-width: 0; height: 29px; min-height: 0; padding: 0; border: 0; background: transparent; box-shadow: none; font-size: var(--font-xs); }
+.transfer-manager-search:focus-within { border-color: var(--accent); }
+.transfer-manager-empty { display: grid; justify-items: center; gap: 10px; padding: 40px 20px; color: var(--muted); text-align: center; }
+.transfer-manager-empty > strong { color: var(--text); font-size: var(--font-lg); font-weight: 500; }
+.transfer-manager-empty > p { max-width: 360px; margin: 0; font-size: var(--font-sm); line-height: 1.7; }
+.transfer-manager-footer { justify-content: space-between; gap: 15px; }
+.transfer-manager-footer > span { color: var(--muted); font-size: var(--font-xs); }
+.transfer-manager-batch { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 8px 0 14px; font-size: var(--font-xs); color: var(--muted); }
+.transfer-manager-batch label { display: inline-flex; align-items: center; gap: 6px; }
+.transfer-manager-batch input[type="checkbox"], .transfer-manager-selectable > input[type="checkbox"] { width: 14px; height: 14px; min-height: 0; flex: 0 0 14px; margin: 0; padding: 0; }
+.transfer-manager-batch label { white-space: nowrap; }
+.transfer-manager-batch > span { flex-basis: 100%; }
+.transfer-manager-modal .form-error { white-space: pre-line; overflow-wrap: anywhere; }
+.transfer-manager-modal .modal-header { flex-wrap: wrap; gap: 12px; }
+.transfer-manager-selectable { position: relative; }
+.transfer-manager-selectable > input { position: absolute; top: 14px; left: 10px; z-index: 1; }
+.transfer-manager-selectable:has(> input) > .transfer-card { padding-left: 34px; }
+.transfer-manager-scope { display: grid; grid-template-columns: 100px minmax(100px, 1fr) minmax(120px, 1fr); gap: 10px; margin: 10px 0; }
+.transfer-manager-scope label { display: grid; min-width: 0; gap: 4px; color: var(--muted); font-size: var(--font-xs); }
+.transfer-manager-scope select { width: 100%; min-width: 0; height: 28px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); color: var(--text); font-size: var(--font-xs); }

@@ -40,11 +40,22 @@ export function prepareAiText(text: string, maximum = AI_CONTEXT_BYTES): { text:
   };
 }
 
-export function extractCommandDraft(response: string): string | null {
-  const block = /```(?:sh|bash|shell|zsh|powershell|ps1|cmd)?\s*\n([\s\S]*?)\n```/i.exec(response);
-  const command = block?.[1]?.trim();
+const AI_SHELL_LANGUAGES = new Set(["sh", "bash", "shell", "zsh", "fish", "powershell", "pwsh", "ps1", "cmd", "bat"]);
+
+export function commandDraftFromCode(code: string, language: string): string | null {
+  if (!AI_SHELL_LANGUAGES.has(language.toLowerCase().trim())) return null;
+  const command = code.trim();
   if (!command || byteLength(command) > 8 * 1024 || AI_UNSAFE_CONTROL.test(command)) return null;
   return command;
+}
+
+export function extractCommandDraft(response: string): string | null {
+  const blocks = response.matchAll(/```([^\r\n`]*)\r?\n([\s\S]*?)\r?\n```/g);
+  for (const block of blocks) {
+    const command = commandDraftFromCode(block[2], block[1]);
+    if (command) return command;
+  }
+  return null;
 }
 
 export function normalizeAiTerminalCommand(text: string): string {
