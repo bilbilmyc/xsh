@@ -225,7 +225,7 @@ export const SHELL_INTEGRATION_COMMAND = [
   'if [ -n "\${BASH_VERSION-}" ]; then',
   String.raw`case "$PS1" in *'133;B'*) ;; *) PS1='\[\e]133;A\a\]'"$PS1"'\[\e]133;B\a\]';; esac;`,
   String.raw`if ! declare -F __xsh_prompt_status_v2 >/dev/null; then __xsh_prompt_status_v2() { local xsh_status=$?; printf '\033]133;D;%s\007' "$xsh_status"; return "$xsh_status"; };`,
-  String.raw`case "$(declare -p PROMPT_COMMAND 2>/dev/null)" in 'declare -a'*) PROMPT_COMMAND=(__xsh_prompt_status_v2 "\${PROMPT_COMMAND[@]}");; *) PROMPT_COMMAND="__xsh_prompt_status_v2\${PROMPT_COMMAND:+; $PROMPT_COMMAND}";; esac; fi;`,
+  String.raw`case "$(declare -p PROMPT_COMMAND 2>/dev/null)" in 'declare -a'*) PROMPT_COMMAND[0]="__xsh_prompt_status_v2\${PROMPT_COMMAND[0]:+; \${PROMPT_COMMAND[0]}}";; *) PROMPT_COMMAND="__xsh_prompt_status_v2\${PROMPT_COMMAND:+; $PROMPT_COMMAND}";; esac; fi;`,
   String.raw`__xsh_prompt_status_v2() { local xsh_status=$?; printf '\033]133;D;%s\007' "$xsh_status"; __xsh_report_cwd_v1; return "$xsh_status"; };`,
   String.raw`if [ "\${BASH_VERSINFO[0]}" -gt 4 ] || { [ "\${BASH_VERSINFO[0]}" -eq 4 ] && [ "\${BASH_VERSINFO[1]}" -ge 4 ]; }; then case "\${PS0-}" in *'133;C'*) ;; *) PS0='\e]133;C\a'"\${PS0-}";; esac; fi;`,
   'elif [ -n "\${ZSH_VERSION-}" ]; then',
