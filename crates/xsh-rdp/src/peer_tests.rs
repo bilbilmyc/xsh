@@ -519,6 +519,33 @@ fn u32_at(bytes: &[u8], index: usize) -> u32 {
     u32::from_le_bytes(bytes[index * 4..index * 4 + 4].try_into().unwrap())
 }
 
+fn contains_fixture_pixel(bytes: &[u8]) -> bool {
+    let (x, y, width, height) = (
+        u32_at(bytes, 4),
+        u32_at(bytes, 5),
+        u32_at(bytes, 6),
+        u32_at(bytes, 7),
+    );
+    if x > 32 || y > 32 || x + width <= 32 || y + height <= 32 {
+        return false;
+    }
+    let offset = FRAME_HEADER + (((32 - y) * width + 32 - x) * 4) as usize;
+    bytes[offset..offset + 4] == [0xc0, 0x80, 0x20, 255]
+}
+
+#[test]
+fn nla_requires_server_pixels_instead_of_the_initial_snapshot() {
+    let mut snapshot = vec![0; FRAME_HEADER + 64 * 64 * 4];
+    snapshot[24..28].copy_from_slice(&64_u32.to_le_bytes());
+    snapshot[28..32].copy_from_slice(&64_u32.to_le_bytes());
+    assert!(!contains_fixture_pixel(&snapshot));
+    let offset = FRAME_HEADER + (32 * 64 + 32) * 4;
+    snapshot[offset..offset + 4].copy_from_slice(&[0xc0, 0x80, 0x20, 255]);
+    assert!(contains_fixture_pixel(&snapshot));
+    snapshot[16..20].copy_from_slice(&40_u32.to_le_bytes());
+    assert!(!contains_fixture_pixel(&snapshot));
+}
+
 #[tokio::test]
 async fn nla_authentication_accepts_valid_credentials_and_rejects_bad_passwords() {
     // WinPR caches its SSPI backend once per process. A child test process
@@ -588,7 +615,9 @@ async fn nla_authentication_accepts_valid_credentials_and_rejects_bad_passwords(
                 Output::Frame(bytes) => {
                     assert!(password_ok && certificate_seen);
                     manager.acknowledge_frame(id, u32_at(&bytes, 1));
-                    frame_seen = true;
+                    // The client also emits an initial empty snapshot. Closing
+                    // on that frame races the server's PostConnect callback.
+                    frame_seen |= contains_fixture_pixel(&bytes);
                 }
                 _ => {}
             }
@@ -609,6 +638,7 @@ async fn nla_authentication_accepts_valid_credentials_and_rejects_bad_passwords(
             .unwrap();
         assert_eq!(status, 0, "{trace:?}");
         assert_eq!(trace.post, u32::from(password_ok), "{trace:?}");
+        assert_eq!(trace.frames > 0, password_ok, "{trace:?}");
         assert_eq!(
             trace.auth, 1,
             "NLA must exercise NTLM proof verification: {trace:?}"
