@@ -283,11 +283,6 @@ impl RemoteDesktopProfile {
         {
             return Err("远程桌面目标端口无效".into());
         }
-        if let Some(command) = self.viewer_command.as_deref()
-            && command.trim().is_empty()
-        {
-            return Err("远程桌面查看器命令不能为空白".into());
-        }
         Ok(())
     }
 }

@@ -118,12 +118,47 @@ export function getThemeTokens(theme: AppTheme, accent: ThemeAccent = "cyan"): R
   };
 }
 
-export function resolveTerminalTheme(profileTheme: string, appTheme: AppTheme) {
-  if (profileTheme === "xsh-green") {
-    return terminalPalette("#07130b", "#b7f3c5", "#7ee787", "#1f5d35", ["#07130b", "#ff8278", "#7ee787", "#d7e88b", "#83b8ff", "#d2a8ff", "#72e0c3", "#d9f7df", "#52735b", "#ffa198", "#aff5b4", "#f2cc60", "#a5c8ff", "#e2c5ff", "#a5f3d5", "#ffffff"]);
-  }
-  if (profileTheme === "xsh-blue") {
-    return terminalPalette("#07111f", "#dbeafe", "#7dd3fc", "#1d4e73", ["#07111f", "#ff8b80", "#8be9a3", "#f0d58a", "#7db7ff", "#d0b2ff", "#70e0ee", "#e2efff", "#62758e", "#ffb0a8", "#b6f5c3", "#ffe3a3", "#b0d4ff", "#e4d2ff", "#b4f4ff", "#ffffff"]);
-  }
-  return { ...getTheme(appTheme).terminal };
+export const TERMINAL_THEMES = [
+  { value: "xsh-black", label: "经典黑", palette: terminalPalette("#000000", "#e6edf3", "#e6edf3", "#264f78", LEGACY_DARK_ANSI) },
+  { value: "xsh-midnight", label: "午夜", palette: getTheme("midnight").terminal },
+  { value: "xsh-graphite", label: "石墨", palette: getTheme("graphite").terminal },
+  { value: "xsh-blue", label: "深蓝", palette: terminalPalette("#07111f", "#dbeafe", "#7dd3fc", "#1d4e73", ["#07111f", "#ff8b80", "#8be9a3", "#f0d58a", "#7db7ff", "#d0b2ff", "#70e0ee", "#e2efff", "#62758e", "#ffb0a8", "#b6f5c3", "#ffe3a3", "#b0d4ff", "#e4d2ff", "#b4f4ff", "#ffffff"]) },
+  { value: "xsh-green", label: "绿幕", palette: terminalPalette("#07130b", "#b7f3c5", "#7ee787", "#1f5d35", ["#07130b", "#ff8278", "#7ee787", "#d7e88b", "#83b8ff", "#d2a8ff", "#72e0c3", "#d9f7df", "#52735b", "#ffa198", "#aff5b4", "#f2cc60", "#a5c8ff", "#e2c5ff", "#a5f3d5", "#ffffff"]) },
+  { value: "xsh-amber", label: "琥珀", palette: terminalPalette("#191207", "#f4dfb5", "#ffd580", "#634a24", ["#191207", "#f28b82", "#b4d58b", "#f0c674", "#94bde5", "#d2a8d9", "#8fd2c3", "#e8d8b8", "#9f8b6d", "#ffaaa2", "#cceba3", "#ffdf9b", "#b5d6f5", "#e9c5f0", "#b4e8dc", "#fff4df"]) },
+  { value: "xsh-purple", label: "紫夜", palette: terminalPalette("#171021", "#e8dff5", "#c9a7f5", "#50376e", ["#171021", "#f28b9c", "#a4d69a", "#e9d38c", "#9dbcf5", "#d0a0ed", "#90d9db", "#e8dff5", "#9885ac", "#ffadba", "#c0edb5", "#f6e4a6", "#bfd4ff", "#e5c0ff", "#b4eff0", "#fbf5ff"]) },
+  { value: "xsh-dusk", label: "暮紫", palette: getTheme("dusk").terminal },
+  { value: "xsh-nord", label: "北境", palette: getTheme("nord").terminal },
+  { value: "xsh-forest", label: "松林", palette: getTheme("forest").terminal },
+  { value: "xsh-sand", label: "暖砂", palette: getTheme("sand").terminal },
+  { value: "xsh-ivory", label: "清瓷", palette: getTheme("ivory").terminal },
+] as const;
+
+export type TerminalTheme = "xsh-dark" | typeof TERMINAL_THEMES[number]["value"];
+
+export function isTerminalTheme(value: unknown): value is TerminalTheme {
+  return value === "xsh-dark" || TERMINAL_THEMES.some((theme) => theme.value === value);
+}
+
+export function resolveTerminalTheme(profileTheme: string, appTheme: AppTheme, globalTheme: TerminalTheme = "xsh-dark") {
+  const profile = TERMINAL_THEMES.find((theme) => theme.value === profileTheme);
+  const global = TERMINAL_THEMES.find((theme) => theme.value === globalTheme);
+  // xterm keeps its standard 6×6×6 color cube and grayscale (indices 16–255).
+  // Only the default colors and the first 16 ANSI colors vary with the theme.
+  return { ...(profile?.palette ?? global?.palette ?? getTheme(appTheme).terminal) };
+}
+
+const XTERM_CUBE_LEVELS = [0, 95, 135, 175, 215, 255];
+const XTERM_EXTENDED_COLORS = Array.from({ length: 240 }, (_, offset) => {
+  const channels = offset < 216
+    ? [Math.floor(offset / 36), Math.floor(offset / 6) % 6, offset % 6].map((index) => XTERM_CUBE_LEVELS[index])
+    : Array<number>(3).fill(8 + (offset - 216) * 10);
+  return `#${channels.map((channel) => channel.toString(16).padStart(2, "0")).join("")}`;
+});
+
+export function terminal256ColorPalette(theme: ReturnType<typeof terminalPalette>): string[] {
+  return [
+    theme.black, theme.red, theme.green, theme.yellow, theme.blue, theme.magenta, theme.cyan, theme.white,
+    theme.brightBlack, theme.brightRed, theme.brightGreen, theme.brightYellow, theme.brightBlue, theme.brightMagenta, theme.brightCyan, theme.brightWhite,
+    ...XTERM_EXTENDED_COLORS,
+  ];
 }

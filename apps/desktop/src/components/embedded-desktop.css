@@ -1,0 +1,22 @@
+.embedded-desktop { display: flex; flex: 1; flex-direction: column; min-height: 280px; min-width: 0; overflow: hidden; background: var(--panel-bg, #10141c); }
+.embedded-desktop:fullscreen { width: 100vw; height: 100vh; }
+.embedded-desktop .rd-viewer-toolbar { flex: 0 0 auto; flex-wrap: wrap; gap: 8px; padding: 8px 10px; }
+.embedded-desktop .rd-viewer-status { margin-right: auto; }
+.desktop-resize-option { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.desktop-resolution { max-width: 130px; padding: 4px 6px; border: 1px solid var(--border-color, #293241); border-radius: 5px; background: var(--panel-bg, #10141c); color: inherit; font: inherit; font-size: 11px; }
+.desktop-resolution:disabled { opacity: 0.5; }
+.desktop-viewport { flex: 1; position: relative; min-height: 160px; min-width: 0; overflow: auto; background: #0b0f14; }
+.desktop-viewport.rdp { display: flex; }
+.desktop-viewport.rdp canvas { display: block; margin: auto; flex-shrink: 0; touch-action: none; }
+.desktop-keyboard-input { position: absolute; left: 0; top: 0; width: 1px; height: 1px; padding: 0; border: 0; opacity: 0; resize: none; }
+.desktop-auth, .desktop-certificate { display: grid; gap: 12px; flex: 0 0 auto; max-height: 60%; overflow: auto; padding: 18px; border-bottom: 1px solid var(--border-color, #293241); }
+.desktop-auth { grid-template-columns: repeat(2, minmax(100px, 1fr)); }
+.desktop-auth > strong { grid-column: 1 / -1; }
+.desktop-auth .primary-button { justify-self: start; }
+.desktop-certificate p { margin: 0; color: var(--muted); font-size: 12px; }
+.desktop-certificate dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; margin: 0; font-size: 12px; }
+.desktop-certificate dt { color: var(--muted); }
+.desktop-certificate dd { margin: 0; overflow-wrap: anywhere; user-select: text; }
+.desktop-notice { padding: 6px 12px; color: var(--muted); font-size: 11px; }
+.desktop-footer { display: flex; flex: 0 0 auto; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 6px 10px; color: var(--muted); font-size: 10px; border-top: 1px solid var(--border-color, #293241); }
+.remote-desktop-modal .embedded-desktop { height: min(65vh, 700px); flex: none; border: 1px solid var(--border-color, #293241); border-radius: 8px; }

@@ -4,11 +4,11 @@
 [![Build desktop artifacts](https://github.com/bilbilmyc/xsh/actions/workflows/build-artifacts.yml/badge.svg)](https://github.com/bilbilmyc/xsh/actions/workflows/build-artifacts.yml)
 [![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-blue.svg)](LICENSE)
 
-**一个本地优先、跨平台的 SSH / SFTP 桌面客户端。**
+**一个本地优先、跨平台的 SSH / SFTP / VNC / RDP 桌面客户端。**
 
 XSH 面向需要长期管理多台服务器的开发者和运维人员：用会话树整理连接，用多标签和分屏保持工作上下文，用内置 SFTP 和命令工具完成日常操作。
 
-> 当前项目仍在快速迭代中，适合个人使用和体验。用于生产环境前，请先在测试服务器上验证 SSH、SFTP、端口转发和凭据恢复流程。
+当前正式版：**v0.2（0.2.0）**。SSH、SFTP、VNC 和 RDP 集成在同一个应用中，远程桌面使用内置协议组件。版本内容见 [更新记录](CHANGELOG.md)。
 
 ## 特性
 
@@ -34,6 +34,16 @@ XSH 面向需要长期管理多台服务器的开发者和运维人员：用会�
 - ProxyJump
 - 本地、远程和动态端口转发；支持按会话保存隧道配置、自动启动和 SSH 重连恢复
 - 支持 UTF-8 / CJK、256 色和 True Color
+
+### 内置远程桌面
+
+- VNC、RDP 会话可直接连接目标，也可通过 XSH 管理的 SSH 隧道连接
+- 桌面在应用标签中显示；支持键盘、鼠标、Ctrl+Alt+Delete、适应窗口、100% 显示、全屏和重新连接
+- 文本剪贴板可双向传递；RDP 支持中文输入、发送文本、远端鼠标形状和服务器支持时的自动 / 预设分辨率调整，控件根据通道能力启用
+- RDP 协议、TLS 和 NLA 在 XSH 进程内处理，随安装包携带；用户无需安装外部查看器或部署桌面网关
+- 登录密码沿用 XSH 凭据库；RDP 未验证证书需要确认，仅对本次连接信任
+
+构建方式、验证范围与当前功能边界见 [内置远程桌面](docs/remote-desktop.md)。
 
 ### SFTP
 
@@ -124,6 +134,8 @@ pnpm run dev
 
 ## 构建
 
+内置 RDP 从仓库中固定版本的 FreeRDP 源码和 `Cargo.lock` 固定的 OpenSSL 源码构建。开发机需要 CMake 3.18+、C/C++ 编译器和 Perl；Windows 请使用 Visual Studio C++ 工具与原生 Strawberry Perl，macOS 需要 Xcode Command Line Tools。CMake、Perl 和编译器仅用于构建，安装后的 XSH 不需要这些工具。首次构建会明显长于后续增量构建。
+
 ```bash
 pnpm run build
 
@@ -173,6 +185,7 @@ pnpm run build
 - **Desktop**：Tauri 2
 - **Frontend**：React 19、TypeScript、Vite、xterm.js
 - **Backend**：Rust、Tokio、russh、russh-sftp
+- **Remote desktop**：内置 noVNC、FreeRDP / WinPR、静态 OpenSSL
 - **Storage**：SQLite
 - **Security**：Argon2、AES-256-GCM、`zeroize`
 
@@ -216,7 +229,7 @@ XSH 的 V2 核心能力已经实现，目前重点是：
 - 大文件传输、网络切换和睡眠唤醒场景的压力测试
 - 可访问性、高 DPI、多显示器和发布工程完善
 
-暂不计划支持 SSH1、Telnet、Rlogin、RDP、X11 forwarding、ZMODEM、Kerberos、PKCS#11、云同步和团队共享凭据。
+暂不计划支持 SSH1、Telnet、Rlogin、X11 forwarding、ZMODEM、Kerberos、PKCS#11、云同步和团队共享凭据。
 
 ## 参与贡献
 

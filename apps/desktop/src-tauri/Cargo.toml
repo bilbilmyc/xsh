@@ -1,7 +1,7 @@
 [package]
 name = "desktop"
 version.workspace = true
-description = "XSH cross-platform SSH and SFTP client"
+description = "XSH cross-platform SSH, SFTP, VNC and RDP client"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -32,7 +32,8 @@ xsh-security = { path = "../../../crates/xsh-security" }
 xsh-sftp = { path = "../../../crates/xsh-sftp" }
 xsh-ssh = { path = "../../../crates/xsh-ssh" }
 xsh-storage = { path = "../../../crates/xsh-storage" }
+xsh-rdp = { path = "../../../crates/xsh-rdp" }
 zeroize.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+windows = { version = "0.62", features = ["Win32_Foundation"] }

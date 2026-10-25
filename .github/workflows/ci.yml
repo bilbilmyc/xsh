@@ -46,6 +46,18 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Prepare native RDP tools (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          . ./scripts/check-native-rdp-tools.ps1
+          "C:\Strawberry\perl\bin" >> $env:GITHUB_PATH
+          "C:\Strawberry\c\bin" >> $env:GITHUB_PATH
+
+      - name: Check native RDP tools (macOS)
+        if: runner.os == 'macOS'
+        run: cmake --version && perl --version
+
       - name: Check Rust formatting
         run: cargo fmt --all --check
 
@@ -55,7 +67,7 @@ jobs:
           CARGO_TERM_COLOR: never
         run: |
           echo "::add-matcher::.github/clippy-matcher.json"
-          cargo clippy --workspace --all-targets -- -D warnings 2>&1 | tee clippy.log
+          cargo clippy --workspace --all-targets --features xsh-rdp/test-peer -- -D warnings 2>&1 | tee clippy.log
           exit ${PIPESTATUS[0]}
 
       - name: Summarize lint failures
@@ -69,10 +81,10 @@ jobs:
           exit 0
 
       - name: Test Rust workspace
-        run: cargo test --workspace
+        run: cargo test --workspace --features xsh-rdp/test-peer
 
       - name: Check Tauri backend
-        run: cargo check -p desktop
+        run: cargo check -p desktop --features xsh-rdp/test-peer
 
       - name: Build frontend
         run: pnpm run build

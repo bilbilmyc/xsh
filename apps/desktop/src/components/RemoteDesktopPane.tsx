@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Monitor, Pencil, Play, RefreshCw, Square, X } from "lucide-react";
+import { Monitor, Pencil, RefreshCw, Square } from "lucide-react";
 import { Channel } from "@tauri-apps/api/core";
-import RFB from "@novnc/novnc";
+import { EmbeddedDesktop } from "./EmbeddedDesktop";
 import { api } from "../api";
 import { hostKeyDialog } from "./DialogHost";
 import { isTerminalEvent, remoteDesktopDefaultPort, type ForwardHealth, type ForwardInfo, type SavedSession, type TerminalEvent } from "../types";
@@ -17,12 +17,7 @@ interface RemoteDesktopPaneProps {
   onEditSession: (session: SavedSession) => void;
 }
 
-/**
- * Control panel for a remote-desktop session: it owns the underlying SSH
- * connection lifecycle (host-key, auth, reconnect) and hosts the in-app VNC
- * viewer. The desktop renders either embedded (VNC, via a loopback
- * WebSocket bridge) or through the platform viewer (RDP / custom command).
- */
+/** Owns the optional SSH transport and the application-embedded desktop. */
 export function RemoteDesktopPane({
   session,
   visible,
@@ -34,6 +29,10 @@ export function RemoteDesktopPane({
   onEditSession,
 }: RemoteDesktopPaneProps) {
   const profile = session.remoteDesktop ?? null;
+  const profileIdentity = JSON.stringify([
+    session.id, profile?.kind, profile?.transport, profile?.targetHost,
+    profile?.targetPort, profile?.username, profile?.credentialRef, profile?.forwardProfileId,
+  ]);
   const isDirect = profile?.transport === "direct";
   const [connectionId, setConnectionId] = useState<string | null>(null);
   const [currentState, setCurrentState] = useState<string>("connecting");
@@ -44,26 +43,10 @@ export function RemoteDesktopPane({
   const [forwardHealth, setForwardHealth] = useState<ForwardHealth | null>(null);
   const [viewerBusy, setViewerBusy] = useState(false);
   const [viewerError, setViewerError] = useState<string | null>(null);
-  // In-app (embedded) VNC viewer state; a custom viewer command opts out.
-  const supportsInAppViewer = profile?.kind === "vnc" && !profile.viewerCommand;
-  const [inAppViewer, setInAppViewer] = useState<"idle" | "opening" | "connecting" | "connected">("idle");
-  const [inAppError, setInAppError] = useState<string | null>(null);
-  const rfbRef = useRef<RFB | null>(null);
-  const bridgePortRef = useRef<number | null>(null);
-  const viewerHostRef = useRef<HTMLDivElement | null>(null);
-
-  const detachInAppViewer = useCallback(() => {
-    rfbRef.current?.disconnect();
-    rfbRef.current = null;
-    const bridgePort = bridgePortRef.current;
-    bridgePortRef.current = null;
-    if (bridgePort !== null) {
-      void api.closeRemoteDesktopWsBridge(bridgePort).catch(() => undefined);
-    }
-    setInAppViewer("idle");
-  }, []);
-
-  useEffect(() => () => detachInAppViewer(), [detachInAppViewer, session.id]);
+  const [desktopEndpoint, setDesktopEndpoint] = useState<{ host: string; port: number } | null>(null);
+  const [desktopState, setDesktopState] = useState("connecting");
+  const desktopGeneration = useRef(0);
+  const automaticDesktop = useRef<string | null>(null);
 
   const disposedRef = useRef(false);
   const generationRef = useRef(0);
@@ -81,11 +64,17 @@ export function RemoteDesktopPane({
     stateRef.current(state);
   }, []);
 
-  // Direct sessions have no connection lifecycle at all: the pane is ready
-  // as soon as it opens and the viewer talks straight to the target.
+  // The embedded protocol reports direct-session readiness after handshake.
+  useEffect(() => {
+    desktopGeneration.current++;
+    setDesktopEndpoint(null);
+    setViewerBusy(false);
+    automaticDesktop.current = null;
+  }, [profileIdentity]);
+
   useEffect(() => {
     if (!isDirect) return;
-    reportState("connected");
+    reportState("connecting");
     connectionChangeRef.current(null);
     return () => {
       if (!disposedRef.current) reportState("disconnected");
@@ -270,86 +259,66 @@ export function RemoteDesktopPane({
     return () => window.clearInterval(interval);
   }, [connectionId, refreshForward]);
 
-  const openViewer = async () => {
+  const openInAppViewer = async () => {
     if (!profile) return;
+    const generation = ++desktopGeneration.current;
     setViewerBusy(true);
     setViewerError(null);
     try {
-      if (isDirect || !connectionId) {
-        await api.openRemoteDesktopViewer(profile);
-        return;
+      let host = profile.targetHost;
+      let port = profile.targetPort ?? remoteDesktopDefaultPort(profile.kind);
+      if (!isDirect) {
+        const id = connectionIdRef.current;
+        if (!id) throw new Error("SSH 加密通道尚未就绪。");
+        const launch = await api.startRemoteDesktop(id, profile);
+        if (disposedRef.current || generation !== desktopGeneration.current) return;
+        setForward(launch.forward);
+        host = launch.forward.bindHost;
+        port = launch.forward.bindPort;
+        void refreshForward();
       }
-      const launch = await api.startRemoteDesktop(connectionId, profile, true);
-      setForward(launch.forward);
-      void refreshForward();
+      if (disposedRef.current || generation !== desktopGeneration.current) return;
+      setDesktopState("connecting");
+      setDesktopEndpoint({ host, port });
     } catch (caught) {
-      setViewerError(String(caught));
+      if (!disposedRef.current && generation === desktopGeneration.current) {
+        setViewerError(String(caught));
+        if (isDirect) reportState("failed");
+      }
     } finally {
-      setViewerBusy(false);
+      if (!disposedRef.current && generation === desktopGeneration.current) setViewerBusy(false);
     }
   };
 
-  // The embedded flow mounts the canvas host first (state "opening"), then
-  // this effect attaches RFB to it once the node exists.
-  useEffect(() => {
-    if (inAppViewer !== "opening" || !viewerHostRef.current || !profile) return;
-    let cancelled = false;
-    const attach = async () => {
-      setInAppError(null);
-      try {
-        let host = profile.targetHost;
-        let port = profile.targetPort ?? remoteDesktopDefaultPort(profile.kind);
-        if (!isDirect) {
-          if (!connectionId) throw new Error("SSH 加密通道尚未就绪，请等待连接完成后再打开桌面。");
-          const launch = await api.startRemoteDesktop(connectionId, profile, false);
-          if (cancelled) return;
-          setForward(launch.forward);
-          host = launch.forward.bindHost;
-          port = launch.forward.bindPort;
-        }
-        const bridge = await api.openRemoteDesktopWsBridge(host, port);
-        if (cancelled) {
-          void api.closeRemoteDesktopWsBridge(bridge.port).catch(() => undefined);
-          return;
-        }
-        bridgePortRef.current = bridge.port;
-        const password = profile.credentialRef
-          ? await api.getRemoteDesktopPassword(profile.credentialRef)
-          : undefined;
-        if (cancelled) return;
-        const rfb = new RFB(viewerHostRef.current!, `ws://127.0.0.1:${bridge.port}`, {
-          credentials: password !== undefined ? { password } : undefined,
-        });
-        rfb.scaleViewport = true;
-        rfb.background = "#0b0f14";
-        rfb.addEventListener("connect", () => setInAppViewer("connected"));
-        rfb.addEventListener("disconnect", () => setInAppViewer("idle"));
-        rfb.addEventListener("securityfailure", (event) => {
-          const detail = (event as CustomEvent).detail as { reason?: string } | undefined;
-          setInAppError(`VNC 认证失败：${detail?.reason ?? "密码被拒绝"}。请在编辑里保存正确的登录密码。`);
-        });
-        rfbRef.current = rfb;
-        setInAppViewer("connecting");
-      } catch (caught) {
-        if (cancelled) return;
-        detachInAppViewer();
-        setInAppError(String(caught));
-      }
-    };
-    void attach();
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [inAppViewer, connectionId]);
-
-  const openInAppViewer = () => {
-    setInAppError(null);
-    setInAppViewer("opening");
+  const detachInAppViewer = () => {
+    desktopGeneration.current++;
+    setDesktopEndpoint(null);
+    setViewerBusy(false);
+    setDesktopState("disconnected");
+    if (isDirect) reportState("disconnected");
   };
+
+  useEffect(() => {
+    if (!isDirect && currentState !== "connected") {
+      desktopGeneration.current++;
+      setDesktopEndpoint(null);
+      setViewerBusy(false);
+    }
+  }, [isDirect, currentState]);
+
+  useEffect(() => {
+    const identity = isDirect ? profileIdentity : `${connectionId ?? ""}:${profileIdentity}`;
+    if (!isDirect && !connectionId) return;
+    if (!connectionEnabled || !identity || (!isDirect && currentState !== "connected") || automaticDesktop.current === identity) return;
+    automaticDesktop.current = identity;
+    void openInAppViewer();
+    // The desktop connects once per transport connection. Manual close stays closed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isDirect, profileIdentity, connectionId, currentState, connectionEnabled]);
 
   const stopTunnel = async () => {
     if (!connectionId || !forward) return;
+    detachInAppViewer();
     setViewerBusy(true);
     setViewerError(null);
     try {
@@ -376,7 +345,8 @@ export function RemoteDesktopPane({
     }
   };
 
-  const stateLabel = stateLabels[currentState] ?? currentState;
+  const displayedState = desktopEndpoint ? desktopState : currentState;
+  const stateLabel = stateLabels[displayedState] ?? displayedState;
   const defaultPort = profile ? remoteDesktopDefaultPort(profile.kind) : 5900;
   const targetLine = profile
     ? `${profile.kind === "vnc" ? "VNC" : "RDP"} → ${profile.targetHost}:${profile.targetPort ?? defaultPort}`
@@ -384,12 +354,12 @@ export function RemoteDesktopPane({
 
   return (
     <section
-      className={`rd-pane ${visible ? "" : "pane-hidden"} ${focused ? "focused" : ""} ${inAppViewer !== "idle" ? "viewer-active" : ""}`}
+      className={`rd-pane ${visible ? "" : "pane-hidden"} ${focused ? "focused" : ""} ${desktopEndpoint ? "viewer-active" : ""}`}
       onMouseDown={onFocus}
       aria-label={`远程桌面 ${session.name}`}
     >
       <header className="rd-pane-header">
-        <span className={`connection-dot ${currentState}`} />
+        <span className={`connection-dot ${displayedState}`} />
         <Monitor size={16} />
         <div className="rd-pane-title">
           <strong>{session.name}</strong>
@@ -431,61 +401,31 @@ export function RemoteDesktopPane({
           {connectionError && <div className="form-error" role="alert">{connectionError}</div>}
           {!authChallenge && !connectionError && (
             <p className="rd-hint">{isDirect
-              ? "直连模式已就绪，点击下方“打开查看器”连接目标桌面。"
+              ? "点击下方按钮连接内置远程桌面。"
               : stateHints[currentState] ?? ""}</p>
           )}
         </section>
 
-        {profile && inAppViewer === "idle" && (
+        {profile && !desktopEndpoint && (
           <section className="rd-card">
-            <div className="rd-card-heading"><strong>{isDirect ? "查看器" : "隧道与查看器"}</strong><span>{profile.viewerCommand
-              ? `外部查看器命令：${profile.viewerCommand}`
-              : supportsInAppViewer
-                ? "VNC 桌面在应用内打开，鼠标键盘直接操作。"
-                : profile.kind === "rdp"
-                  ? "RDP 使用系统自带远程桌面引擎打开；已保存的登录信息会自动填入。"
-                  : "本机未配置 VNC 查看器，可在编辑里填写查看器命令模板。"}</span></div>
-            {!isDirect && (
-            <div className="rd-tunnel-status">
-              {forward
-                ? <>
-                  <span className="rd-tunnel-address">{forward.bindHost}:{forward.bindPort} → {forward.targetHost ?? profile.targetHost}:{forward.targetPort ?? defaultPort}</span>
-                  <small className={`forward-health ${forwardHealth?.status ?? "unknown"}`} title={forwardHealth?.detail}>
-                    {forwardHealth?.status === "running" ? "隧道监听中" : forwardHealth?.status === "stopped" ? "隧道已停止" : "状态未知"}
-                  </small>
-                </>
-                : <span className="rd-tunnel-idle">隧道未运行</span>}
-            </div>
-            )}
+            <div className="rd-card-heading"><strong>内置远程桌面</strong><span>VNC 和 RDP 均在 XSH 内连接和操作。</span></div>
+            {!isDirect && <div className="rd-tunnel-status">{forward
+              ? <><span className="rd-tunnel-address">{forward.bindHost}:{forward.bindPort} → {forward.targetHost ?? profile.targetHost}:{forward.targetPort ?? defaultPort}</span><small className="forward-health" title={forwardHealth?.detail}>{forwardHealth?.status === "running" ? "隧道监听中" : "状态未知"}</small></>
+              : <span className="rd-tunnel-idle">隧道未运行</span>}
+            </div>}
             {viewerError && <div className="form-error" role="alert">{viewerError}</div>}
-            {inAppError && inAppViewer === "idle" && <div className="form-error" role="alert">{inAppError}</div>}
             <div className="rd-viewer-actions">
-              {supportsInAppViewer ? (
-                <button className="primary-button" disabled={viewerBusy} onClick={openInAppViewer}>
-                  <Monitor size={14} />在应用内打开桌面
-                </button>
-              ) : (
-                <button className="primary-button" disabled={(!isDirect && !connectionId) || viewerBusy} onClick={() => void openViewer()}>
-                  <Play size={14} />{isDirect ? "打开查看器" : forward ? "重新打开查看器" : "启动隧道并打开查看器"}
-                </button>
-              )}
+              <button className="primary-button" disabled={viewerBusy || (!isDirect && !connectionId)} onClick={() => void openInAppViewer()}><Monitor size={14} />连接桌面</button>
               {!isDirect && forward && <button className="secondary-button" disabled={viewerBusy} onClick={() => void stopTunnel()}>停止隧道</button>}
             </div>
           </section>
         )}
+        {profile && desktopEndpoint && <section className="rd-viewer-card">
+          <EmbeddedDesktop profile={profile} host={desktopEndpoint.host} port={desktopEndpoint.port} connectionId={connectionId} visible={visible} autoReconnect={session.autoReconnect}
+            onStateChange={(state) => { setDesktopState(state); if (isDirect) reportState(state); else stateRef.current(state); }}
+            onClose={detachInAppViewer} />
+        </section>}
 
-        {profile && inAppViewer !== "idle" && (
-          <section className="rd-viewer-card">
-            <div className="rd-viewer-toolbar">
-              <span className="rd-viewer-status">
-                {inAppViewer === "connected" ? `${profile.kind === "vnc" ? "VNC" : "RDP"} 桌面已连接${isDirect ? "" : " · 经 SSH 加密隧道"}` : "正在连接桌面…"}
-              </span>
-              <button className="icon-button" onClick={detachInAppViewer} title="关闭内嵌桌面"><X size={14} /></button>
-            </div>
-            {inAppError && <div className="form-error" role="alert">{inAppError}</div>}
-            <div className="rd-viewer-host" ref={viewerHostRef} onMouseDown={() => rfbRef.current?.focus({ preventScroll: true })} />
-          </section>
-        )}
       </div>
     </section>
   );
@@ -506,7 +446,7 @@ const stateHints: Record<string, string> = {
   connecting: "正在连接 SSH 服务器并建立 VNC/RDP 加密隧道…",
   authenticating: "请在上方输入认证信息。",
   connected: "加密通道已就绪。",
-  reconnecting: "5 秒后自动重连；重连成功后隧道与查看器会自动恢复。",
+  reconnecting: "5 秒后自动重连，恢复加密通道和内置桌面。",
   disconnected: "连接已断开。",
   failed: "连接失败，可点击右上角重新连接。",
   queued: "等待可用连接名额…",

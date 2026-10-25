@@ -1,0 +1,7 @@
+{
+  "bundle": {
+    "resources": {
+      "native-runtime/xsh-rdp-native.dll": "xsh-rdp-native.dll"
+    }
+  }
+}

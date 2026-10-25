@@ -625,6 +625,20 @@ function App() {
     () => tabs.find((tab) => tab.id === activeTabId) ?? null,
     [activeTabId, tabs],
   );
+  const autoDesktopConnections = useRef(new Set<string>());
+  useEffect(() => {
+    const live = new Set(Object.values(connectionIds).filter(Boolean));
+    for (const id of autoDesktopConnections.current) {
+      if (!live.has(id)) autoDesktopConnections.current.delete(id);
+    }
+    const id = activeTab ? connectionIds[activeTab.id] : null;
+    const profile = activeTab?.session.remoteDesktop;
+    if (id && activeTab?.state === "connected" && activeTab.session.kind !== "remoteDesktop" &&
+        profile?.autoStart && profile.launchViewer && !autoDesktopConnections.current.has(id)) {
+      autoDesktopConnections.current.add(id);
+      setRemoteDesktopVisible(true);
+    }
+  }, [activeTab, connectionIds]);
 
   useEffect(() => {
     if (sideTool === "files" && (!activeTab || activeTab.session.kind === "remoteDesktop")) setSideTool(null);
@@ -797,18 +811,21 @@ function App() {
   };
 
   const connectedTabs = tabs.filter((tab) => tab.state === "connected");
-  const batchCommandTargets: BatchCommandTarget[] = tabs.map((tab) => ({
+  const connectedTerminalTabs = connectedTabs.filter((tab) => tab.session.kind !== "remoteDesktop");
+  const batchCommandTargets: BatchCommandTarget[] = tabs.filter((tab) => tab.session.kind !== "remoteDesktop").map((tab) => ({
     tabId: tab.id,
     name: getTabLabel(tab),
     address: `${tab.session.username}@${tab.session.host}:${tab.session.port}`,
     connected: tab.state === "connected",
   }));
-  const canExecuteCommand = broadcastEnabled ? connectedTabs.length > 0 : activeTab?.state === "connected";
+  const canExecuteCommand = broadcastEnabled ? connectedTerminalTabs.length > 0 : activeTab?.state === "connected" && activeTab.session.kind !== "remoteDesktop";
   const commandExecutionUnavailableReason = !activeTab
     ? "请先打开一个 SSH 会话。"
     : broadcastEnabled
-      ? connectedTabs.length > 0 ? "" : "没有已连接、可广播的会话。"
-      : activeTab.state === "connected"
+      ? connectedTerminalTabs.length > 0 ? "" : "没有已连接、可广播的 SSH 会话。"
+      : activeTab.session.kind === "remoteDesktop"
+        ? "请切换到 SSH 会话后发送终端命令。"
+        : activeTab.state === "connected"
         ? ""
         : `“${activeTab.session.name}”尚未连接完成。`;
 
@@ -828,8 +845,8 @@ function App() {
     source: "命令中心" | "快捷命令" | "命令历史",
   ) => {
     const targets = broadcastEnabled
-      ? tabs.filter((tab) => tab.state === "connected")
-      : activeTab && activeTab.state === "connected" ? [activeTab] : [];
+      ? connectedTerminalTabs
+      : activeTab && activeTab.state === "connected" && activeTab.session.kind !== "remoteDesktop" ? [activeTab] : [];
     if (targets.length === 0) {
       setToast(commandExecutionUnavailableReason);
       return;
@@ -839,11 +856,12 @@ function App() {
       ...Object.entries(current),
       ...requests,
     ]));
-    if (source !== "命令历史" && activeTab) {
+    if (source !== "命令历史") {
+      const historyTab = targets.find((tab) => tab.id === activeTab?.id) ?? targets[0];
       const historySource = source === "命令中心" ? "command-center" : "quick-command";
       const nextHistory = recordCommandHistory(loadCommandHistory(), {
-        sessionId: activeTab.session.id,
-        sessionName: activeTab.session.name,
+        sessionId: historyTab.session.id,
+        sessionName: historyTab.session.name,
         command: text,
         source: historySource,
       });
@@ -943,7 +961,7 @@ function App() {
   }, []);
 
   const queueCommandForActiveTerminal = (command: CommandSnippet) => {
-    if ((!activeTab || activeTab.state !== "connected") && !(broadcastEnabled && connectedTabs.length > 0)) {
+    if (!canExecuteCommand) {
       setToast(commandExecutionUnavailableReason);
       return;
     }
@@ -957,7 +975,7 @@ function App() {
 
   const runBatchCommand = useCallback((command: string, targetTabIds: string[]) => {
     const targetSet = new Set(targetTabIds);
-    const targets = tabsRef.current.filter((tab) => targetSet.has(tab.id) && tab.state === "connected");
+    const targets = tabsRef.current.filter((tab) => targetSet.has(tab.id) && tab.state === "connected" && tab.session.kind !== "remoteDesktop");
     if (targets.length === 0) {
       setToast("所选会话已全部断开，请重新选择。");
       return;
@@ -2252,7 +2270,7 @@ function App() {
             targetName={activeTab?.session.name ?? null}
             terminalShortcutMode={preferences.terminalShortcutMode}
             broadcastEnabled={broadcastEnabled}
-            broadcastTargetCount={connectedTabs.length}
+            broadcastTargetCount={connectedTerminalTabs.length}
             onChange={saveQuickCommands}
             onSend={sendQuickCommand}
             onToast={setToast}
@@ -2364,7 +2382,7 @@ function App() {
         } : null}
         openCount={tabs.length}
         connectedCount={connectedTabs.length}
-        broadcastCount={broadcastEnabled ? connectedTabs.length : null}
+        broadcastCount={broadcastEnabled ? connectedTerminalTabs.length : null}
         workspace={workspaceOpening ? {
           name: workspaceOpening.name,
           finished: tabs.filter((tab) => workspaceOpening.sessionIds.includes(tab.session.id) && !["queued", "connecting", "reconnecting", "waiting-network", "authenticating", "awaitingHostKey"].includes(tab.state)).length,
@@ -2404,6 +2422,7 @@ function App() {
 
       {remoteDesktopVisible && activeTab && connectionIds[activeTab.id] && (
         <RemoteDesktopModal
+          key={connectionIds[activeTab.id]}
           connectionId={connectionIds[activeTab.id]!}
           session={activeTab.session}
           onClose={() => setRemoteDesktopVisible(false)}
@@ -2418,7 +2437,7 @@ function App() {
           activeSessionName={activeTab?.session.name ?? null}
           activeSessionAddress={activeTab ? `${activeTab.session.username}@${activeTab.session.host}:${activeTab.session.port}` : null}
           broadcastEnabled={broadcastEnabled}
-          broadcastTargetCount={connectedTabs.length}
+          broadcastTargetCount={connectedTerminalTabs.length}
           canExecute={canExecuteCommand}
           executionUnavailableReason={commandExecutionUnavailableReason}
           onChange={saveCommands}

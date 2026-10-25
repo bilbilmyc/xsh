@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { getTheme, getThemeTokens, resolveTerminalTheme, THEME_IDS, THEMES, type ThemeAccent } from "../apps/desktop/src/themes.ts";
+import { getTheme, getThemeTokens, resolveTerminalTheme, terminal256ColorPalette, TERMINAL_THEMES, THEME_IDS, THEMES, type ThemeAccent } from "../apps/desktop/src/themes.ts";
 
 function luminance(color: string): number {
   const channels = [1, 3, 5].map((offset) => Number.parseInt(color.slice(offset, offset + 2), 16) / 255)
@@ -66,4 +66,51 @@ test("global terminal themes follow the app while explicit session themes keep p
     assert.deepEqual(resolveTerminalTheme("xsh-green", theme.value), green);
   }
   assert.deepEqual(resolveTerminalTheme("unknown", "nord"), getTheme("nord").terminal);
+});
+
+test("terminal colors follow session, global terminal, then app preferences", () => {
+  for (const appTheme of THEME_IDS) {
+    for (const globalTheme of TERMINAL_THEMES) {
+      for (const inherited of ["xsh-dark", "", "unknown", "midnight"]) {
+        assert.deepEqual(resolveTerminalTheme(inherited, appTheme, globalTheme.value), globalTheme.palette);
+      }
+      for (const sessionTheme of TERMINAL_THEMES) {
+        assert.deepEqual(resolveTerminalTheme(sessionTheme.value, appTheme, globalTheme.value), sessionTheme.palette);
+      }
+    }
+    assert.deepEqual(resolveTerminalTheme("xsh-dark", appTheme, "xsh-dark"), getTheme(appTheme).terminal);
+  }
+});
+
+test("each terminal background has readable text and a full ANSI palette", () => {
+  assert.equal(TERMINAL_THEMES.length, 12);
+  assert.equal(new Set(TERMINAL_THEMES.map((theme) => theme.palette.background)).size, 12);
+  const keys = Object.keys(getTheme("midnight").terminal).sort();
+  for (const theme of TERMINAL_THEMES) {
+    assert.deepEqual(Object.keys(theme.palette).sort(), keys, theme.value);
+    assert.ok(contrast(theme.palette.foreground, theme.palette.background) >= 7, `${theme.value} terminal text`);
+  }
+});
+
+test("all terminal palettes retain the standard xterm 256-color cube and grayscale", () => {
+  let extended: string[] | undefined;
+  for (const theme of TERMINAL_THEMES) {
+    const colors = terminal256ColorPalette(theme.palette);
+    assert.equal(colors.length, 256, theme.value);
+    assert.deepEqual(colors.slice(0, 8), [
+      theme.palette.black, theme.palette.red, theme.palette.green, theme.palette.yellow,
+      theme.palette.blue, theme.palette.magenta, theme.palette.cyan, theme.palette.white,
+    ]);
+    assert.equal(colors[16], "#000000");
+    assert.equal(colors[21], "#0000ff");
+    assert.equal(colors[46], "#00ff00");
+    assert.equal(colors[196], "#ff0000");
+    assert.equal(colors[231], "#ffffff");
+    assert.equal(colors[232], "#080808");
+    assert.equal(colors[255], "#eeeeee");
+    if (extended) assert.deepEqual(colors.slice(16), extended);
+    extended = colors.slice(16);
+    // Leaving extendedAnsi unset lets xterm handle indexed color sequences.
+    assert.equal("extendedAnsi" in theme.palette, false);
+  }
 });

@@ -21,6 +21,12 @@ if ! command -v pnpm >/dev/null 2>&1; then
   echo "未找到 pnpm。请先执行：corepack enable && corepack prepare pnpm@11.10.0 --activate" >&2
   exit 1
 fi
+for native_tool in cmake perl; do
+  if ! command -v "$native_tool" >/dev/null 2>&1; then
+    echo "构建内置 RDP 需要 $native_tool。请先安装 CMake / Perl（例如 brew install cmake perl）。" >&2
+    exit 1
+  fi
+done
 pnpm --filter desktop exec tauri build --bundles dmg,app
 
 APP_PATH="$ROOT_DIR/target/release/bundle/macos/XSH.app"

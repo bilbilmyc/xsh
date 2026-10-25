@@ -237,7 +237,7 @@ export function TerminalPane({
         ? session.terminal.scrollbackLines
         : preferencesRef.current.terminalScrollbackLines,
       allowProposedApi: false,
-      theme: terminalTheme(session.terminal.theme, preferences.theme),
+      theme: resolveTerminalTheme(session.terminal.theme, preferences.theme, preferences.terminalTheme),
     });
     const fitAddon = new FitAddon();
     const searchAddon = new SearchAddon();
@@ -1237,9 +1237,9 @@ export function TerminalPane({
     terminal.options.scrollback = preferences.useSessionTerminalScrollback
       ? session.terminal.scrollbackLines
       : preferences.terminalScrollbackLines;
-    terminal.options.theme = terminalTheme(session.terminal.theme, preferences.theme);
+    terminal.options.theme = resolveTerminalTheme(session.terminal.theme, preferences.theme, preferences.terminalTheme);
     window.requestAnimationFrame(() => fitAddonRef.current?.fit());
-  }, [preferences.terminalFontFamily, preferences.terminalFontSize, preferences.terminalLineHeight, preferences.terminalFontWeight, preferences.terminalFontWeightBold, preferences.terminalScrollbackLines, preferences.theme, preferences.useSessionTerminalFont, preferences.useSessionTerminalScrollback, session.terminal.fontFamily, session.terminal.fontSize, session.terminal.scrollbackLines, session.terminal.theme]);
+  }, [preferences.terminalFontFamily, preferences.terminalFontSize, preferences.terminalLineHeight, preferences.terminalFontWeight, preferences.terminalFontWeightBold, preferences.terminalScrollbackLines, preferences.theme, preferences.terminalTheme, preferences.useSessionTerminalFont, preferences.useSessionTerminalScrollback, session.terminal.fontFamily, session.terminal.fontSize, session.terminal.scrollbackLines, session.terminal.theme]);
 
   useEffect(() => {
     if (!visible) {
@@ -1380,11 +1380,11 @@ export function TerminalPane({
   return (
     <div
       className={`terminal-pane ${visible ? "visible" : "hidden"} ${focused ? "focused" : ""}`}
-      style={{ "--xsh-terminal-background": terminalTheme(session.terminal.theme, preferences.theme).background } as CSSProperties}
+      style={{ "--xsh-terminal-background": resolveTerminalTheme(session.terminal.theme, preferences.theme, preferences.terminalTheme).background } as CSSProperties}
       onPointerDownCapture={() => onFocus?.()}
     >
       <div className="terminal-toolbar" role="toolbar" aria-label="终端工具栏">
-        <span className="terminal-toolbar-session" title={session.name}>{selectedCharacters > 0 ? `已选 ${selectedCharacters.toLocaleString()} 字符` : session.name}</span>
+        <span className="terminal-toolbar-status">{selectedCharacters > 0 ? `已选 ${selectedCharacters.toLocaleString()} 字符` : ""}</span>
         {selectedCharacters > 0 ? <>
           <button type="button" className="terminal-selection-action" onMouseDown={(event) => event.preventDefault()} onClick={() => requestAiContext("explain")} title="仅把当前选区送到 AI 预览，不会自动联网" aria-label="AI 解释选区"><Bot size={13} /><span>解释</span></button>
           <button type="button" className="terminal-selection-action" onMouseDown={(event) => event.preventDefault()} onClick={() => requestAiContext("diagnose")} title="用 AI 分析选中的报错，先预览再发送" aria-label="AI 分析选中的报错"><Activity size={13} /><span>分析报错</span></button>
@@ -1611,8 +1611,4 @@ function createTextDecoder(encoding: string) {
   } catch {
     return new TextDecoder("utf-8");
   }
-}
-
-function terminalTheme(profileTheme: string, appTheme: AppPreferences["theme"]) {
-  return resolveTerminalTheme(profileTheme, appTheme);
 }

@@ -1,0 +1,36 @@
+XSH embedded remote desktop components
+
+FreeRDP / WinPR 3.32.2 — Apache License 2.0.
+Copyright the FreeRDP and WinPR contributors; individual notices are retained
+in the corresponding source files. The unmodified upstream source archive
+used by this build is included at crates/xsh-rdp/vendor/freerdp-3.32.2.tar.gz.
+Commit: 97eff6ddfbbfaa8e42a126d362686bd001ff8bdc
+Source: https://github.com/FreeRDP/FreeRDP/tree/97eff6ddfbbfaa8e42a126d362686bd001ff8bdc
+License: FreeRDP-Apache-2.0.txt
+XSH's adapter, build configuration and optional test peer are separate files.
+
+OpenSSL 3.6.3 — Apache License 2.0.
+Copyright the OpenSSL Project Authors.
+Source: https://github.com/openssl/openssl/tree/openssl-3.6.3
+License: OpenSSL-Apache-2.0.txt
+The exact source package is pinned by Cargo.lock (openssl-src).
+OpenSSL and its providers are linked statically into XSH's native RDP library.
+
+uriparser 1.0.2 — BSD 3-Clause.
+Copyright Weijia Song, Sebastian Pipping and the uriparser authors.
+Source: https://github.com/uriparser/uriparser/tree/9b2bed92f5deecf740819f9bf27724bee2fe9c12
+The source archive is included at crates/xsh-rdp/vendor/uriparser-1.0.2.tar.gz.
+License: uriparser-BSD-3-Clause.txt; authors: uriparser-AUTHORS.txt.
+The parser is linked statically and is used by WinPR's certificate name checks.
+
+noVNC 1.7.0 — Mozilla Public License 2.0.
+Copyright the noVNC authors (noVNC-AUTHORS.txt).
+XSH uses the unmodified noVNC library.
+Corresponding source: https://github.com/novnc/noVNC/tree/v1.7.0
+License and incorporated-code notices: noVNC-NOTICE.txt,
+noVNC-MPL-2.0.txt, noVNC-BSD-2-Clause.txt, noVNC-BSD-3-Clause.txt.
+noVNC's incorporated pako code is under the MIT license (pako-MIT.txt).
+
+These libraries execute within XSH. No external RDP/VNC viewer, gateway
+service, codec plugin, OpenSSL executable or protocol executable is bundled
+or launched by the remote desktop implementation.

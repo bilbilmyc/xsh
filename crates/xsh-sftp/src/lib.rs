@@ -19,7 +19,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
-use tokio::sync::{Mutex, Notify, mpsc, watch};
+use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore, mpsc, watch};
+use tokio::task::JoinSet;
 use uuid::Uuid;
 use xsh_domain::{
     ConnectionId, HostKeyApproval, HostKeyRole, KnownHost, RemoteEntry, RemoteFileType,
@@ -3304,12 +3305,20 @@ async fn read_remote_resume_metadata(session: &SftpSession, path: &str) -> anyho
 
 // Concurrent READ pipelining for downloads. `fs::File` keeps at most one
 // SSH_FXP_READ in flight, which caps serial throughput at chunk/RTT, so
-// downloads open several handles and read interleaved chunk ranges instead.
+// downloads open several handles and claim disjoint ranges from one queue.
 const DOWNLOAD_PIPELINE_HANDLES: usize = 6;
 const DOWNLOAD_CHUNK_BYTES: usize = 256 * 1024;
+// Covers readers, the channel AND the writer's out-of-order map. A chunk
+// releases its slot only after it has been written or discarded.
+const DOWNLOAD_BUFFERED_CHUNKS: usize = DOWNLOAD_PIPELINE_HANDLES * 2;
+
+struct DownloadChunk {
+    data: Vec<u8>,
+    _buffer_permit: OwnedSemaphorePermit,
+}
 
 enum DownloadReadMessage {
-    Chunk { offset: u64, data: Vec<u8> },
+    Chunk { offset: u64, chunk: DownloadChunk },
     EndOfStream,
     Failed { error: anyhow::Error },
 }
@@ -3347,6 +3356,33 @@ struct DownloadPipeline {
     receiver: mpsc::Receiver<DownloadReadMessage>,
     readers: usize,
     recycle: DownloadBufferPool,
+    // Dropping the writer cancels all readers, including those blocked on
+    // network reads, pause notifications, bandwidth or buffer credit.
+    _tasks: JoinSet<()>,
+}
+
+struct DownloadReadWork {
+    next_offset: AtomicU64,
+    total_bytes: u64,
+    buffers: Arc<Semaphore>,
+}
+
+impl DownloadReadWork {
+    fn claim_range(&self) -> Option<(u64, usize)> {
+        self.next_offset
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |offset| {
+                (offset < self.total_bytes).then(|| {
+                    offset
+                        .saturating_add(DOWNLOAD_CHUNK_BYTES as u64)
+                        .min(self.total_bytes)
+                })
+            })
+            .ok()
+            .map(|offset| {
+                let bytes = (self.total_bytes - offset).min(DOWNLOAD_CHUNK_BYTES as u64);
+                (offset, bytes as usize)
+            })
+    }
 }
 
 async fn spawn_download_pipeline(
@@ -3362,29 +3398,18 @@ async fn spawn_download_pipeline(
     let handle_count = DOWNLOAD_PIPELINE_HANDLES
         .min(usize::try_from(remaining.div_ceil(chunk_cap)).unwrap_or(DOWNLOAD_PIPELINE_HANDLES))
         .max(1);
-    let opens = (0..handle_count).map(|index| {
-        let offset = start_offset + (index as u64) * chunk_cap;
+    let opens = (0..handle_count).map(|_| {
         let path = remote_path.to_owned();
-        async move {
-            if offset >= total_bytes {
-                return Ok::<Option<(u64, RemoteFile)>, anyhow::Error>(None);
-            }
-            let mut handle = session.open(path).await?;
-            if offset > 0 {
-                handle.seek(SeekFrom::Start(offset)).await?;
-            }
-            Ok(Some((offset, handle)))
-        }
+        async move { session.open(path).await }
     });
     let mut opened = Vec::with_capacity(handle_count);
     let mut first_error: Option<anyhow::Error> = None;
     for result in join_all(opens).await {
         match result {
-            Ok(Some(entry)) => opened.push(entry),
-            Ok(None) => {}
+            Ok(handle) => opened.push(handle),
             Err(error) => {
                 if first_error.is_none() {
-                    first_error = Some(error);
+                    first_error = Some(error.into());
                 }
             }
         }
@@ -3393,24 +3418,36 @@ async fn spawn_download_pipeline(
         bail!("failed to open the remote file for download: {first_error:?}");
     }
     let readers = opened.len();
-    let (chunk_tx, receiver) = mpsc::channel::<DownloadReadMessage>(handle_count * 2);
+    let (chunk_tx, receiver) = mpsc::channel::<DownloadReadMessage>(DOWNLOAD_BUFFERED_CHUNKS);
     let recycle: DownloadBufferPool = Arc::new(StdMutex::new(Vec::new()));
-    for (offset, handle) in opened {
+    let work = Arc::new(DownloadReadWork {
+        next_offset: AtomicU64::new(start_offset),
+        total_bytes,
+        buffers: Arc::new(Semaphore::new(DOWNLOAD_BUFFERED_CHUNKS)),
+    });
+    let mut tasks = JoinSet::new();
+    for handle in opened {
         let task_tx = chunk_tx.clone();
         let task_scheduler = scheduler.clone();
         let task_control = control.clone();
         let task_recycle = Arc::clone(&recycle);
-        tokio::spawn(async move {
+        let task_work = Arc::clone(&work);
+        tasks.spawn(async move {
             let outcome = run_download_reader(
                 handle,
-                offset,
-                total_bytes,
+                Arc::clone(&task_work),
                 task_scheduler,
                 task_control,
                 task_tx.clone(),
                 task_recycle,
             )
             .await;
+            if outcome.is_err() {
+                // A missing range cannot be repaired by later chunks. Wake
+                // readers waiting for credit so the writer can finish draining
+                // the contiguous prefix instead of deadlocking on a hole.
+                task_work.buffers.close();
+            }
             let message = outcome.unwrap_or_else(|error| DownloadReadMessage::Failed { error });
             let _ = task_tx.send(message).await;
         });
@@ -3420,20 +3457,20 @@ async fn spawn_download_pipeline(
         receiver,
         readers,
         recycle,
+        _tasks: tasks,
     })
 }
 
 async fn run_download_reader(
     mut remote: RemoteFile,
-    mut offset: u64,
-    total_bytes: u64,
+    work: Arc<DownloadReadWork>,
     scheduler: TransferScheduler,
     mut control: watch::Receiver<TransferControl>,
     chunk_tx: mpsc::Sender<DownloadReadMessage>,
     recycle: DownloadBufferPool,
 ) -> anyhow::Result<DownloadReadMessage> {
     loop {
-        if offset >= total_bytes {
+        if work.next_offset.load(Ordering::Relaxed) >= work.total_bytes {
             return Ok(DownloadReadMessage::EndOfStream);
         }
         let control_state = *control.borrow_and_update();
@@ -3448,54 +3485,78 @@ async fn run_download_reader(
             }
             TransferControl::Cancelled => bail!("transfer cancelled"),
         }
-        let remaining = total_bytes - offset;
-        let desired =
-            DOWNLOAD_CHUNK_BYTES.min(usize::try_from(remaining).unwrap_or(DOWNLOAD_CHUNK_BYTES));
-        let permit = match scheduler
-            .acquire_bandwidth(BandwidthDirection::Download, desired, &mut control)
-            .await?
-        {
-            BandwidthWaitOutcome::Ready(permit) => permit,
-            BandwidthWaitOutcome::Paused => continue,
-            BandwidthWaitOutcome::Cancelled => bail!("transfer cancelled"),
+        // Reserve memory BEFORE claiming the next offset. Otherwise later
+        // chunks could exhaust the budget while the earliest chunk waits.
+        let buffer_permit = tokio::select! {
+            changed = control.changed() => {
+                changed.context("transfer control channel closed")?;
+                continue;
+            }
+            permit = Arc::clone(&work.buffers).acquire_owned() => {
+                permit.context("download buffer budget closed")?
+            }
         };
-        let mut buffer = take_recycled_download_buffer(&recycle, permit.bytes().max(1))
-            .unwrap_or_else(|| vec![0_u8; permit.bytes().max(1)]);
+        let Some((offset, desired)) = work.claim_range() else {
+            return Ok(DownloadReadMessage::EndOfStream);
+        };
+        remote.seek(SeekFrom::Start(offset)).await?;
+        let mut buffer =
+            take_recycled_download_buffer(&recycle, desired).unwrap_or_else(|| vec![0_u8; desired]);
         let mut filled = 0_usize;
         let mut hit_end = false;
+        let mut failure = None;
         while filled < buffer.len() {
-            match remote.read(&mut buffer[filled..]).await {
-                Ok(0) => {
-                    hit_end = true;
-                    break;
+            let permit = match scheduler
+                .acquire_bandwidth(
+                    BandwidthDirection::Download,
+                    buffer.len() - filled,
+                    &mut control,
+                )
+                .await?
+            {
+                BandwidthWaitOutcome::Ready(permit) => permit,
+                BandwidthWaitOutcome::Paused => {
+                    control
+                        .changed()
+                        .await
+                        .context("transfer control channel closed")?;
+                    continue;
                 }
-                Ok(read) => filled += read,
-                Err(error) => {
-                    let _ = permit.commit(filled);
-                    // Preserve the bytes that were already read so the
-                    // partial download stays resumable after the failure.
-                    if filled > 0 {
-                        buffer.truncate(filled);
-                        let _ = chunk_tx
-                            .send(DownloadReadMessage::Chunk {
-                                offset,
-                                data: buffer,
-                            })
-                            .await;
+                BandwidthWaitOutcome::Cancelled => bail!("transfer cancelled"),
+            };
+            let reserved_end = filled + permit.bytes();
+            let mut received = 0;
+            while filled < reserved_end {
+                match remote.read(&mut buffer[filled..reserved_end]).await {
+                    Ok(0) => {
+                        hit_end = true;
+                        break;
                     }
-                    return Err(anyhow::Error::from(error).context("SFTP download read failed"));
+                    Ok(read) => {
+                        filled += read;
+                        received += read;
+                    }
+                    Err(error) => {
+                        failure =
+                            Some(anyhow::Error::from(error).context("SFTP download read failed"));
+                        break;
+                    }
                 }
             }
+            permit.commit(received)?;
+            if hit_end || failure.is_some() {
+                break;
+            }
         }
-        permit.commit(filled)?;
         if filled > 0 {
             buffer.truncate(filled);
-            let chunk_offset = offset;
-            offset += filled as u64;
             if chunk_tx
                 .send(DownloadReadMessage::Chunk {
-                    offset: chunk_offset,
-                    data: buffer,
+                    offset,
+                    chunk: DownloadChunk {
+                        data: buffer,
+                        _buffer_permit: buffer_permit,
+                    },
                 })
                 .await
                 .is_err()
@@ -3503,8 +3564,12 @@ async fn run_download_reader(
                 bail!("the download writer stopped before the reader finished");
             }
         }
+        if let Some(error) = failure {
+            // The contiguous prefix can still be saved as a resume checkpoint.
+            return Err(error);
+        }
         if hit_end {
-            return Ok(DownloadReadMessage::EndOfStream);
+            bail!("remote file ended early in download range at offset {offset}");
         }
     }
 }
@@ -3591,10 +3656,13 @@ async fn download_file(
         control.clone(),
     )
     .await?;
-    let mut chunk_rx = pipeline.receiver;
-    let recycle = pipeline.recycle;
-    let mut live_readers = pipeline.readers;
-    let mut pending_chunks: HashMap<u64, Vec<u8>> = HashMap::new();
+    let DownloadPipeline {
+        receiver: mut chunk_rx,
+        recycle,
+        readers: mut live_readers,
+        _tasks,
+    } = pipeline;
+    let mut pending_chunks: HashMap<u64, DownloadChunk> = HashMap::new();
     let mut next_write_offset = transferred;
     let mut reader_failure: Option<anyhow::Error> = None;
     while live_readers > 0 {
@@ -3616,26 +3684,27 @@ async fn download_file(
             },
         };
         match message {
-            DownloadReadMessage::Chunk { offset, data } => {
+            DownloadReadMessage::Chunk { offset, chunk } => {
+                if offset < next_write_offset || pending_chunks.contains_key(&offset) {
+                    bail!("SFTP download returned an overlapping chunk at offset {offset}");
+                }
                 if offset != next_write_offset {
-                    pending_chunks.insert(offset, data);
+                    pending_chunks.insert(offset, chunk);
                     continue;
                 }
-                let mut chunk = data;
+                let mut chunk = chunk;
                 loop {
-                    local.write_all(&chunk).await?;
-                    next_write_offset += chunk.len() as u64;
-                    transferred += chunk.len() as u64;
+                    local.write_all(&chunk.data).await?;
+                    next_write_offset += chunk.data.len() as u64;
+                    transferred += chunk.data.len() as u64;
                     progress(transferred);
+                    recycle_download_buffer(&recycle, chunk.data);
+                    drop(chunk._buffer_permit);
                     match pending_chunks.remove(&next_write_offset) {
-                        Some(buffered) => {
-                            recycle_download_buffer(&recycle, chunk);
-                            chunk = buffered;
-                        }
+                        Some(buffered) => chunk = buffered,
                         None => break,
                     }
                 }
-                recycle_download_buffer(&recycle, chunk);
             }
             DownloadReadMessage::EndOfStream => {
                 live_readers -= 1;

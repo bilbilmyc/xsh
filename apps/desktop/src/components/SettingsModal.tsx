@@ -4,9 +4,12 @@ import { Bot, Check, Copy, Fingerprint, Gauge, Keyboard, Monitor, RotateCcw, Shi
 import { api } from "../api";
 import { confirmDialog, isDialogOpen } from "./DialogHost";
 import { defaultPreferences, type AccentColor, type AppPreferences } from "../preferences";
-import { getThemeTokens, resolveTerminalTheme, THEMES } from "../themes";
+import { getThemeTokens, resolveTerminalTheme, terminal256ColorPalette, TERMINAL_THEMES, THEMES } from "../themes";
+import { TERMINAL_FONT_WEIGHTS } from "../terminal-fonts";
+import { TerminalFontPicker } from "./TerminalFontPicker";
 import { AiServiceSettings } from "./AiServiceSettings";
 import type { KnownHost } from "../types";
+import "./terminal-appearance.css";
 
 interface SettingsModalProps {
   preferences: AppPreferences;
@@ -23,7 +26,8 @@ export function SettingsModal({ preferences, onSave, onClose, onToast, initialSe
   const [draft, setDraft] = useState(preferences);
   const [aiDirty, setAiDirty] = useState(false);
   const discardPendingRef = useRef(false);
-  const terminalPreview = resolveTerminalTheme("xsh-dark", draft.theme);
+  const terminalPreview = resolveTerminalTheme("xsh-dark", draft.theme, draft.terminalTheme);
+  const terminalColors = terminal256ColorPalette(terminalPreview);
   const [knownHosts, setKnownHosts] = useState<KnownHost[]>([]);
   const [loadingHosts, setLoadingHosts] = useState(false);
   const [hostsLoaded, setHostsLoaded] = useState(false);
@@ -220,7 +224,7 @@ export function SettingsModal({ preferences, onSave, onClose, onToast, initialSe
           <div className="settings-body settings-page">
             {page === "appearance" && (
               <>
-                <SettingsHeading title="界面主题" description="完整切换工作区与终端配色；会话单独设置的终端主题仍然优先。" />
+                <SettingsHeading title="界面主题" description="切换工作区主题；终端可跟随界面，也可在「终端」中单独设置配色。" />
                 <div className="theme-choice-grid" role="group" aria-label="界面主题">
                   {THEMES.map((theme) => (
                     <label key={theme.value} className={`theme-choice ${draft.theme === theme.value ? "selected" : ""}`}>
@@ -258,20 +262,38 @@ export function SettingsModal({ preferences, onSave, onClose, onToast, initialSe
 
             {page === "terminal" && (
               <>
-                <SettingsHeading title="终端字体" description="设置会立即应用到所有已打开和之后创建的终端标签。" />
-                <label className="field"><span>等宽字体</span><select value={draft.terminalFontFamily} onChange={(event) => patch({ terminalFontFamily: event.target.value })}>{TERMINAL_FONTS.map((font) => <option key={font.value} value={font.value}>{font.label}</option>)}</select></label>
+                <SettingsHeading title="终端字体" description="预览字体和字重，保存后应用到已打开和之后创建的终端。" />
+                <TerminalFontPicker value={draft.terminalFontFamily} onChange={(terminalFontFamily) => patch({ terminalFontFamily })} />
                 <div className="settings-form-grid settings-range-grid">
                   <RangeField label="终端字号" value={draft.terminalFontSize} min={12} max={22} step={1} suffix="px" onChange={(value) => patch({ terminalFontSize: value })} />
                   <RangeField label="行高" value={draft.terminalLineHeight} min={1} max={1.6} step={0.05} suffix="" onChange={(value) => patch({ terminalLineHeight: value })} />
-                  <RangeField label="普通字重" value={draft.terminalFontWeight} min={300} max={700} step={100} suffix="" onChange={(value) => patch({ terminalFontWeight: value })} />
-                  <RangeField label="粗体字重" value={draft.terminalFontWeightBold} min={400} max={900} step={100} suffix="" onChange={(value) => patch({ terminalFontWeightBold: value })} />
+                  <FontWeightField label="常规文字字重" value={draft.terminalFontWeight} onChange={(terminalFontWeight) => patch({ terminalFontWeight })} />
+                  <FontWeightField label="粗体文字字重" value={draft.terminalFontWeightBold} onChange={(terminalFontWeightBold) => patch({ terminalFontWeightBold })} />
                 </div>
                 <label className="check-row terminal-profile-toggle"><input type="checkbox" checked={draft.useSessionTerminalFont} onChange={(event) => patch({ useSessionTerminalFont: event.target.checked })} />优先使用会话中单独保存的字体和字号</label>
-                <div className={`terminal-font-preview ${draft.theme}`} style={{ fontFamily: draft.terminalFontFamily, fontSize: draft.terminalFontSize, lineHeight: draft.terminalLineHeight, fontWeight: draft.terminalFontWeight, background: terminalPreview.background, color: terminalPreview.foreground }}>
+                <SettingsHeading title="终端配色" description="背景与界面主题独立设置，所有配色均支持 xterm 256 色；会话单独指定的配色优先。" />
+                <div className="terminal-theme-grid" role="group" aria-label="终端配色">
+                  {[{ value: "xsh-dark" as const, label: "跟随界面", palette: resolveTerminalTheme("xsh-dark", draft.theme) }, ...TERMINAL_THEMES].map((theme) => (
+                    <label key={theme.value} className={`terminal-theme-choice ${draft.terminalTheme === theme.value ? "selected" : ""}`}>
+                      <input className="theme-choice-input" type="radio" name="xsh-terminal-theme" value={theme.value} checked={draft.terminalTheme === theme.value} onChange={() => patch({ terminalTheme: theme.value })} />
+                      <span className="terminal-theme-sample" style={{ background: theme.palette.background, color: theme.palette.foreground, fontFamily: draft.terminalFontFamily, fontWeight: draft.terminalFontWeight }} aria-hidden="true"><span style={{ color: theme.palette.green }}>$</span> Aa <span style={{ color: theme.palette.blue }}>256</span></span>
+                      <span className="terminal-theme-label">{theme.label}{draft.terminalTheme === theme.value && <Check size={12} aria-hidden="true" />}</span>
+                    </label>
+                  ))}
+                </div>
+                <div className="terminal-font-preview" aria-label="终端外观预览" style={{ fontFamily: draft.terminalFontFamily, fontSize: draft.terminalFontSize, lineHeight: draft.terminalLineHeight, fontWeight: draft.terminalFontWeight, background: terminalPreview.background, color: terminalPreview.foreground }}>
                   <div><span className="prompt" style={{ color: terminalPreview.green }}>user@server</span>:<span className="path" style={{ color: terminalPreview.blue }}>~/projects/xsh</span>$ cargo test</div>
                   <div className="success" style={{ color: terminalPreview.green }}>test result: ok. 12 passed; 0 failed</div>
                   <div>中文路径与日志显示测试：连接成功</div>
+                  <div>常规 Regular 0O 1Il <span style={{ fontWeight: draft.terminalFontWeightBold }}>粗体 Bold 0O 1Il</span></div>
+                  <div className="terminal-ansi-preview" aria-label="ANSI 16 色文字">
+                    {terminalColors.slice(0, 16).map((color, index) => <span key={index} style={{ color }}>Aa </span>)}
+                  </div>
                 </div>
+                <div className="terminal-color-preview" role="img" aria-label="xterm 256 色色板">
+                  {terminalColors.map((color, index) => <span key={index} style={{ background: color }} title={`xterm ${index} · ${color}`} />)}
+                </div>
+                <p className="field-help">0–15 色跟随配色方案，16–255 色保持标准 xterm 色立方和灰阶。字体的可用字重取决于本机安装的字体。</p>
                 <SettingsHeading title="终端回滚缓冲区" description="控制每个终端可以向上查看的历史输出，最高支持 100 万行。" />
                 <div className="settings-form-grid">
                   <label className="field">
@@ -566,15 +588,17 @@ const UI_FONTS = [
   { label: "微软雅黑 / Microsoft YaHei", value: '"Microsoft YaHei", "Segoe UI", sans-serif' },
   { label: "Segoe UI", value: '"Segoe UI", Arial, sans-serif' },
 ];
-const TERMINAL_FONTS = [
-  { label: "系统等宽字体（推荐）", value: defaultPreferences.terminalFontFamily },
-  { label: "Monaco（可选）", value: '"Monaco", "SFMono-Regular", Menlo, Consolas, monospace' },
-  { label: "SF Mono", value: '"SFMono-Regular", Menlo, monospace' },
-  { label: "Cascadia Code", value: '"Cascadia Code", Consolas, monospace' },
-  { label: "JetBrains Mono", value: '"JetBrains Mono", Menlo, monospace' },
-  { label: "Menlo", value: 'Menlo, Monaco, monospace' },
-  { label: "Consolas", value: 'Consolas, "Courier New", monospace' },
-];
+function FontWeightField({ label, value, onChange }: { label: string; value: number; onChange: (value: number) => void }) {
+  return (
+    <label className="field">
+      <span>{label}</span>
+      <select value={value} onChange={(event) => onChange(Number(event.target.value))}>
+        {!TERMINAL_FONT_WEIGHTS.some((weight) => weight.value === value) && <option value={value}>自定义 · {value}</option>}
+        {TERMINAL_FONT_WEIGHTS.map((weight) => <option key={weight.value} value={weight.value}>{weight.label} · {weight.value}</option>)}
+      </select>
+    </label>
+  );
+}
 
 function formatDate(value: string) {
   const date = new Date(value);

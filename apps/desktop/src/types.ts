@@ -371,6 +371,7 @@ export interface RemoteDesktopProfile {
 
 export interface RemoteDesktopWsBridge {
   port: number;
+  token: string;
 }
 
 export interface RemoteDesktopViewerLaunch {
@@ -379,8 +380,33 @@ export interface RemoteDesktopViewerLaunch {
 
 export interface RemoteDesktopLaunch {
   forward: ForwardInfo;
-  viewer: RemoteDesktopViewerLaunch | null;
 }
+
+export type RdpInput =
+  | { type: "ctrlAltDel" }
+  | { type: "key"; scan: number; down: boolean; extended: boolean }
+  | { type: "text"; text: string }
+  | { type: "mouse"; flags: number; x: number; y: number }
+  | { type: "resize"; width: number; height: number }
+  | { type: "clipboard"; text: string };
+
+export interface RdpCertificateChallenge {
+  challengeId: string;
+  host: string;
+  port: number;
+  subject: string;
+  issuer: string;
+  fingerprint: string;
+  previousFingerprint: string;
+  flags: number;
+}
+
+export type RdpEvent =
+  | { type: "stateChanged"; payload: { state: string; message: string | null } }
+  | { type: "certificate"; payload: RdpCertificateChallenge }
+  | { type: "clipboard"; payload: { text: string } }
+  | { type: "capabilities"; payload: { clipboard: boolean; resize: boolean; maxPixels: number } }
+  | { type: "warning"; payload: { message: string } };
 
 export interface SshDiagnosticReport {
   target: EndpointDiagnostic;

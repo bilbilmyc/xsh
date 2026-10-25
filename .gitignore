@@ -13,3 +13,4 @@ target/
 .hallmark/
 .playwright-cli/
 output/
+apps/desktop/src-tauri/native-runtime/

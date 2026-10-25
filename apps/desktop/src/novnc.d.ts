@@ -19,6 +19,7 @@ declare module "@novnc/novnc" {
       },
     );
     scaleViewport: boolean;
+    resizeSession: boolean;
     background: string;
     viewOnly: boolean;
     focus(options?: FocusOptions): void;

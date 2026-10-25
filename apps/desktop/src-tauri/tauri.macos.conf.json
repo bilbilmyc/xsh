@@ -1,0 +1,7 @@
+{
+  "bundle": {
+    "macOS": {
+      "frameworks": ["native-runtime/libxsh-rdp-native.dylib"]
+    }
+  }
+}

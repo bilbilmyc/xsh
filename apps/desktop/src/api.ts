@@ -9,6 +9,8 @@ import type {
   RemoteDesktopLaunch,
   RemoteDesktopProfile,
   RemoteDesktopWsBridge,
+  RdpInput,
+  RdpEvent,
   SshConfigEntry,
   SshAgentKey,
   SshDiagnosticReport,
@@ -106,10 +108,17 @@ export const api = {
     invoke<LocalPortDiagnostic>("diagnose_local_port", { bindHost, bindPort }),
   getForwardHealth: (connectionId: Uuid, forwardId: Uuid) =>
     invoke<ForwardHealth>("get_forward_health", { connectionId, forwardId }),
-  startRemoteDesktop: (connectionId: Uuid, profile: RemoteDesktopProfile, launchViewer: boolean) =>
-    invoke<RemoteDesktopLaunch>("start_remote_desktop", { connectionId, profile, launchViewer }),
-  openRemoteDesktopViewer: (profile: RemoteDesktopProfile) =>
-    invoke<string>("open_remote_desktop_viewer", { profile }),
+  startRemoteDesktop: (connectionId: Uuid, profile: RemoteDesktopProfile) =>
+    invoke<RemoteDesktopLaunch>("start_remote_desktop", { connectionId, profile }),
+  startRdpDesktop: (profile: RemoteDesktopProfile, connectionId: string | null, username: string, password: string | null, width: number, height: number, onEvent: Channel<RdpEvent | ArrayBuffer>) =>
+    invoke<string>("start_rdp_desktop", { profile, connectionId, username, password, width, height, onEvent }),
+  rdpDesktopInput: (desktopId: string, input: RdpInput) =>
+    invoke<void>("rdp_desktop_input", { desktopId, input }),
+  acknowledgeRdpFrame: (desktopId: string, sequence: number) =>
+    invoke<void>("acknowledge_rdp_frame", { desktopId, sequence }),
+  answerRdpCertificate: (desktopId: string, challengeId: string, accepted: boolean) =>
+    invoke<void>("answer_rdp_certificate", { desktopId, challengeId, accepted }),
+  closeRdpDesktop: (desktopId: string) => invoke<void>("close_rdp_desktop", { desktopId }),
   openRemoteDesktopWsBridge: (host: string, port: number) =>
     invoke<RemoteDesktopWsBridge>("open_remote_desktop_ws_bridge", { host, port }),
   closeRemoteDesktopWsBridge: (port: number) =>

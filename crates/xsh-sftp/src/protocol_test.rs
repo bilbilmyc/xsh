@@ -24,6 +24,7 @@ struct ReadServer {
     observations: Arc<StdMutex<Vec<ReadObservation>>>,
     open_handles: HashSet<String>,
     next_handle: u64,
+    reject_open: Option<u64>,
 }
 
 impl ReadServer {
@@ -40,6 +41,7 @@ impl ReadServer {
             observations,
             open_handles: HashSet::new(),
             next_handle: 0,
+            reject_open: None,
         }
     }
 
@@ -81,6 +83,9 @@ impl Handler for ReadServer {
         }
         let handle = format!("read-{}", self.next_handle);
         self.next_handle += 1;
+        if self.reject_open == Some(self.next_handle - 1) {
+            return Err(StatusCode::Failure);
+        }
         self.open_handles.insert(handle.clone());
         Ok(Handle { id, handle })
     }
@@ -169,6 +174,13 @@ async fn connect_read_server(
 ) -> (SftpSession, Arc<StdMutex<Vec<ReadObservation>>>) {
     let observations = Arc::new(StdMutex::new(Vec::new()));
     let handler = ReadServer::new(data, max_chunk, fail_at_or_after, Arc::clone(&observations));
+    connect_read_handler(handler).await
+}
+
+async fn connect_read_handler(
+    handler: ReadServer,
+) -> (SftpSession, Arc<StdMutex<Vec<ReadObservation>>>) {
+    let observations = Arc::clone(&handler.observations);
     let (client_stream, server_stream) = tokio::io::duplex(512 * 1024);
     russh_sftp::server::run(server_stream, handler).await;
     let session = SftpSession::new(client_stream)
@@ -265,6 +277,216 @@ fn download_request(destination: &Path, total_bytes: u64) -> DownloadFileRequest
         modified_at_unix: Some(MODIFIED_AT_UNIX),
         source_identity: SOURCE_IDENTITY,
     }
+}
+
+#[tokio::test]
+async fn protocol_download_reads_each_byte_once() {
+    let data = fixture_bytes(4 * 1024 * 1024 + 137);
+    let (session, observations) =
+        connect_read_server(Arc::clone(&data), DOWNLOAD_CHUNK_BYTES, None).await;
+    let directory = TestDirectory::new("download-wire-bytes").await;
+    let destination = directory.join("archive.bin");
+    let (_control, mut control) = watch::channel(TransferControl::Running);
+    let status = tokio::time::timeout(
+        PROTOCOL_TEST_TIMEOUT,
+        download_file(
+            &session,
+            download_request(&destination, data.len() as u64),
+            &mut control,
+            &mut transfer_run_gate(),
+            |_| {},
+        ),
+    )
+    .await
+    .expect("download timed out")
+    .unwrap();
+    assert_eq!(status, TransferStatus::Completed);
+    assert_eq!(tokio::fs::read(&destination).await.unwrap(), *data);
+    let observations = observations.lock().unwrap().clone();
+    let mut ranges = observations
+        .iter()
+        .filter_map(|read| read.returned.map(|bytes| (read.offset, bytes)))
+        .collect::<Vec<_>>();
+    ranges.sort_unstable();
+    let returned_bytes: usize = ranges.iter().map(|(_, bytes)| bytes).sum();
+    assert_eq!(
+        returned_bytes,
+        data.len(),
+        "remote file data must not be downloaded repeatedly"
+    );
+    let mut expected_offset = 0;
+    for (offset, bytes) in ranges {
+        assert_eq!(
+            offset, expected_offset,
+            "download ranges must not overlap or skip bytes"
+        );
+        expected_offset += bytes as u64;
+    }
+    session.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn protocol_download_bounds_chunks_until_the_writer_consumes_them() {
+    let data = fixture_bytes(64 * DOWNLOAD_CHUNK_BYTES);
+    let (session, _) = connect_read_server(data.clone(), DOWNLOAD_CHUNK_BYTES, None).await;
+    let (_control, control) = watch::channel(TransferControl::Running);
+    let mut pipeline = spawn_download_pipeline(
+        &session,
+        REMOTE_PATH,
+        0,
+        data.len() as u64,
+        TransferScheduler::default(),
+        control,
+    )
+    .await
+    .unwrap();
+    let mut held = Vec::new();
+    for _ in 0..DOWNLOAD_PIPELINE_HANDLES * 2 {
+        let message = tokio::time::timeout(PROTOCOL_TEST_TIMEOUT, pipeline.receiver.recv())
+            .await
+            .expect("download stalled before reaching the buffer limit")
+            .unwrap();
+        assert!(matches!(message, DownloadReadMessage::Chunk { .. }));
+        held.push(message);
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), pipeline.receiver.recv())
+            .await
+            .is_err(),
+        "queued and out-of-order chunks must share one memory budget",
+    );
+    held.pop();
+    let next = tokio::time::timeout(PROTOCOL_TEST_TIMEOUT, pipeline.receiver.recv())
+        .await
+        .expect("consuming a chunk must unblock its reader")
+        .unwrap();
+    assert!(matches!(next, DownloadReadMessage::Chunk { .. }));
+    drop(pipeline);
+    session.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn protocol_download_recovers_when_the_first_handle_open_is_rejected() {
+    let data = fixture_bytes(4 * DOWNLOAD_CHUNK_BYTES + 91);
+    let mut handler = ReadServer::new(
+        data.clone(),
+        32 * 1024,
+        None,
+        Arc::new(StdMutex::new(Vec::new())),
+    );
+    handler.reject_open = Some(0);
+    let (session, _) = connect_read_handler(handler).await;
+    let directory = TestDirectory::new("download-rejected-open").await;
+    let destination = directory.join("archive.bin");
+    let (_control, mut control) = watch::channel(TransferControl::Running);
+    let status = tokio::time::timeout(
+        PROTOCOL_TEST_TIMEOUT,
+        download_file(
+            &session,
+            download_request(&destination, data.len() as u64),
+            &mut control,
+            &mut transfer_run_gate(),
+            |_| {},
+        ),
+    )
+    .await
+    .expect("a rejected handle must not stall the download")
+    .unwrap();
+    assert_eq!(status, TransferStatus::Completed);
+    assert_eq!(tokio::fs::read(destination).await.unwrap(), *data);
+    session.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn protocol_download_drop_releases_paused_readers() {
+    let data = fixture_bytes(32 * DOWNLOAD_CHUNK_BYTES);
+    let (session, _) = connect_read_server(data.clone(), DOWNLOAD_CHUNK_BYTES, None).await;
+    let (control, receiver) = watch::channel(TransferControl::Paused);
+    let pipeline = spawn_download_pipeline(
+        &session,
+        REMOTE_PATH,
+        0,
+        data.len() as u64,
+        TransferScheduler::default(),
+        receiver,
+    )
+    .await
+    .unwrap();
+    assert!(control.receiver_count() > 0);
+    drop(pipeline);
+    tokio::time::timeout(PROTOCOL_TEST_TIMEOUT, async {
+        while control.receiver_count() > 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("dropping the writer left paused readers alive");
+    session.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn protocol_download_cancellation_preserves_only_the_contiguous_checkpoint() {
+    let data = fixture_bytes(32 * DOWNLOAD_CHUNK_BYTES);
+    let (session, _) = connect_read_server(data.clone(), 32 * 1024, None).await;
+    let directory = TestDirectory::new("download-cancel").await;
+    let destination = directory.join("archive.bin");
+    let (sender, mut control) = watch::channel(TransferControl::Running);
+    let status = tokio::time::timeout(
+        PROTOCOL_TEST_TIMEOUT,
+        download_file(
+            &session,
+            download_request(&destination, data.len() as u64),
+            &mut control,
+            &mut transfer_run_gate(),
+            |bytes| {
+                if bytes >= DOWNLOAD_CHUNK_BYTES as u64 {
+                    sender.send_replace(TransferControl::Cancelled);
+                }
+            },
+        ),
+    )
+    .await
+    .expect("cancelled download did not stop")
+    .unwrap();
+    assert_eq!(status, TransferStatus::Cancelled);
+    assert!(!tokio::fs::try_exists(&destination).await.unwrap());
+    let partial = tokio::fs::read(download_temporary_path(&destination))
+        .await
+        .unwrap();
+    assert!(!partial.is_empty() && partial.len() < data.len());
+    assert_eq!(partial, data[..partial.len()]);
+    tokio::time::timeout(PROTOCOL_TEST_TIMEOUT, async {
+        while sender.receiver_count() > 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cancelled download left background readers alive");
+    session.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn protocol_download_early_eof_does_not_deadlock_on_buffer_credit() {
+    let data = fixture_bytes(2 * DOWNLOAD_CHUNK_BYTES + 17);
+    let (session, _) = connect_read_server(data.clone(), 32 * 1024, None).await;
+    let directory = TestDirectory::new("download-short-file").await;
+    let destination = directory.join("archive.bin");
+    let (_control, mut control) = watch::channel(TransferControl::Running);
+    let result = tokio::time::timeout(
+        PROTOCOL_TEST_TIMEOUT,
+        download_file(
+            &session,
+            download_request(&destination, (32 * DOWNLOAD_CHUNK_BYTES) as u64),
+            &mut control,
+            &mut transfer_run_gate(),
+            |_| {},
+        ),
+    )
+    .await
+    .expect("an early EOF exhausted the buffer budget and deadlocked");
+    assert!(result.is_err());
+    assert!(!tokio::fs::try_exists(destination).await.unwrap());
+    session.close().await.unwrap();
 }
 
 #[tokio::test]

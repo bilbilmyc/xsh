@@ -16,6 +16,7 @@ if (-not $env:AWS_LC_SYS_PREBUILT_NASM) {
 if ($env:OS -ne 'Windows_NT') {
   throw '此脚本只能在 Windows 上运行。'
 }
+. (Join-Path $RootDir 'scripts\check-native-rdp-tools.ps1')
 
 $PnpmCommand = (Get-Command pnpm.cmd -ErrorAction SilentlyContinue).Source
 if (-not $PnpmCommand) {
@@ -47,7 +48,7 @@ if (-not $SkipInstall) {
 $TauriConfig = Get-Content -LiteralPath (Join-Path $RootDir 'apps\desktop\src-tauri\tauri.conf.json') -Raw | ConvertFrom-Json
 $PackagePrefix = "$($TauriConfig.productName)_$($TauriConfig.version)_"
 Write-Host "构建 Windows $($TauriConfig.version) 安装包..." -ForegroundColor Cyan
-& $PnpmCommand --filter desktop exec tauri build --bundles nsis,msi
+& $PnpmCommand --filter desktop exec tauri build --bundles 'nsis,msi'
 if ($LASTEXITCODE -ne 0) {
   throw "Tauri Windows 构建失败，退出码：$LASTEXITCODE"
 }

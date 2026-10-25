@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Check, Monitor, Play, RefreshCw, Save, Trash2, X } from "lucide-react";
 import { api } from "../api";
+import { EmbeddedDesktop } from "./EmbeddedDesktop";
 import { confirmDialog } from "./DialogHost";
 import { remoteDesktopDefaultPort, type ForwardHealth, type ForwardInfo, type RemoteDesktopKind, type RemoteDesktopProfile, type SavedSession } from "../types";
 
@@ -23,7 +24,14 @@ export function RemoteDesktopModal({
   const [kind, setKind] = useState<RemoteDesktopKind>(saved?.kind ?? "vnc");
   const [targetHost, setTargetHost] = useState(saved?.targetHost ?? "127.0.0.1");
   const [targetPort, setTargetPort] = useState(saved?.targetPort === null || saved?.targetPort === undefined ? "" : String(saved.targetPort));
-  const [viewerCommand, setViewerCommand] = useState(saved?.viewerCommand ?? "");
+  const [desktop, setDesktop] = useState<{ profile: RemoteDesktopProfile; host: string; port: number } | null>(null);
+  const autoConnected = useRef(false);
+  const active = useRef(true);
+  const starting = useRef(false);
+  useEffect(() => {
+    active.current = true;
+    return () => { active.current = false; };
+  }, []);
   const [saveToSession, setSaveToSession] = useState(Boolean(saved));
   const [autoStart, setAutoStart] = useState(saved?.autoStart ?? false);
   const [launchViewer, setLaunchViewer] = useState(saved?.launchViewer ?? true);
@@ -71,10 +79,6 @@ export function RemoteDesktopModal({
     if (!normalizedTargetHost) throw new Error("远程桌面目标主机不能为空。");
     const trimmedPort = targetPort.trim();
     const parsedTargetPort = trimmedPort === "" ? null : parsePort(trimmedPort);
-    const normalizedViewer = viewerCommand.trim();
-    if (normalizedViewer && !normalizedViewer.includes("{port}")) {
-      throw new Error("查看器命令模板必须包含 {port} 占位符，例如 vncviewer {host}::{port}。");
-    }
     return {
       kind,
       transport: "sshTunnel",
@@ -82,49 +86,47 @@ export function RemoteDesktopModal({
       targetPort: parsedTargetPort,
       autoStart,
       launchViewer,
-      viewerCommand: normalizedViewer || null,
-      username: null,
-      credentialRef: null,
+      viewerCommand: null,
+      username: saved?.username ?? null,
+      credentialRef: saved?.credentialRef ?? null,
       forwardProfileId: forwardProfileId ?? crypto.randomUUID(),
     };
   };
 
   const start = async () => {
+    if (!active.current || starting.current) return;
+    starting.current = true;
     setBusy(true);
     setError(null);
     try {
       const profile = buildProfile();
       setForwardProfileId(profile.forwardProfileId);
       if (saveToSession) await onUpdateSession(session, profile);
-      const launch = await api.startRemoteDesktop(connectionId, profile, true);
+      if (!active.current) return;
+      const launch = await api.startRemoteDesktop(connectionId, profile);
+      if (!active.current) return;
       setForward(launch.forward);
-      onToast(
-        launch.viewer
-          ? `已启动 ${kindLabel(profile.kind)} 隧道 ${launch.forward.bindHost}:${launch.forward.bindPort}，并打开查看器。`
-          : `已启动 ${kindLabel(profile.kind)} 隧道 ${launch.forward.bindHost}:${launch.forward.bindPort}。`,
-      );
+      setDesktop({ profile, host: launch.forward.bindHost, port: launch.forward.bindPort });
+      setDirty(false);
+      onToast("正在连接内置远程桌面。");
       void refreshForward();
     } catch (caught) {
-      setError(String(caught));
+      if (active.current) setError(String(caught));
     } finally {
-      setBusy(false);
+      starting.current = false;
+      if (active.current) setBusy(false);
     }
   };
 
-  const reopenViewer = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const profile = buildProfile();
-      const launch = await api.startRemoteDesktop(connectionId, profile, true);
-      setForward(launch.forward);
-      onToast("已重新打开远程桌面查看器。");
-    } catch (caught) {
-      setError(String(caught));
-    } finally {
-      setBusy(false);
+  const reopenViewer = start;
+  useEffect(() => {
+    if (saved?.launchViewer && !autoConnected.current) {
+      autoConnected.current = true;
+      void start();
     }
-  };
+    // Connect the saved desktop once when this SSH panel opens.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connectionId]);
 
   const saveOnly = async () => {
     setBusy(true);
@@ -132,6 +134,7 @@ export function RemoteDesktopModal({
     try {
       const profile = buildProfile();
       await onUpdateSession(session, profile);
+      setDirty(false);
     } catch (caught) {
       setError(String(caught));
     } finally {
@@ -141,6 +144,7 @@ export function RemoteDesktopModal({
 
   const stop = async () => {
     if (!forward) return;
+    setDesktop(null);
     setBusy(true);
     setError(null);
     try {
@@ -165,6 +169,7 @@ export function RemoteDesktopModal({
     setBusy(true);
     setError(null);
     try {
+      setDesktop(null);
       if (forward) await api.stopForward(connectionId, forward.forwardId).catch(() => undefined);
       setForward(null);
       setForwardHealth(null);
@@ -200,9 +205,7 @@ export function RemoteDesktopModal({
   }, [dirty]);
 
   const defaultPort = remoteDesktopDefaultPort(kind);
-  const platformHint = kind === "rdp"
-    ? "Windows 会自动使用系统自带的 mstsc；macOS 会通过 Microsoft Remote Desktop 打开 rdp:// 地址；Linux 需要在下方填写查看器命令。"
-    : "macOS 会自动使用系统自带的“屏幕共享”；Windows 和 Linux 需要在下方填写查看器命令（例如 TigerVNC）。";
+  const platformHint = "VNC 和 RDP 均使用 XSH 内置客户端，在当前应用内显示和操作。";
 
   return (
     <div className="modal-backdrop" onMouseDown={requestClose}>
@@ -212,7 +215,7 @@ export function RemoteDesktopModal({
         aria-modal="true"
         aria-labelledby="remote-desktop-title"
         onMouseDown={(event) => event.stopPropagation()}
-        onChange={() => setDirty(true)}
+        onChange={(event) => { if ((event.target as HTMLElement).closest(".forward-config-card")) setDirty(true); }}
       >
         <header className="modal-header">
           <div className="modal-title-wrap">
@@ -224,13 +227,13 @@ export function RemoteDesktopModal({
         <div className="port-forward-body">
           <section className="forward-config-card">
             <div className="forward-section-heading">
-              <div><strong>{saved ? "编辑远程桌面配置" : "创建远程桌面连接"}</strong><span>通过当前 SSH 会话建立加密隧道，并打开本机的远程桌面查看器。</span></div>
+              <div><strong>{saved ? "编辑远程桌面配置" : "创建远程桌面连接"}</strong><span>通过当前 SSH 会话建立加密隧道，在 XSH 内操作远程桌面。</span></div>
               <span className="forward-kind-badge">{kindLabel(kind)}</span>
             </div>
 
             <div className="forward-guide-card">
               <strong>怎么使用</strong>
-              <p>XSH 在本机打开一个随机端口，经 SSH 隧道连到服务器上的 VNC/RDP 服务，再启动本机查看器连接这个端口；所有流量都在 SSH 连接内加密传输。</p>
+              <p>XSH 经当前 SSH 连接访问服务器上的 VNC/RDP 服务，桌面直接显示在应用内。</p>
               <code>{`本地 127.0.0.1:随机端口 → SSH → ${targetHost || "127.0.0.1"}:${targetPort.trim() || defaultPort}`}</code>
               <small>{platformHint}</small>
             </div>
@@ -243,7 +246,6 @@ export function RemoteDesktopModal({
             <div className="forward-form-grid">
               <label className="field"><span>远程目标主机（服务器视角）</span><input value={targetHost} onChange={(event) => setTargetHost(event.target.value)} placeholder="127.0.0.1" /></label>
               <label className="field"><span>远程目标端口</span><input type="number" min="1" max="65535" value={targetPort} onChange={(event) => setTargetPort(event.target.value)} placeholder={String(defaultPort)} /><small className="field-help">留空使用默认端口 {defaultPort}</small></label>
-              <label className="field remote-desktop-viewer-field"><span>查看器命令模板（可选）</span><input value={viewerCommand} onChange={(event) => setViewerCommand(event.target.value)} placeholder={kind === "vnc" ? `vncviewer {host}::{port}` : `remmina -c rdp://{host}:{port}`} /><small className="field-help">含空格的路径请用引号包住；{"{host}"} 和 {"{port}"} 会替换为隧道地址</small></label>
             </div>
 
             <div className="forward-profile-options">
@@ -276,11 +278,12 @@ export function RemoteDesktopModal({
                     <small className={`forward-health ${forwardHealth?.status ?? "unknown"}`} title={forwardHealth?.detail}>{forwardHealthLabel(forwardHealth)}</small>
                   </div>
                   <div className="forward-item-actions remote-desktop-running-actions">
-                    <button disabled={busy} onClick={() => void reopenViewer()} title="重新打开查看器"><Play size={13} /></button>
+                    <button disabled={busy} onClick={() => void reopenViewer()} title="重新连接桌面"><Play size={13} /></button>
                     <button disabled={busy} onClick={() => void stop()} title="停止隧道"><Trash2 size={13} /></button>
                   </div>
                 </div>}
           </section>
+          {desktop && <EmbeddedDesktop profile={desktop.profile} host={desktop.host} port={desktop.port} connectionId={connectionId} onClose={() => setDesktop(null)} />}
         </div>
         <footer className="modal-footer"><button className="secondary-button" onClick={requestClose}><Check size={14} />完成</button></footer>
       </section>

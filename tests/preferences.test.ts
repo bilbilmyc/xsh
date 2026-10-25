@@ -8,7 +8,7 @@ import {
   savePreferences,
   toSftpTransferPolicy,
 } from "../apps/desktop/src/preferences.ts";
-import { getTheme, getThemeTokens, THEME_IDS } from "../apps/desktop/src/themes.ts";
+import { getTheme, getThemeTokens, TERMINAL_THEMES, THEME_IDS } from "../apps/desktop/src/themes.ts";
 
 afterEach(() => {
   delete (globalThis as { document?: unknown }).document;
@@ -147,6 +147,38 @@ test("all old and new theme IDs survive preference persistence", () => {
   });
   assert.equal(loadPreferences().theme, defaultPreferences.theme);
   assert.equal(loadPreferences().accent, defaultPreferences.accent);
+});
+
+test("terminal color preferences survive reload and invalid values follow the app", () => {
+  installDocument();
+  (globalThis as { localStorage?: unknown }).localStorage = createStorage();
+  for (const terminalTheme of ["xsh-dark", ...TERMINAL_THEMES.map((theme) => theme.value)] as const) {
+    savePreferences({ ...defaultPreferences, theme: "ivory", terminalTheme });
+    const loaded = loadPreferences();
+    assert.equal(loaded.terminalTheme, terminalTheme);
+    assert.equal(loaded.theme, "ivory");
+  }
+  localStorage.setItem("xsh.preferences.v1", JSON.stringify({ terminalTheme: "removed-color" }));
+  assert.equal(loadPreferences().terminalTheme, "xsh-dark");
+  localStorage.setItem("xsh.preferences.v1", JSON.stringify({ theme: "graphite" }));
+  assert.equal(loadPreferences().terminalTheme, "xsh-dark");
+});
+
+test("saving explicit terminal fonts and weights does not trigger legacy migrations on reload", () => {
+  installDocument();
+  (globalThis as { localStorage?: unknown }).localStorage = createStorage();
+  for (const terminalFontFamily of [
+    '"Monaco", "SFMono-Regular", Menlo, Consolas, monospace',
+    '"Custom Mono", Consolas, monospace',
+  ]) {
+    for (const [terminalFontWeight, terminalFontWeightBold] of [[300, 600], [400, 700], [700, 900]]) {
+      savePreferences({ ...defaultPreferences, terminalFontFamily, terminalFontWeight, terminalFontWeightBold });
+      const loaded = loadPreferences();
+      assert.equal(loaded.terminalFontFamily, terminalFontFamily);
+      assert.equal(loaded.terminalFontWeight, terminalFontWeight);
+      assert.equal(loaded.terminalFontWeightBold, terminalFontWeightBold);
+    }
+  }
 });
 
 test("extended themes apply complete palette tokens and clear them when returning to a classic theme", () => {

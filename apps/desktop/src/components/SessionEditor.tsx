@@ -4,6 +4,8 @@ import { BellRing, ChevronDown, FolderOpen, Keyboard, KeyRound, Monitor, Plus, S
 import { api } from "../api";
 import { rollbackUncommittedCredentials } from "../credential-lifecycle";
 import { confirmDialog } from "./DialogHost";
+import { TERMINAL_THEMES } from "../themes";
+import { TerminalFontPicker } from "./TerminalFontPicker";
 import {
   defaultTerminalProfile,
   remoteDesktopDefaultPort,
@@ -155,9 +157,6 @@ export function SessionEditor({
   );
   const [remoteDesktopTargetPort, setRemoteDesktopTargetPort] = useState(
     session?.remoteDesktop?.targetPort == null ? "" : String(session.remoteDesktop.targetPort),
-  );
-  const [remoteDesktopViewerCommand, setRemoteDesktopViewerCommand] = useState(
-    session?.remoteDesktop?.viewerCommand ?? "",
   );
   const [remoteDesktopUsername, setRemoteDesktopUsername] = useState(
     session?.remoteDesktop?.username ?? "",
@@ -425,10 +424,6 @@ export function SessionEditor({
         if (parsedRdPort !== null && (!Number.isInteger(parsedRdPort) || parsedRdPort < 1 || parsedRdPort > 65535)) {
           throw new Error("远程桌面目标端口必须在 1 到 65535 之间。");
         }
-        const normalizedViewer = remoteDesktopViewerCommand.trim();
-        if (normalizedViewer && !normalizedViewer.includes("{port}")) {
-          throw new Error("远程桌面查看器命令必须包含 {port} 占位符，例如 vncviewer {host}::{port}。");
-        }
         let remoteCredentialRef = isLocalCredentialRef(session?.remoteDesktop?.credentialRef)
           ? session!.remoteDesktop!.credentialRef
           : null;
@@ -450,7 +445,7 @@ export function SessionEditor({
           launchViewer: isRemoteDesktop && remoteDesktopTransport === "sshTunnel"
             ? true
             : remoteDesktopLaunchViewer,
-          viewerCommand: normalizedViewer || null,
+          viewerCommand: null,
           username: remoteDesktopUsername.trim() || null,
           credentialRef: remoteCredentialRef,
           forwardProfileId: session?.remoteDesktop?.forwardProfileId ?? crypto.randomUUID(),
@@ -617,19 +612,18 @@ export function SessionEditor({
                   <label className="field"><span>远程目标端口</span><input type="number" min="1" max="65535" value={remoteDesktopTargetPort} onChange={(e) => setRemoteDesktopTargetPort(e.target.value)} placeholder={`默认 ${remoteDesktopDefaultPort(remoteDesktopKind)}`} /></label>
                   <label className="field"><span>登录用户（可选）</span><input value={remoteDesktopUsername} onChange={(e) => setRemoteDesktopUsername(e.target.value)} placeholder={remoteDesktopKind === "rdp" ? "administrator 或 DOMAIN\\user" : "多数 VNC 服务器无需用户名"} /></label>
                   <label className={`field${isRemoteDesktop ? "" : " field-span-2"}`}><span>登录密码（可选） {remoteDesktopPasswordSaved && <em className="credential-saved-badge">•••••••• 已保存</em>}</span><input type="password" value={remoteDesktopPassword} onChange={(e) => setRemoteDesktopPassword(e.target.value)} placeholder={remoteDesktopPasswordSaved ? "留空保持已保存的密码" : "保存在 XSH 本地加密库"} autoComplete="new-password" /></label>
-                  <label className="field field-span-2"><span>外部查看器命令模板（可选）</span><input value={remoteDesktopViewerCommand} onChange={(e) => setRemoteDesktopViewerCommand(e.target.value)} placeholder={remoteDesktopKind === "vnc" ? "vncviewer {host}::{port}" : "remmina -c rdp://{host}:{port}"} spellCheck={false} /></label>
                 </div>
                 <p className="field-help">
                   {isRemoteDesktop
                     ? remoteDesktopTransport === "direct"
-                      ? "直连：在应用内直接连接目标地址，不经过 SSH。登录信息保存在本地加密凭据库，VNC 桌面在应用内打开；填写外部查看器模板后将改用外部程序。"
-                      : "SSH 加密隧道：流量经 SSH 服务器加密转发，适合桌面不在公网或需要加密的场景。登录信息保存在本地加密凭据库；RDP 使用系统远程桌面并自动填入登录信息。"
-                    : "登录信息保存在本地加密凭据库；留空时 VNC 在应用内打开，RDP 使用系统远程桌面。也可以连接后在工具栏点“远程”随时启动。"}
+                      ? "直连：VNC 和 RDP 均在 XSH 内连接目标桌面，不经过 SSH。登录信息保存在本地加密凭据库。"
+                      : "SSH 加密隧道：流量经 SSH 服务器加密转发，VNC 和 RDP 桌面均在 XSH 内打开。"
+                    : "VNC 和 RDP 均使用内置客户端。登录信息保存在本地加密凭据库，也可在连接时输入。"}
                 </p>
                 {!isRemoteDesktop && (
                   <div className="check-row">
                     <label><input type="checkbox" checked={remoteDesktopAutoStart} onChange={(e) => setRemoteDesktopAutoStart(e.target.checked)} />连接成功后自动启动隧道</label>
-                    <label><input type="checkbox" checked={remoteDesktopLaunchViewer} onChange={(e) => setRemoteDesktopLaunchViewer(e.target.checked)} disabled={!remoteDesktopAutoStart} />自动启动时同时打开查看器</label>
+                    <label><input type="checkbox" checked={remoteDesktopLaunchViewer} onChange={(e) => setRemoteDesktopLaunchViewer(e.target.checked)} disabled={!remoteDesktopAutoStart} />自动启动时连接内置桌面</label>
                   </div>
                 )}
               </>}
@@ -717,8 +711,8 @@ export function SessionEditor({
                 <label className="field"><span>编码</span><select value={encoding} onChange={(e) => setEncoding(e.target.value)}><option value="utf-8">UTF-8</option><option value="gbk">GBK</option><option value="gb18030">GB18030</option></select></label>
                 <label className="field"><span>回滚行数</span><input inputMode="numeric" list="xsh-scrollback-presets" value={scrollbackLines} onChange={(e) => setScrollbackLines(e.target.value)} /><small className="field-help">支持 100 到 1,000,000 行；是否生效由全局“优先使用会话设置”控制。</small></label>
                 <label className="field"><span>字体大小</span><input inputMode="decimal" value={terminalFontSize} onChange={(e) => setTerminalFontSize(e.target.value)} /><small className="field-help">留空字体名称则跟随全局设置。</small></label>
-                <label className="field field-span-2"><span>字体名称（可选）</span><input value={terminalFontFamily} onChange={(e) => setTerminalFontFamily(e.target.value)} placeholder="留空使用全局字体，例如 Menlo, JetBrains Mono" /></label>
-                <label className="field"><span>终端主题</span><select value={terminalTheme} onChange={(e) => setTerminalTheme(e.target.value)}><option value="xsh-dark">跟随全局主题</option><option value="xsh-blue">深蓝</option><option value="xsh-green">绿幕</option></select></label>
+                <TerminalFontPicker className="field-span-2" value={terminalFontFamily} onChange={setTerminalFontFamily} allowInherit />
+                <label className="field"><span>终端配色</span><select value={TERMINAL_THEMES.some((theme) => theme.value === terminalTheme) ? terminalTheme : "xsh-dark"} onChange={(e) => setTerminalTheme(e.target.value)}><option value="xsh-dark">跟随全局终端配色</option>{TERMINAL_THEMES.map((theme) => <option key={theme.value} value={theme.value}>{theme.label}</option>)}</select></label>
                 <datalist id="xsh-scrollback-presets"><option value="10000" /><option value="50000" /><option value="100000" /><option value="250000" /><option value="500000" /><option value="1000000" /></datalist>
               </div>
             </details>

@@ -52,6 +52,9 @@ jobs:
           dmg_path="$(find target/release/bundle/dmg -name "*.dmg" -print -quit)"
           test -d "$app_path"
           test -n "$dmg_path"
+          test -f "$app_path/Contents/Frameworks/libxsh-rdp-native.dylib"
+          executable=$(/usr/libexec/PlistBuddy -c "Print CFBundleExecutable" "$app_path/Contents/Info.plist")
+          otool -L "$app_path/Contents/MacOS/$executable" | grep '@rpath/libxsh-rdp-native.dylib'
           codesign --verify --deep --strict "$app_path"
 
       - name: Upload macOS artifact
@@ -88,7 +91,13 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build Windows installers
-        run: pnpm --filter desktop exec tauri build --bundles nsis,msi
+        shell: pwsh
+        run: |
+          . ./scripts/check-native-rdp-tools.ps1
+          pnpm --filter desktop exec tauri build --bundles 'nsis,msi'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path target/release/xsh-rdp-native.dll)) { throw "Missing bundled RDP library" }
+          ./scripts/verify-bundled-rdp.ps1
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4

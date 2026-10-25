@@ -1,5 +1,6 @@
 import type { SftpTransferPolicy } from "./types";
-import { getTheme, getThemeTokens, isAppTheme, type AppTheme } from "./themes.ts";
+import { getTheme, getThemeTokens, isAppTheme, isTerminalTheme, type AppTheme, type TerminalTheme } from "./themes.ts";
+import { DEFAULT_TERMINAL_FONT_FAMILY } from "./terminal-fonts.ts";
 
 export type { AppTheme } from "./themes.ts";
 export type AccentColor = "cyan" | "blue" | "green" | "orange" | "purple";
@@ -11,6 +12,7 @@ export interface AppPreferences {
   accent: AccentColor;
   uiFontFamily: string;
   uiFontSize: number;
+  terminalTheme: TerminalTheme;
   terminalFontFamily: string;
   terminalFontSize: number;
   terminalLineHeight: number;
@@ -53,7 +55,8 @@ export const defaultPreferences: AppPreferences = {
   accent: "cyan",
   uiFontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "PingFang SC", "Microsoft YaHei", sans-serif',
   uiFontSize: 14,
-  terminalFontFamily: '"Cascadia Mono", "Cascadia Code", "SFMono-Regular", "SF Mono", Menlo, Consolas, "Courier New", monospace',
+  terminalTheme: "xsh-dark",
+  terminalFontFamily: DEFAULT_TERMINAL_FONT_FAMILY,
   terminalFontSize: 15,
   terminalLineHeight: 1.22,
   terminalFontWeight: 400,
@@ -91,8 +94,11 @@ export function loadPreferences(): AppPreferences {
       && parsed.terminalLineHeight === 1
       && (parsed.terminalFontWeight === undefined || parsed.terminalFontWeight === defaultPreferences.terminalFontWeight)
       && (parsed.terminalFontWeightBold === undefined || parsed.terminalFontWeightBold === defaultPreferences.terminalFontWeightBold);
-    if (parsed.terminalFontFamily === LEGACY_DEFAULT_TERMINAL_FONT_FAMILY
-      || parsed.terminalFontFamily === LEGACY_MONACO_DEFAULT_TERMINAL_FONT_FAMILY) {
+    // New saves include terminalTheme, so explicit font/weight choices must
+    // never be mistaken for untouched defaults from older releases.
+    const legacyTerminalAppearance = parsed.terminalTheme === undefined;
+    if (legacyTerminalAppearance && (parsed.terminalFontFamily === LEGACY_DEFAULT_TERMINAL_FONT_FAMILY
+      || parsed.terminalFontFamily === LEGACY_MONACO_DEFAULT_TERMINAL_FONT_FAMILY)) {
       merged.terminalFontFamily = defaultPreferences.terminalFontFamily;
     }
     if (parsed.terminalLineHeight === LEGACY_DEFAULT_TERMINAL_LINE_HEIGHT) {
@@ -101,9 +107,9 @@ export function loadPreferences(): AppPreferences {
     // v1 shipped a dense 14px/1.22 terminal before the readability defaults
     // were introduced. Migrate only that untouched legacy combination; a user
     // who has already edited terminal typography keeps their explicit choice.
-    if ((!hasFontWeightPreferences && hasLegacyTerminalDefaults
+    if (legacyTerminalAppearance && ((!hasFontWeightPreferences && hasLegacyTerminalDefaults
       && parsed.terminalFontSize === LEGACY_DEFAULT_TERMINAL_FONT_SIZE)
-      || hasDenseReadabilityDefaults) {
+      || hasDenseReadabilityDefaults)) {
       merged.terminalFontSize = defaultPreferences.terminalFontSize;
       merged.terminalLineHeight = defaultPreferences.terminalLineHeight;
     }
@@ -112,7 +118,7 @@ export function loadPreferences(): AppPreferences {
     if (parsed.uiFontSize === LEGACY_DEFAULT_UI_FONT_SIZE) {
       merged.uiFontSize = defaultPreferences.uiFontSize;
     }
-    if (parsed.terminalFontWeightBold === LEGACY_DEFAULT_TERMINAL_FONT_WEIGHT_BOLD
+    if (legacyTerminalAppearance && parsed.terminalFontWeightBold === LEGACY_DEFAULT_TERMINAL_FONT_WEIGHT_BOLD
       && (parsed.terminalFontWeight === undefined
         || parsed.terminalFontWeight === defaultPreferences.terminalFontWeight)) {
       merged.terminalFontWeightBold = defaultPreferences.terminalFontWeightBold;
@@ -161,6 +167,7 @@ export function normalizePreferences(preferences: AppPreferences): AppPreference
   return {
     ...preferences,
     theme: isAppTheme(preferences.theme) ? preferences.theme : defaultPreferences.theme,
+    terminalTheme: isTerminalTheme(preferences.terminalTheme) ? preferences.terminalTheme : defaultPreferences.terminalTheme,
     accent: ["cyan", "blue", "green", "orange", "purple"].includes(preferences.accent) ? preferences.accent : defaultPreferences.accent,
     uiFontSize: clamp(Number(preferences.uiFontSize), UI_FONT_MIN, UI_FONT_MAX, defaultPreferences.uiFontSize),
     terminalFontSize: clamp(Number(preferences.terminalFontSize), TERMINAL_FONT_MIN, TERMINAL_FONT_MAX, defaultPreferences.terminalFontSize),
