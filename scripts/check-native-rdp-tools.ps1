@@ -11,10 +11,13 @@ if (-not $env:XSH_OPENSSL_ROOT) {
   if (Test-Path -LiteralPath "$StrawberryRoot\perl\bin\perl.exe") {
     $env:PATH = "$StrawberryRoot\perl\bin;$StrawberryRoot\c\bin;$env:PATH"
   }
-  if (-not (Get-Command perl.exe -ErrorAction SilentlyContinue)) {
+  $NativePerlCommand = Get-Command perl.exe -ErrorAction SilentlyContinue
+  if (-not $NativePerlCommand) {
     throw '构建内置 RDP 的 OpenSSL 需要 Strawberry Perl。安装后重新打开终端。'
   }
-  $PerlPlatform = (& perl.exe -e 'print $^O').Trim()
+  # Carry the checked executable across shells; Git Bash changes PATH ordering.
+  $env:PERL = $NativePerlCommand.Source
+  $PerlPlatform = (& $env:PERL -e 'print $^O').Trim()
   if ($LASTEXITCODE -ne 0 -or $PerlPlatform -ne 'MSWin32') {
     throw '请使用 Windows 原生 Strawberry Perl（MSWin32），不要使用 Git Bash/MSYS Perl 构建 OpenSSL。'
   }

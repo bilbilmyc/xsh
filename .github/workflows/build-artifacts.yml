@@ -67,7 +67,8 @@ jobs:
 
   windows:
     name: Build Windows installers
-    runs-on: windows-latest
+    # Keep the MSVC generator compatible with the image's CMake version.
+    runs-on: windows-2022
     steps:
       - name: Checkout
         uses: actions/checkout@v4

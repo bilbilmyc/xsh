@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        os: [macos-latest, windows-2022]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
@@ -53,6 +53,8 @@ jobs:
           . ./scripts/check-native-rdp-tools.ps1
           "C:\Strawberry\perl\bin" >> $env:GITHUB_PATH
           "C:\Strawberry\c\bin" >> $env:GITHUB_PATH
+          # Git Bash prepends its own Perl; OpenSSL needs the native executable.
+          "PERL=$env:PERL" >> $env:GITHUB_ENV
 
       - name: Check native RDP tools (macOS)
         if: runner.os == 'macOS'
