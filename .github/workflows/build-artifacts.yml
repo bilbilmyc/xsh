@@ -94,9 +94,8 @@ jobs:
       - name: Build Windows installers
         shell: pwsh
         run: |
-          . ./scripts/check-native-rdp-tools.ps1
-          pnpm --filter desktop exec tauri build --bundles 'nsis,msi'
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Share the local build's native tools and prebuilt NASM settings.
+          ./scripts/build-windows.ps1 -SkipInstall
           if (-not (Test-Path target/release/xsh-rdp-native.dll)) { throw "Missing bundled RDP library" }
           ./scripts/verify-bundled-rdp.ps1
 
