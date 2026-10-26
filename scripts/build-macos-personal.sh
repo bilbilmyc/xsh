@@ -48,6 +48,8 @@ if [[ -z "$DMG_PATH" || ! -f "$DMG_PATH" ]]; then
   exit 1
 fi
 
+bash "$ROOT_DIR/scripts/verify-macos-bundle.sh" "$DMG_PATH"
+
 echo
 echo "个人免费构建完成："
 echo "  $APP_PATH"

@@ -82,7 +82,7 @@ pnpm run icons:macos
 
 Shell 集成通过 OSC 7 报告目录，不从日志或任意输出猜测路径。「跟随终端」只使用当前连接报告的目录；重连后等待新的报告。目录终端按钮在当前终端发送经过确认、正确引用路径的 Bash/Zsh `cd` 命令。目录偏好存于本机 WebView 存储，不作为 AI 持久记忆。
 
-当前正式版为 **v0.2.1**，新增应用内检查、下载和安装更新，功能说明见 [更新记录](../../CHANGELOG.md)。v0.2.0 的本地编译和覆盖安装见 [正式版验收记录](../../docs/local-build-validation-0.2.0-2026-10-25.md)。内置 VNC / RDP 的构建、协议及真实 Windows 虚拟机验证见 [远程桌面验收记录](../../docs/local-build-validation-remote-desktop-2026-10-25.md)；此前 0.1.24 的验证见 [历史验收记录](../../docs/local-build-validation-0.1.24-2026-10-23.md)。
+当前正式版为 **v0.2.2**，修复 macOS 启动时意外依赖 Homebrew 动态库的问题，并保留应用内检查、下载和安装更新，功能说明见 [更新记录](../../CHANGELOG.md)。v0.2.0 的本地编译和覆盖安装见 [正式版验收记录](../../docs/local-build-validation-0.2.0-2026-10-25.md)。内置 VNC / RDP 的构建、协议及真实 Windows 虚拟机验证见 [远程桌面验收记录](../../docs/local-build-validation-remote-desktop-2026-10-25.md)；此前 0.1.24 的验证见 [历史验收记录](../../docs/local-build-validation-0.1.24-2026-10-23.md)。
 
 ## 约定
 

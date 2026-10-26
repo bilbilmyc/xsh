@@ -25,6 +25,10 @@ set(WITH_SMARTCARD_EMULATE OFF CACHE BOOL "" FORCE)
 set(WITH_PCSC OFF CACHE BOOL "" FORCE)
 set(WITH_PKCS11 OFF CACHE BOOL "" FORCE)
 set(WITH_KRB5 OFF CACHE BOOL "" FORCE)
+# XSH uses the built-in NLA credentials flow. Do not let WinPR discover JSON
+# libraries from the build machine and add an unbundled Homebrew dependency.
+set(WITH_JSON_DISABLED ON CACHE BOOL "" FORCE)
+set(WITH_AAD OFF CACHE BOOL "" FORCE)
 set(WITH_FFMPEG OFF CACHE BOOL "" FORCE)
 set(WITH_SWSCALE OFF CACHE BOOL "" FORCE)
 set(WITH_DSP_FFMPEG OFF CACHE BOOL "" FORCE)

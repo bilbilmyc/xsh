@@ -48,14 +48,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          app_path="target/release/bundle/macos/XSH.app"
           dmg_path="$(find target/release/bundle/dmg -name "*.dmg" -print -quit)"
-          test -d "$app_path"
           test -n "$dmg_path"
-          test -f "$app_path/Contents/Frameworks/libxsh-rdp-native.dylib"
-          executable=$(/usr/libexec/PlistBuddy -c "Print CFBundleExecutable" "$app_path/Contents/Info.plist")
-          otool -L "$app_path/Contents/MacOS/$executable" | grep '@rpath/libxsh-rdp-native.dylib'
-          codesign --verify --deep --strict "$app_path"
+          bash scripts/verify-macos-bundle.sh "$dmg_path"
 
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4

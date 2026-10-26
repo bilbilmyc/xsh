@@ -1085,7 +1085,7 @@ dependencies = [
 
 [[package]]
 name = "desktop"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "chrono",
  "futures",
@@ -7087,7 +7087,7 @@ dependencies = [
 
 [[package]]
 name = "xsh-domain"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "chrono",
  "serde",
@@ -7098,7 +7098,7 @@ dependencies = [
 
 [[package]]
 name = "xsh-rdp"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "cmake",
  "flate2",
@@ -7115,7 +7115,7 @@ dependencies = [
 
 [[package]]
 name = "xsh-security"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",
@@ -7131,7 +7131,7 @@ dependencies = [
 
 [[package]]
 name = "xsh-sftp"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "futures",
@@ -7150,7 +7150,7 @@ dependencies = [
 
 [[package]]
 name = "xsh-ssh"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -7167,7 +7167,7 @@ dependencies = [
 
 [[package]]
 name = "xsh-storage"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "chrono",
  "rusqlite",
