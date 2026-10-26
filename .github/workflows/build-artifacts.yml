@@ -18,7 +18,8 @@ env:
 jobs:
   macos:
     name: Build macOS personal app
-    runs-on: macos-latest
+    # Match macOS 15's library-validation behavior on Apple Silicon.
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v4

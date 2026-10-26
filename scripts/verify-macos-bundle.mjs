@@ -2,6 +2,41 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
+function inspectCodeSignature(bytes, offset, length, file) {
+  if (length < 12 || offset + length > bytes.length) throw new Error(`Invalid code signature: ${file}`);
+  const blob = bytes.subarray(offset, offset + length);
+  const blobLength = blob.readUInt32BE(4);
+  const count = blob.readUInt32BE(8);
+  if (blob.readUInt32BE(0) !== 0xfade0cc0 || blobLength > length || 12 + count * 8 > blobLength) {
+    throw new Error(`Invalid signature superblob: ${file}`);
+  }
+  for (let index = 0; index < count; index++) {
+    const start = blob.readUInt32BE(16 + index * 8);
+    if (start + 8 > blobLength) throw new Error(`Invalid signature slot: ${file}`);
+    const size = blob.readUInt32BE(start + 4);
+    if (size < 8 || start + size > blobLength) throw new Error(`Truncated signature slot: ${file}`);
+    if (blob.readUInt32BE(start) !== 0xfade0c02) continue;
+    if (size < 44) throw new Error(`Truncated CodeDirectory: ${file}`);
+    const version = blob.readUInt32BE(start + 8);
+    const flags = blob.readUInt32BE(start + 12);
+    let teamId = null;
+    if (version >= 0x20200) {
+      if (size < 52) throw new Error(`Truncated CodeDirectory team: ${file}`);
+      const teamOffset = blob.readUInt32BE(start + 48);
+      if (teamOffset) {
+        const teamStart = start + teamOffset;
+        const teamEnd = blob.indexOf(0, teamStart);
+        if (teamOffset < 52 || teamStart >= start + size || teamEnd < teamStart || teamEnd >= start + size) {
+          throw new Error(`Invalid signing Team ID: ${file}`);
+        }
+        teamId = blob.toString("utf8", teamStart, teamEnd) || null;
+      }
+    }
+    return { flags, teamId };
+  }
+  throw new Error(`Code signature has no CodeDirectory: ${file}`);
+}
+
 function inspectMachO(file) {
   const bytes = readFileSync(file);
   if (bytes.length < 32 || bytes.readUInt32LE(0) !== 0xfeedfacf) {
@@ -26,6 +61,10 @@ function inspectMachO(file) {
       }
       const value = bytes.toString("utf8", start, end);
       (command === 0x8000001c ? image.rpaths : image.dependencies).push(value);
+    }
+    if (command === 0x1d) {
+      if (size < 16) throw new Error(`Truncated code signature command: ${file}`);
+      image.signature = inspectCodeSignature(bytes, bytes.readUInt32LE(offset + 8), bytes.readUInt32LE(offset + 12), file);
     }
     offset += size;
   }
@@ -98,8 +137,23 @@ export function verifyMacosBundle(bundlePath) {
     }
   }
   checkLibraries(path.join(contents, "Frameworks"));
+  // codesign --verify checks signature integrity, but not whether dyld's
+  // library validation will permit this executable to load its native library.
+  // Ad-hoc personal builds must leave hardened runtime/library validation off.
+  const validatesLibraries = root.signature && (root.signature.flags & (0x10000 | 0x2000));
+  if (validatesLibraries && (!root.signature.teamId || (root.signature.flags & 2))) {
+    failures.push("Executable enables library validation without a certificate signing Team ID; ad-hoc builds must disable hardened runtime");
+  }
+  for (const image of images.values()) {
+    if (!image.signature) {
+      failures.push(`${path.basename(image.file)} has no embedded code signature`);
+    } else if (validatesLibraries && image !== root
+      && (!image.signature.teamId || (image.signature.flags & 2) || image.signature.teamId !== root.signature.teamId)) {
+      failures.push(`${path.basename(image.file)} has a different Team ID from the executable and cannot pass library validation`);
+    }
+  }
   if (failures.length) throw new Error(failures.join("\n"));
-  return { executable: executableName, images: images.size, cpu: root.cpu };
+  return { executable: executableName, images: images.size, cpu: root.cpu, signature: root.signature };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
@@ -107,6 +161,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
     if (!process.argv[2]) throw new Error("Usage: node scripts/verify-macos-bundle.mjs <XSH.app>");
     const result = verifyMacosBundle(process.argv[2]);
     console.log(`PASS: ${result.executable} and ${result.images - 1} bundled libraries need only macOS system libraries.`);
+    console.log(`PASS: code signing permits the bundled libraries (flags=0x${result.signature.flags.toString(16)}, Team ID=${result.signature.teamId ?? "ad-hoc"}).`);
   } catch (error) {
     console.error(`FAIL: ${error.message}`);
     process.exitCode = 1;

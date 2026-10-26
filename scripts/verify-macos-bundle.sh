@@ -16,12 +16,17 @@ verification_dir="$(mktemp -d "$temporary_root/xsh-macos-verify.XXXXXX")"
 [[ "$verification_dir" == "$temporary_root"/xsh-macos-verify.* ]] || exit 1
 mount_dir="$verification_dir/mounted"
 application_pid=""
+launcher_pid=""
 mounted=0
 
 cleanup() {
   if [[ -n "$application_pid" ]]; then
     kill -TERM "$application_pid" 2>/dev/null || true
     wait "$application_pid" 2>/dev/null || true
+  fi
+  if [[ -n "$launcher_pid" ]]; then
+    kill -TERM "$launcher_pid" 2>/dev/null || true
+    wait "$launcher_pid" 2>/dev/null || true
   fi
   if [[ "$mounted" == 1 ]]; then
     hdiutil detach "$mount_dir" -quiet || true
@@ -57,3 +62,40 @@ for ((attempt = 0; attempt < 10; attempt++)); do
   fi
 done
 echo "PASS: application installed from the DMG stayed running for 10 seconds."
+kill -TERM "$application_pid"
+wait "$application_pid" 2>/dev/null || true
+application_pid=""
+
+# Finder launches applications through LaunchServices. Check that route too;
+# a direct executable launch alone did not catch macOS 15's signing rejection.
+executable_path="$app_path/Contents/MacOS/$executable"
+executable_pattern="$(node -e 'console.log("^" + process.argv[1].replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$")' "$executable_path")"
+env -u DYLD_LIBRARY_PATH -u DYLD_FALLBACK_LIBRARY_PATH \
+  open -n -W "$app_path" >"$verification_dir/launch-services.log" 2>&1 &
+launcher_pid=$!
+for ((attempt = 0; attempt < 10; attempt++)); do
+  sleep 1
+  application_pid="$(pgrep -f "$executable_pattern" | head -n 1 || true)"
+  if [[ -n "$application_pid" ]]; then
+    break
+  fi
+  if ! kill -0 "$launcher_pid" 2>/dev/null; then
+    cat "$verification_dir/launch-services.log"
+    echo "FAIL: LaunchServices could not start the installed macOS app." >&2
+    exit 1
+  fi
+done
+if [[ -z "$application_pid" ]]; then
+  cat "$verification_dir/launch-services.log"
+  echo "FAIL: timed out waiting for the installed macOS app to launch." >&2
+  exit 1
+fi
+for ((attempt = 0; attempt < 10; attempt++)); do
+  sleep 1
+  if ! kill -0 "$application_pid" 2>/dev/null; then
+    cat "$verification_dir/launch-services.log"
+    echo "FAIL: installed macOS app exited after starting through LaunchServices." >&2
+    exit 1
+  fi
+done
+echo "PASS: application installed from the DMG stayed running through LaunchServices for 10 seconds."

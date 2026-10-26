@@ -1,5 +1,10 @@
 # 更新记录
 
+## v0.2.3 — 0.2.3（2026-10-26）
+
+- 修复 macOS 15 启动时的签名校验崩溃：个人 ad-hoc 签名包关闭 hardened runtime，避免没有证书 Team ID 时系统拒绝加载内置 RDP 库。
+- 发版前检查主程序及动态库的签名标志与 Team ID；在 macOS 15 Apple Silicon 上从 DMG 复制安装，分别验证直接启动与 Finder 使用的 LaunchServices 启动。
+
 ## v0.2.2 — 0.2.2（2026-10-26）
 
 - 修复 macOS 安装后启动崩溃：移除内置 RDP 组件对构建机 Homebrew `json-c` 动态库的意外依赖，无需用户另装依赖。
