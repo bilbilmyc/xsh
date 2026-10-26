@@ -504,6 +504,10 @@ function App() {
   const [guideTopic, setGuideTopic] = useState<BeginnerGuideTopic>("connect");
   const [quickCommandsManageRequested, setQuickCommandsManageRequested] = useState(0);
   const openSettings = (section: SettingsSection = "appearance") => { setSettingsInitialSection(section); setSettingsVisible(true); };
+  const openUpdateSettings = () => {
+    openSettings("updates");
+    void import("./app-updates").then(({ checkForUpdates }) => checkForUpdates());
+  };
   const openGuide = (topic: BeginnerGuideTopic = "connect") => { setGuideTopic(topic); setGuideVisible(true); };
   const [sshConfigVisible, setSshConfigVisible] = useState(false);
   const [sshConfigEntries, setSshConfigEntries] = useState<SshConfigEntry[]>([]);
@@ -2031,7 +2035,8 @@ function App() {
         { label: "使用指南…", shortcut: "F1", onClick: () => openGuide() },
         { label: "终端里使用 AI…", onClick: () => openGuide("ai") },
         { label: "首次启动介绍…", onClick: () => setOnboardingVisible(true) },
-        { label: "关于 xsh", separatorBefore: true, onClick: () => setToast("xsh — 本地优先的 SSH 客户端 · SSH2 / SFTP / 端口转发 / VNC / RDP") },
+        { label: "检查更新…", separatorBefore: true, onClick: openUpdateSettings },
+        { label: "关于 xsh", onClick: () => setToast("xsh — 本地优先的 SSH 客户端 · SSH2 / SFTP / 端口转发 / VNC / RDP") },
       ],
     },
   ];
@@ -2370,6 +2375,7 @@ function App() {
 
       <WorkspaceStatusBar
         onOpenTransfers={openTransferManager}
+        onCheckUpdates={openUpdateSettings}
         loading={loading}
         connection={activeTab ? {
           name: getTabLabel(activeTab),

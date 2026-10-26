@@ -98,6 +98,26 @@
   letter-spacing: .02em;
 }
 
+.workspace-status-version {
+  min-height: 24px;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.workspace-status-version:hover {
+  color: var(--text);
+  background: var(--panel-hover);
+}
+
+.workspace-status-version:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .workspace-transfers { display: flex; align-items: center; gap: 8px; }
 .workspace-transfers button { display: inline-flex; align-items: center; gap: 5px; min-height: 24px; padding: 2px 5px; border: 0; border-radius: 3px; color: var(--text); background: transparent; cursor: pointer; font: inherit; }
 .workspace-transfers button:hover { background: var(--panel-hover); }

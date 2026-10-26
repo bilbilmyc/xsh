@@ -1,0 +1,22 @@
+.app-update-settings { display: grid; gap: 18px; }
+.app-update-card { padding: 20px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.app-update-version { display: flex; align-items: baseline; flex-wrap: wrap; gap: 12px; margin-bottom: 20px; }
+.app-update-version strong { font-size: 22px; font-weight: 600; }
+.app-update-version > span, .app-update-hint { color: var(--muted); }
+.app-update-status { display: flex; align-items: center; gap: 9px; line-height: 1.6; }
+.app-update-status svg { flex: none; color: var(--accent); }
+.app-update-details { display: grid; gap: 10px; margin: 18px 0; font-size: var(--font-sm); }
+.app-update-details > div { display: flex; gap: 16px; }
+.app-update-details dt { flex: 0 0 64px; color: var(--muted); }
+.app-update-details dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.app-update-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px; }
+.app-update-actions button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+.app-update-hint { margin: 14px 0 0; font-size: var(--font-xs); line-height: 1.7; }
+.app-update-progress { display: grid; gap: 8px; margin: 18px 0; color: var(--muted); font-size: var(--font-sm); }
+.app-update-progress progress { width: 100%; height: 8px; accent-color: var(--accent); }
+.app-update-error { margin-top: 16px; overflow-wrap: anywhere; }
+.app-update-release-notes h3 { margin: 0 0 12px; font-size: var(--font-md); font-weight: 600; }
+.app-update-release-notes pre { margin: 0; color: var(--text); font: inherit; font-size: var(--font-sm); line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; }
+.app-update-spinner { animation: app-update-spin 1s linear infinite; }
+@keyframes app-update-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .app-update-spinner { animation: none; } }

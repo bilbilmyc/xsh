@@ -117,6 +117,14 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout release notes
+        uses: actions/checkout@v4
+
+      - name: Prepare release notes
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: node scripts/release-notes.mjs "$RELEASE_TAG" release-notes.md
+
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
@@ -128,6 +136,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
+          name: XSH ${{ github.ref_name }}
+          body_path: release-notes.md
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |

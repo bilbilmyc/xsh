@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { open, save as saveFile } from "@tauri-apps/plugin-dialog";
-import { Bot, Check, Copy, Fingerprint, Gauge, Keyboard, Monitor, RotateCcw, Shield, TerminalSquare, Trash2, X } from "lucide-react";
+import { Bot, Check, Copy, Download, Fingerprint, Gauge, Keyboard, Monitor, RotateCcw, Shield, TerminalSquare, Trash2, X } from "lucide-react";
 import { api } from "../api";
 import { confirmDialog, isDialogOpen } from "./DialogHost";
 import { defaultPreferences, type AccentColor, type AppPreferences } from "../preferences";
@@ -8,6 +8,7 @@ import { getThemeTokens, resolveTerminalTheme, terminal256ColorPalette, TERMINAL
 import { TERMINAL_FONT_WEIGHTS } from "../terminal-fonts";
 import { TerminalFontPicker } from "./TerminalFontPicker";
 import { AiServiceSettings } from "./AiServiceSettings";
+import { AppUpdateSettings } from "./AppUpdateSettings";
 import type { KnownHost } from "../types";
 import "./terminal-appearance.css";
 
@@ -19,7 +20,7 @@ interface SettingsModalProps {
   initialSection?: SettingsSection;
 }
 
-export type SettingsSection = "appearance" | "terminal" | "transfer" | "shortcuts" | "security" | "ai";
+export type SettingsSection = "appearance" | "terminal" | "transfer" | "shortcuts" | "security" | "ai" | "updates";
 
 export function SettingsModal({ preferences, onSave, onClose, onToast, initialSection = "appearance" }: SettingsModalProps) {
   const [page, setPage] = useState<SettingsSection>(initialSection);
@@ -219,6 +220,7 @@ export function SettingsModal({ preferences, onSave, onClose, onToast, initialSe
             <button type="button" aria-current={page === "shortcuts" ? "page" : undefined} className={page === "shortcuts" ? "active" : ""} onClick={() => void changePage("shortcuts")}><Keyboard size={15} />快捷键</button>
             <button type="button" aria-current={page === "security" ? "page" : undefined} className={page === "security" ? "active" : ""} onClick={() => void changePage("security")}><Shield size={15} />服务器指纹</button>
             <button type="button" aria-current={page === "ai" ? "page" : undefined} className={page === "ai" ? "active" : ""} onClick={() => void changePage("ai")}><Bot size={15} />AI 服务</button>
+            <button type="button" aria-current={page === "updates" ? "page" : undefined} className={page === "updates" ? "active" : ""} onClick={() => void changePage("updates")}><Download size={15} />应用更新</button>
           </nav>
 
           <div className="settings-body settings-page">
@@ -407,6 +409,7 @@ export function SettingsModal({ preferences, onSave, onClose, onToast, initialSe
             )}
 
             {page === "ai" && <AiServiceSettings onToast={onToast} onDirtyChange={setAiDirty} />}
+            {page === "updates" && <AppUpdateSettings />}
 
             {page === "security" && (
               <>
@@ -436,7 +439,7 @@ export function SettingsModal({ preferences, onSave, onClose, onToast, initialSe
         </div>
 
         <footer className="modal-footer settings-footer">
-          {page === "ai" ? <><span className="settings-ai-save-note">AI 服务请使用页面内的保存按钮。</span><button className="secondary-button" onClick={requestClose}>关闭</button></> : <>
+          {page === "updates" ? <button className="secondary-button" onClick={requestClose}>关闭</button> : page === "ai" ? <><span className="settings-ai-save-note">AI 服务请使用页面内的保存按钮。</span><button className="secondary-button" onClick={requestClose}>关闭</button></> : <>
             <button className="secondary-button reset-button" onClick={() => setDraft(defaultPreferences)}><RotateCcw size={14} />恢复默认</button>
             <button className="secondary-button" onClick={requestClose}>取消</button>
             <button className="primary-button" onClick={save}>保存并应用</button>

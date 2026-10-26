@@ -1,6 +1,7 @@
 mod ai;
 mod remote_desktop;
 mod remote_desktop_bridge;
+mod updates;
 
 #[cfg(test)]
 use chrono::Utc;
@@ -2286,6 +2287,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
+        .manage(updates::UpdateState::default())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
@@ -2342,6 +2344,9 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            updates::check_for_updates,
+            updates::download_update,
+            updates::install_update,
             ai::ai_get_settings,
             ai::ai_save_settings,
             ai::ai_complete,

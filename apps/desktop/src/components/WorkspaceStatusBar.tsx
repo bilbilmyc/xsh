@@ -12,9 +12,10 @@ interface WorkspaceStatusBarProps {
   broadcastCount: number | null;
   workspace: { name: string; finished: number; total: number; omitted: number } | null;
   onOpenTransfers: (filter: TransferFilter) => void;
+  onCheckUpdates: () => void;
 }
 
-export function WorkspaceStatusBar({ loading, connection, openCount, connectedCount, broadcastCount, workspace, onOpenTransfers }: WorkspaceStatusBarProps) {
+export function WorkspaceStatusBar({ loading, connection, openCount, connectedCount, broadcastCount, workspace, onOpenTransfers, onCheckUpdates }: WorkspaceStatusBarProps) {
   const state = loading ? "connecting" : connection?.state ?? "idle";
   const label = loading ? "加载会话" : connection?.label ?? "就绪";
   const progress = workspace
@@ -35,7 +36,7 @@ export function WorkspaceStatusBar({ loading, connection, openCount, connectedCo
         {broadcastCount !== null && <span className="workspace-status-broadcast" title="输入将发送到所有已连接的广播会话"><Radio size={12} />广播 {broadcastCount}</span>}
         {openCount > 0 && <span className="workspace-status-count" title={`已打开 ${openCount} 个标签，其中 ${connectedCount} 个已连接`}>{connectedCount} 已连接<span aria-hidden="true"> / </span>{openCount} 已打开</span>}
         {connection && <span className="workspace-status-protocol">{connection.protocol}</span>}
-        <span className="workspace-status-version" aria-label={`XSH 版本 ${version}`}>v{version}</span>
+        <button type="button" className="workspace-status-version" aria-label={`XSH 版本 ${version}，检查更新`} title="检查更新" onClick={onCheckUpdates}>v{version}</button>
       </div>
     </footer>
   );
