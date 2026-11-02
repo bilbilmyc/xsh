@@ -280,6 +280,153 @@ fn download_request(destination: &Path, total_bytes: u64) -> DownloadFileRequest
 }
 
 #[tokio::test]
+async fn protocol_download_empty_file_creates_destination() {
+    let (session, observations) = connect_read_server(fixture_bytes(0), 1024, None).await;
+    let directory = TestDirectory::new("download-empty-file").await;
+    let destination = directory.join("repository/.git/FETCH_HEAD");
+    let (_control_tx, mut control) = watch::channel(TransferControl::Running);
+    let mut progress = Vec::new();
+
+    let status = tokio::time::timeout(
+        PROTOCOL_TEST_TIMEOUT,
+        download_file(
+            &session,
+            download_request(&destination, 0),
+            &mut control,
+            &mut transfer_run_gate(),
+            |transferred| progress.push(transferred),
+        ),
+    )
+    .await
+    .expect("empty download timed out")
+    .expect("empty download should create the local file");
+
+    assert_eq!(status, TransferStatus::Completed);
+    assert!(tokio::fs::metadata(&destination).await.unwrap().is_file());
+    assert!(tokio::fs::read(&destination).await.unwrap().is_empty());
+    assert_eq!(progress, vec![0]);
+    assert!(observations.lock().unwrap().is_empty());
+    assert!(
+        !tokio::fs::try_exists(download_temporary_path(&destination))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !tokio::fs::try_exists(download_metadata_path(&destination))
+            .await
+            .unwrap()
+    );
+    session.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn protocol_download_empty_file_respects_overwrite_policy() {
+    for overwrite in [false, true] {
+        let (session, _) = connect_read_server(fixture_bytes(0), 1024, None).await;
+        let directory = TestDirectory::new("download-empty-overwrite").await;
+        let destination = directory.join("FETCH_HEAD");
+        tokio::fs::write(&destination, b"existing contents")
+            .await
+            .unwrap();
+        let (_control_tx, mut control) = watch::channel(TransferControl::Running);
+        let request = DownloadFileRequest {
+            overwrite,
+            ..download_request(&destination, 0)
+        };
+
+        let result = tokio::time::timeout(
+            PROTOCOL_TEST_TIMEOUT,
+            download_file(
+                &session,
+                request,
+                &mut control,
+                &mut transfer_run_gate(),
+                |_| {},
+            ),
+        )
+        .await
+        .expect("empty overwrite download timed out");
+
+        if overwrite {
+            assert_eq!(result.unwrap(), TransferStatus::Completed);
+            assert!(tokio::fs::read(&destination).await.unwrap().is_empty());
+        } else {
+            assert!(result.unwrap_err().to_string().contains("already exists"));
+            assert_eq!(
+                tokio::fs::read(&destination).await.unwrap(),
+                b"existing contents"
+            );
+        }
+        assert!(
+            !tokio::fs::try_exists(download_temporary_path(&destination))
+                .await
+                .unwrap()
+        );
+        assert!(
+            !tokio::fs::try_exists(download_metadata_path(&destination))
+                .await
+                .unwrap()
+        );
+        session.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn protocol_download_finalizes_empty_and_complete_checkpoints() {
+    for (bytes, checkpoint_exists) in [(0, false), (0, true), (65_537, true)] {
+        let data = fixture_bytes(bytes);
+        let (session, _) = connect_read_server(Arc::clone(&data), 1024, None).await;
+        let directory = TestDirectory::new("download-complete-checkpoint").await;
+        let destination = directory.join("FETCH_HEAD");
+        let temporary_path = download_temporary_path(&destination);
+        let metadata_path = download_metadata_path(&destination);
+        write_download_resume_metadata(
+            &metadata_path,
+            &DownloadResumeMetadata {
+                version: DOWNLOAD_RESUME_METADATA_VERSION,
+                remote_path: REMOTE_PATH.to_owned(),
+                total_bytes: bytes as u64,
+                modified_at_unix: Some(MODIFIED_AT_UNIX),
+                source_identity: SOURCE_IDENTITY.to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+        if checkpoint_exists {
+            tokio::fs::write(&temporary_path, data.as_slice())
+                .await
+                .unwrap();
+        }
+        let (_control_tx, mut control) = watch::channel(TransferControl::Running);
+        let mut progress = Vec::new();
+
+        let status = tokio::time::timeout(
+            PROTOCOL_TEST_TIMEOUT,
+            download_file(
+                &session,
+                download_request(&destination, bytes as u64),
+                &mut control,
+                &mut transfer_run_gate(),
+                |transferred| progress.push(transferred),
+            ),
+        )
+        .await
+        .expect("checkpoint finalization timed out")
+        .expect("empty and fully downloaded checkpoints should finalize");
+
+        assert_eq!(status, TransferStatus::Completed);
+        assert_eq!(progress, vec![bytes as u64]);
+        assert_eq!(
+            tokio::fs::read(&destination).await.unwrap(),
+            data.as_slice()
+        );
+        assert!(!tokio::fs::try_exists(&temporary_path).await.unwrap());
+        assert!(!tokio::fs::try_exists(&metadata_path).await.unwrap());
+        session.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn protocol_download_reads_each_byte_once() {
     let data = fixture_bytes(4 * 1024 * 1024 + 137);
     let (session, observations) =

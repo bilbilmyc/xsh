@@ -3631,7 +3631,13 @@ async fn download_file(
     }
     progress(transferred);
 
+    let mut local = tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&temporary_path)
+        .await?;
     if transferred == request.total_bytes {
+        drop(local);
         finalize_download(
             &temporary_path,
             &metadata_path,
@@ -3642,11 +3648,6 @@ async fn download_file(
         return Ok(TransferStatus::Completed);
     }
 
-    let mut local = tokio::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&temporary_path)
-        .await?;
     let pipeline = spawn_download_pipeline(
         session,
         request.remote_path,

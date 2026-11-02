@@ -5,6 +5,10 @@
 .transfer-plan-modal .modal-title-wrap p { overflow-wrap: anywhere; }
 .transfer-plan-body { padding: 18px 22px; display: flex; flex-direction: column; gap: 14px; }
 .transfer-plan-body .field { margin: 0; }
+.transfer-plan-destination { width: 100%; min-width: 0; justify-content: flex-start; padding: 0 9px; font-weight: 400; text-align: left; }
+.transfer-plan-destination-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.transfer-plan-destination > svg, .transfer-plan-destination-action { flex-shrink: 0; }
+.transfer-plan-destination-action { color: var(--accent); }
 .transfer-plan-route { border: 1px solid var(--line); border-radius: 6px; padding: 12px; }
 .transfer-plan-route > span { color: var(--muted); font-size: var(--font-xs); }
 .transfer-plan-route ul { max-height: 145px; overflow: auto; padding: 0; margin: 8px 0 0; list-style: none; }
