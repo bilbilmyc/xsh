@@ -48,7 +48,7 @@ python -X utf8 tests/ui-workflows.py
 
 截图与回归结果保存在 Git 忽略的 `output/ux-review/`。最终 NSIS、MSI 包构建成功，本机覆盖安装耗时 1.61 秒、退出码 0；程序已重新打开。数据库、凭据密钥、AI 设置与本次覆盖前的摘要完全一致。安装前额外备份旧程序、Roaming 数据和 Local WebView 数据至 `%LOCALAPPDATA%/XSH-backups/20261103-120318-before-ux-themes/`。
 
-本轮仍使用 v0.2.4 版本号，本地构建包含这次修复与配色；提交代码不会自动发布新的正式版本标签。
+这一阶段使用 v0.2.4 版本号进行本地验证。随后已另行发布 v0.2.5，并在真实应用内安装测试中发现、修复栈溢出；后续发版与复测见 [v0.2.6 更新安装记录](windows-update-stack-overflow-2026-11-03.md)。
 
 | 最终本地产物 | SHA-256 |
 | --- | --- |
