@@ -389,7 +389,8 @@ async fn verify_installer(path: &Path, asset: &ReleaseAsset) -> CommandResult<()
         return Err("安装包已发生变化，请重新检查更新并下载。".into());
     }
     let mut hash = Sha256::new();
-    let mut buffer = [0u8; 65_536];
+    // 堆缓冲避免大数组随 Future 在 IPC 包装层中移动，耗尽 Windows UI 线程栈。
+    let mut buffer = vec![0u8; 65_536];
     loop {
         let size = file
             .read(&mut buffer)
@@ -470,6 +471,18 @@ mod tests {
             ),
             digest: Some(format!("sha256:{}", "ab".repeat(32))),
         }
+    }
+
+    #[test]
+    fn installer_verification_future_fits_the_ui_thread_stack() {
+        let asset = asset("XSH_0.3.0_x64-setup.exe");
+        let verification = verify_installer(Path::new("unused-installer.exe"), &asset);
+        let bytes = std::mem::size_of_val(&verification);
+        // IPC 包装层构造、移动 Future 时也会使用 UI 线程栈；读取缓冲必须放在堆上。
+        assert!(
+            bytes < 8 * 1024,
+            "installer verification future is {bytes} bytes and can overflow the Windows UI thread stack"
+        );
     }
 
     fn release() -> Release {

@@ -82,7 +82,7 @@ pnpm run icons:macos
 
 Shell 集成通过 OSC 7 报告目录，不从日志或任意输出猜测路径。「跟随终端」只使用当前连接报告的目录；重连后等待新的报告。目录终端按钮在当前终端发送经过确认、正确引用路径的 Bash/Zsh `cd` 命令。目录偏好存于本机 WebView 存储，不作为 AI 持久记忆。
 
-当前正式版为 **v0.2.5**，改进 Windows 覆盖升级和安装反馈，修复远程桌面排队、主动断开和取消连接流程，并增加黑白配色。功能说明见 [更新记录](../../CHANGELOG.md)，本轮使用验证见 [验收记录](../../docs/usability-review-2026-11-03.md)。内置 VNC / RDP 的构建、协议及真实 Windows 虚拟机验证见 [远程桌面验收记录](../../docs/local-build-validation-remote-desktop-2026-10-25.md)。
+当前正式版为 **v0.2.6**，修复 Windows 应用内安装更新时的栈溢出，并保留覆盖升级、安装反馈、远程桌面连接流程修复和黑白配色。功能说明见 [更新记录](../../CHANGELOG.md)，本轮使用验证见 [验收记录](../../docs/usability-review-2026-11-03.md)。内置 VNC / RDP 的构建、协议及真实 Windows 虚拟机验证见 [远程桌面验收记录](../../docs/local-build-validation-remote-desktop-2026-10-25.md)。
 
 ## 约定
 
