@@ -416,7 +416,7 @@ export function SettingsModal({ preferences, onSave, onClose, onToast, initialSe
                 <SettingsHeading title="服务器指纹" description={`${knownHosts.length} 条本地信任记录`} />
                 <div className="security-note"><Fingerprint size={15} /><span>首次连接会显示 SHA-256 指纹。指纹变化时 XSH 会阻止连接；删除记录只会让下次连接重新询问。</span></div>
                 {loadingHosts && <div className="panel-message settings-message">正在读取本地信任记录…</div>}
-                {hostError && <div className="panel-error settings-message">读取失败：{hostError}</div>}
+                {hostError && <div className="panel-error settings-message" role="alert"><span>读取失败：{hostError}</span><button type="button" className="secondary-button" disabled={loadingHosts} onClick={() => setHostsLoaded(false)}>重新读取信任记录</button></div>}
                 {!loadingHosts && !hostError && knownHosts.length === 0 && <div className="settings-empty">还没有已信任的服务器。连接并确认指纹后，记录会显示在这里。</div>}
                 <SettingsHeading title="XSH 凭据库备份" description="密码保存在 XSH 自建加密数据库，不使用系统钥匙串。" />
                 <div className="security-note"><Shield size={15} /><span>备份文件使用独立密码加密，只包含 XSH 凭据。不要把 .xshbackup 当作普通会话导出文件分享。</span></div>

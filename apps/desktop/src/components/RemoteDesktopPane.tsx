@@ -35,7 +35,7 @@ export function RemoteDesktopPane({
   ]);
   const isDirect = profile?.transport === "direct";
   const [connectionId, setConnectionId] = useState<string | null>(null);
-  const [currentState, setCurrentState] = useState<string>("connecting");
+  const [currentState, setCurrentState] = useState<string>(connectionEnabled ? "connecting" : "queued");
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [authChallenge, setAuthChallenge] = useState<{ challengeId: string; prompts: Array<{ prompt: string; echo: boolean }> } | null>(null);
   const [authResponses, setAuthResponses] = useState<string[]>([]);
@@ -74,13 +74,9 @@ export function RemoteDesktopPane({
 
   useEffect(() => {
     if (!isDirect) return;
-    reportState("connecting");
+    reportState(connectionEnabled ? "connecting" : "queued");
     connectionChangeRef.current(null);
-    return () => {
-      if (!disposedRef.current) reportState("disconnected");
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isDirect, session.id]);
+  }, [isDirect, session.id, connectionEnabled, reportState]);
 
   useEffect(() => {
     disposedRef.current = false;
@@ -94,7 +90,7 @@ export function RemoteDesktopPane({
   }, [session.id]);
 
   useEffect(() => {
-    if (connectionEnabled || !disposedRef.current) return;
+    if (connectionEnabled || disposedRef.current) return;
     reportState("queued");
   }, [connectionEnabled, reportState]);
 
@@ -141,6 +137,7 @@ export function RemoteDesktopPane({
       if (acknowledgeTimer !== undefined || pendingOutputBytes < 256) return;
       acknowledgeTimer = window.setTimeout(() => {
         acknowledgeTimer = undefined;
+        if (disposedRef.current || generation !== generationRef.current) return;
         const id = connectionIdRef.current;
         const amount = pendingOutputBytes;
         pendingOutputBytes = 0;
@@ -260,7 +257,7 @@ export function RemoteDesktopPane({
   }, [connectionId, refreshForward]);
 
   const openInAppViewer = async () => {
-    if (!profile) return;
+    if (!profile || !connectionEnabledRef.current || disposedRef.current) return;
     const generation = ++desktopGeneration.current;
     setViewerBusy(true);
     setViewerError(null);
@@ -296,6 +293,33 @@ export function RemoteDesktopPane({
     setViewerBusy(false);
     setDesktopState("disconnected");
     if (isDirect) reportState("disconnected");
+  };
+
+  const disconnect = async () => {
+    // 主动断开（也包括取消尚未返回的连接）不得触发自动重连。
+    const generation = ++generationRef.current;
+    reconnectAllowedRef.current = false;
+    if (reconnectTimerRef.current !== undefined) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = undefined;
+    }
+    const id = connectionIdRef.current;
+    connectionIdRef.current = null;
+    connectionChangeRef.current(null);
+    setConnectionId(null);
+    setAuthChallenge(null);
+    setAuthResponses([]);
+    setConnectionError(null);
+    setForward(null);
+    setForwardHealth(null);
+    detachInAppViewer();
+    reportState("disconnected");
+    if (id) {
+      try { await api.disconnectTerminal(id); }
+      catch (caught) {
+        if (!disposedRef.current && generation === generationRef.current) setConnectionError(`断开连接失败：${String(caught)}`);
+      }
+    }
   };
 
   useEffect(() => {
@@ -346,7 +370,8 @@ export function RemoteDesktopPane({
   };
 
   const displayedState = desktopEndpoint ? desktopState : currentState;
-  const stateLabel = stateLabels[displayedState] ?? displayedState;
+  const stateLabel = isDirect && displayedState === "connecting" ? "正在连接远程桌面" : stateLabels[displayedState] ?? displayedState;
+  const canDisconnect = ["connected", "connecting", "reconnecting", "authenticating", "waiting-network"].includes(currentState);
   const defaultPort = profile ? remoteDesktopDefaultPort(profile.kind) : 5900;
   const targetLine = profile
     ? `${profile.kind === "vnc" ? "VNC" : "RDP"} → ${profile.targetHost}:${profile.targetPort ?? defaultPort}`
@@ -367,9 +392,9 @@ export function RemoteDesktopPane({
         </div>
         <div className="rd-pane-actions">
           <button className="icon-button" onClick={() => onEditSession(session)} title="编辑远程桌面配置"><Pencil size={14} /></button>
-          {!isDirect && (currentState === "connected"
-            ? <button className="secondary-button" onClick={() => { if (connectionIdRef.current) void api.disconnectTerminal(connectionIdRef.current).catch(() => undefined); }}><Square size={13} />断开</button>
-            : <button className="secondary-button" onClick={() => void connect()} disabled={currentState === "connecting" || currentState === "reconnecting"}><RefreshCw size={13} />{currentState === "failed" || currentState === "disconnected" ? "重新连接" : "连接"}</button>)}
+          {!isDirect && (canDisconnect
+            ? <button className="secondary-button" onClick={() => void disconnect()}><Square size={13} />{currentState === "connected" ? "断开" : "取消连接"}</button>
+            : <button className="secondary-button" onClick={() => void connect()} disabled={!connectionEnabled}><RefreshCw size={13} />{currentState === "failed" || currentState === "disconnected" ? "重新连接" : "连接"}</button>)}
         </div>
       </header>
 
@@ -401,7 +426,7 @@ export function RemoteDesktopPane({
           {connectionError && <div className="form-error" role="alert">{connectionError}</div>}
           {!authChallenge && !connectionError && (
             <p className="rd-hint">{isDirect
-              ? "点击下方按钮连接内置远程桌面。"
+              ? currentState === "queued" ? stateHints.queued : "点击下方按钮连接内置远程桌面。"
               : stateHints[currentState] ?? ""}</p>
           )}
         </section>
@@ -415,7 +440,7 @@ export function RemoteDesktopPane({
             </div>}
             {viewerError && <div className="form-error" role="alert">{viewerError}</div>}
             <div className="rd-viewer-actions">
-              <button className="primary-button" disabled={viewerBusy || (!isDirect && !connectionId)} onClick={() => void openInAppViewer()}><Monitor size={14} />连接桌面</button>
+              <button className="primary-button" disabled={!connectionEnabled || viewerBusy || (!isDirect && !connectionId)} onClick={() => void openInAppViewer()}><Monitor size={14} />连接桌面</button>
               {!isDirect && forward && <button className="secondary-button" disabled={viewerBusy} onClick={() => void stopTunnel()}>停止隧道</button>}
             </div>
           </section>

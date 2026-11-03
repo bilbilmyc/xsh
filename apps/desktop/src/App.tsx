@@ -28,6 +28,8 @@ import {
   X,
 } from "lucide-react";
 import { api } from "./api";
+import { version } from "../package.json";
+import { consumeUpdateResult } from "./update-result";
 import { executeAiTerminalCommand, executionAiContext, mergeTerminalExecutions, type TerminalExecution } from "./terminal-execution";
 import { directoryCommand } from "./directory-workspace";
 import type { TransferFilter } from "./transfer-queue";
@@ -533,6 +535,10 @@ function App() {
   const [broadcastEnabled, setBroadcastEnabled] = useState(false);
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState<string | null>(null);
+  useEffect(() => {
+    const result = consumeUpdateResult(localStorage, version);
+    if (result) setToast(result);
+  }, []);
   useEffect(() => {
     if (!toast) return;
     const timer = window.setTimeout(() => setToast(null), toast.length > 40 ? 12000 : 6000);

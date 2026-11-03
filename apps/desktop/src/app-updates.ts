@@ -1,5 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { useSyncExternalStore } from "react";
+import { rememberUpdateTarget } from "./update-result";
 
 export interface UpdateInfo {
   currentVersion: string;
@@ -75,8 +76,10 @@ export async function installUpdate() {
   if (snapshot.phase !== "ready") return;
   update({ phase: "installing", error: null });
   try {
+    rememberUpdateTarget(localStorage, snapshot.info?.latestVersion ?? null);
     await invoke<void>("install_update");
   } catch (caught) {
+    rememberUpdateTarget(localStorage, null);
     update({ phase: "ready", error: String(caught) });
   }
 }

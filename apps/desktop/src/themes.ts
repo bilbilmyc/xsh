@@ -1,4 +1,4 @@
-export const THEME_IDS = ["light", "midnight", "graphite", "dusk", "nord", "forest", "sand", "ivory"] as const;
+export const THEME_IDS = ["light", "midnight", "graphite", "dusk", "nord", "forest", "sand", "ivory", "black", "white"] as const;
 export type AppTheme = typeof THEME_IDS[number];
 export type ThemeAccent = "cyan" | "blue" | "green" | "orange" | "purple";
 
@@ -23,7 +23,7 @@ type AnsiColors = readonly [string, string, string, string, string, string, stri
 
 function terminalPalette(background: string, foreground: string, cursor: string, selectionBackground: string, colors: AnsiColors) {
   return {
-    background, foreground, cursor, cursorAccent: background, selectionBackground,
+    background, foreground, cursor, cursorAccent: background, selectionBackground, selectionForeground: foreground,
     black: colors[0], red: colors[1], green: colors[2], yellow: colors[3],
     blue: colors[4], magenta: colors[5], cyan: colors[6], white: colors[7],
     brightBlack: colors[8], brightRed: colors[9], brightGreen: colors[10], brightYellow: colors[11],
@@ -33,6 +33,12 @@ function terminalPalette(background: string, foreground: string, cursor: string,
 
 const LEGACY_DARK_ANSI: AnsiColors = ["#171d24", "#ff5f56", "#39d353", "#f2c94c", "#3d9bff", "#c678dd", "#22c7d6", "#e6edf3", "#8b949e", "#ff7b72", "#56d364", "#f0d264", "#79c0ff", "#d2a8ff", "#56d4dd", "#ffffff"];
 const LIGHT_ANSI: AnsiColors = ["#263746", "#c43d3d", "#167a55", "#946600", "#1769aa", "#7b3fb2", "#087ea4", "#edf2f5", "#71808b", "#a92f36", "#0f6848", "#7d5400", "#125a91", "#642f92", "#05657f", "#15232e"];
+
+// 黑白底色参考经典终端；ANSI 彩色输出仍保留，避免日志丢失语义。
+const BLACK_ANSI: AnsiColors = ["#202020", "#ff6b6b", "#a3d977", "#e6c86e", "#7db7ff", "#d7a0e8", "#7bdde3", "#dddddd", "#989898", "#ff9999", "#c4eea1", "#ffe398", "#a8d0ff", "#e8bff5", "#a4f0f3", "#ffffff"];
+const WHITE_ANSI: AnsiColors = ["#151515", "#a72532", "#12633a", "#785500", "#174f9e", "#753a91", "#11616d", "#d9d9d9", "#606060", "#a11e2d", "#0a5730", "#6a4900", "#10458c", "#65307f", "#0a535f", "#000000"];
+const BLACK_TERMINAL = terminalPalette("#000000", "#e5e5e5", "#ffffff", "#424242", BLACK_ANSI);
+const WHITE_TERMINAL = terminalPalette("#ffffff", "#151515", "#151515", "#cbd9eb", WHITE_ANSI);
 
 export interface ThemeDefinition {
   value: AppTheme;
@@ -85,6 +91,16 @@ export const THEMES: readonly ThemeDefinition[] = [
     colors: { deep: "#e1e9ef", background: "#f7fbfe", panel: "#eaf2f7", raised: "#ffffff", hover: "#dce9f2", active: "#ccdfed", line: "#98adbd", lineSoft: "#c7d7e3", text: "#2e4559", strong: "#193044", muted: "#4d6579", faint: "#536b7d", chrome: "#e5eef5", chromeRaised: "#dfeaf2" },
     terminal: terminalPalette("#f7fbfe", "#2e4559", "#285daa", "#ccdfed", ["#2e4559", "#b13d46", "#286346", "#815c11", "#285daa", "#744596", "#176477", "#dfebf3", "#60788b", "#97313b", "#205637", "#704e0b", "#204c90", "#623781", "#115365", "#193044"]),
   },
+  {
+    value: "black", label: "纯黑", description: "深色 · 经典黑底白字，中性灰工具栏", scheme: "dark", extended: true,
+    colors: { deep: "#000000", background: "#080808", panel: "#121212", raised: "#1a1a1a", hover: "#262626", active: "#333333", line: "#484848", lineSoft: "#2b2b2b", text: "#e5e5e5", strong: "#ffffff", muted: "#b3b3b3", faint: "#a0a0a0", chrome: "#111111", chromeRaised: "#181818" },
+    terminal: BLACK_TERMINAL,
+  },
+  {
+    value: "white", label: "纯白", description: "浅色 · 经典白底黑字，清爽中性灰层次", scheme: "light", extended: true,
+    colors: { deep: "#e6e6e6", background: "#ffffff", panel: "#f5f5f5", raised: "#ffffff", hover: "#e6e6e6", active: "#d9d9d9", line: "#a6a6a6", lineSoft: "#d9d9d9", text: "#262626", strong: "#000000", muted: "#595959", faint: "#646464", chrome: "#f1f1f1", chromeRaised: "#ebebeb" },
+    terminal: WHITE_TERMINAL,
+  },
 ];
 
 const DARK_ACCENTS: Record<ThemeAccent, string> = { cyan: "#8fced7", blue: "#a9c9ef", green: "#b4d59b", orange: "#edbb8e", purple: "#d2b5df" };
@@ -119,6 +135,10 @@ export function getThemeTokens(theme: AppTheme, accent: ThemeAccent = "cyan"): R
 }
 
 export const TERMINAL_THEMES = [
+  { value: "xsh-black-white", label: "黑底白字", palette: BLACK_TERMINAL },
+  { value: "xsh-white-black", label: "白底黑字", palette: WHITE_TERMINAL },
+  { value: "xsh-soft-black", label: "柔灰黑", palette: terminalPalette("#1c1c1c", "#d8dee9", "#dddddd", "#454545", BLACK_ANSI) },
+  { value: "xsh-paper", label: "纸白", palette: terminalPalette("#f7f3e8", "#352f25", "#352f25", "#d8cdb7", WHITE_ANSI) },
   { value: "xsh-black", label: "经典黑", palette: terminalPalette("#000000", "#e6edf3", "#e6edf3", "#264f78", LEGACY_DARK_ANSI) },
   { value: "xsh-midnight", label: "午夜", palette: getTheme("midnight").terminal },
   { value: "xsh-graphite", label: "石墨", palette: getTheme("graphite").terminal },

@@ -13,6 +13,7 @@ export function AppUpdateSettings() {
   const busy = ["checking", "downloading", "installing"].includes(phase);
   const percent = progress ? Math.min(100, Math.floor(progress.downloaded / progress.total * 100)) : 0;
   const installLabel = IS_MACOS ? "退出并打开安装包" : "退出并安装";
+  const automaticInstall = !IS_MACOS && info?.downloadName?.endsWith("-setup.exe");
 
   useEffect(() => {
     if (phase === "idle") void checkForUpdates();
@@ -25,7 +26,7 @@ export function AppUpdateSettings() {
     try {
       if (!await confirmDialog({
         title: IS_MACOS ? "打开更新安装包" : "安装 XSH 更新",
-        message: `XSH 将退出并断开当前连接，请先保存远程编辑内容。${IS_MACOS ? "安装包打开后，将 XSH 拖入「应用程序」替换旧版本。" : "安装程序启动后，按提示完成安装，再重新打开 XSH。"}`,
+        message: `XSH 将退出并断开当前连接，请先保存远程编辑内容。${IS_MACOS ? "安装包打开后，将 XSH 拖入「应用程序」替换旧版本。" : automaticInstall ? "随后显示安装进度，直接覆盖更新，无需先卸载；会话和设置会保留，成功后自动重新打开 XSH。" : "安装程序启动后，按提示完成安装，再重新打开 XSH。"}`,
         confirmLabel: installLabel,
       })) return;
       await installUpdate();
@@ -89,7 +90,7 @@ export function AppUpdateSettings() {
             </button>
           )}
         </div>
-        <p className="app-update-hint">下载期间可继续使用 XSH，关闭设置后下载仍会继续。安装前会提示退出应用。</p>
+        <p className="app-update-hint">下载期间可继续使用 XSH，关闭设置后下载仍会继续。{automaticInstall ? "确认安装后会显示进度，成功后自动重新打开 XSH，无需手动卸载。" : "安装前会提示退出应用。"}</p>
       </div>
       {info?.releaseNotes && (
         <div className="app-update-release-notes">

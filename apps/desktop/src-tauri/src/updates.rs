@@ -3,7 +3,7 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(target_os = "macos")]
 use std::process::Command;
 use std::time::{Duration, Instant};
 use tauri::ipc::Channel;
@@ -12,6 +12,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 
 use crate::CommandResult;
+
+#[cfg(target_os = "windows")]
+#[path = "windows_installer.rs"]
+mod windows_installer;
 
 const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/bilbilmyc/xsh/releases/latest";
 const MAX_INSTALLER_SIZE: u64 = 512 * 1024 * 1024;
@@ -405,13 +409,7 @@ async fn verify_installer(path: &Path, asset: &ReleaseAsset) -> CommandResult<()
 fn launch_installer(path: &Path) -> CommandResult<()> {
     #[cfg(target_os = "windows")]
     {
-        let mut command = if path.extension().is_some_and(|extension| extension == "msi") {
-            let mut command = Command::new("msiexec.exe");
-            command.arg("/i").arg(path);
-            command
-        } else {
-            Command::new(path)
-        };
+        let mut command = windows_installer::command(path);
         command
             .spawn()
             .map_err(|error| format!("无法启动安装程序：{error}"))?;

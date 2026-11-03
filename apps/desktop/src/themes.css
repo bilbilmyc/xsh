@@ -37,6 +37,8 @@
 .theme-choice-title svg { flex: none; color: var(--accent-strong); }
 .theme-choice > small { display: block; margin-top: 4px; color: var(--muted); font-size: var(--font-2xs); line-height: 1.5; }
 .settings-ai-save-note { margin-right: auto; color: var(--muted); font-size: var(--font-xs); }
+.settings-message[role="alert"] { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.settings-message[role="alert"] > button { margin-left: auto; }
 .settings-modal .terminal-font-preview .prompt,
 .settings-modal .terminal-font-preview .success { color: var(--theme-terminal-green); }
 .settings-modal .terminal-font-preview .path { color: var(--theme-terminal-blue); }

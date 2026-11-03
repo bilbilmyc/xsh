@@ -13,14 +13,14 @@ function contrast(first: string, second: string): number {
   return (values[0] + 0.05) / (values[1] + 0.05);
 }
 
-test("all eight themes provide complete semantic tokens and ANSI colors", () => {
-  assert.equal(THEMES.length, 8);
+test("all themes provide complete semantic tokens and ANSI colors", () => {
+  assert.equal(THEMES.length, 10);
   assert.deepEqual(THEMES.map((theme) => theme.value), THEME_IDS);
   const expectedKeys = Object.keys(getThemeTokens("nord")).sort();
   for (const theme of THEMES) {
     assert.deepEqual(Object.keys(getThemeTokens(theme.value)).sort(), expectedKeys, theme.value);
     for (const value of Object.values(getThemeTokens(theme.value))) assert.match(value, /^#[0-9a-f]{6}([0-9a-f]{2})?$/i);
-    assert.equal(Object.keys(theme.terminal).length, 21);
+    assert.equal(Object.keys(theme.terminal).length, 22);
     for (const value of Object.values(theme.terminal)) assert.match(value, /^#[0-9a-f]{6}$/i);
   }
 });
@@ -46,11 +46,11 @@ test("new themes give normal, secondary and accent text AA contrast across their
 
 test("new themes change surfaces and terminal palettes rather than only accent colors", () => {
   const extended = THEMES.filter((theme) => theme.extended);
-  assert.equal(extended.filter((theme) => theme.scheme === "light").length, 2);
-  assert.equal(new Set(extended.map((theme) => theme.colors.background)).size, 4);
-  assert.equal(new Set(extended.map((theme) => theme.colors.chrome)).size, 4);
-  assert.equal(new Set(extended.map((theme) => theme.terminal.selectionBackground)).size, 4);
-  assert.equal(new Set(extended.map((theme) => theme.terminal.green)).size, 4);
+  assert.equal(extended.filter((theme) => theme.scheme === "light").length, 3);
+  assert.equal(new Set(extended.map((theme) => theme.colors.background)).size, extended.length);
+  assert.equal(new Set(extended.map((theme) => theme.colors.chrome)).size, extended.length);
+  assert.equal(new Set(extended.map((theme) => theme.terminal.selectionBackground)).size, extended.length);
+  assert.equal(new Set(extended.map((theme) => theme.terminal.green)).size, extended.length);
 });
 
 test("global terminal themes follow the app while explicit session themes keep priority", () => {
@@ -83,12 +83,13 @@ test("terminal colors follow session, global terminal, then app preferences", ()
 });
 
 test("each terminal background has readable text and a full ANSI palette", () => {
-  assert.equal(TERMINAL_THEMES.length, 12);
-  assert.equal(new Set(TERMINAL_THEMES.map((theme) => theme.palette.background)).size, 12);
+  assert.equal(TERMINAL_THEMES.length, 16);
+  assert.equal(new Set(TERMINAL_THEMES.map((theme) => JSON.stringify(theme.palette))).size, 16);
   const keys = Object.keys(getTheme("midnight").terminal).sort();
   for (const theme of TERMINAL_THEMES) {
     assert.deepEqual(Object.keys(theme.palette).sort(), keys, theme.value);
     assert.ok(contrast(theme.palette.foreground, theme.palette.background) >= 7, `${theme.value} terminal text`);
+    assert.ok(contrast(theme.palette.selectionForeground, theme.palette.selectionBackground) >= 4.5, `${theme.value} selected text`);
   }
 });
 

@@ -1,5 +1,12 @@
 {
   "bundle": {
+    "windows": {
+      "nsis": {
+        "template": "windows/installer.nsi",
+        "languages": ["SimpChinese", "English"],
+        "displayLanguageSelector": false
+      }
+    },
     "resources": {
       "native-runtime/xsh-rdp-native.dll": "xsh-rdp-native.dll"
     }
